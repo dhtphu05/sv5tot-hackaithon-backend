@@ -29,6 +29,11 @@ Default password: `Password@123`
 - `committee@dut.udn.vn`
 - `admin@dut.udn.vn`
 
+## Frontend Integration
+
+Tai lieu ket noi API theo tung domain bat dau tai
+[`docs/frontend-api/README.md`](docs/frontend-api/README.md).
+
 ## Implemented Endpoints
 
 - `GET /health`
