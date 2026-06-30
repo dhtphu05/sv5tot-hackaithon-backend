@@ -1,0 +1,18 @@
+process.env.NODE_ENV = process.env.NODE_ENV ?? 'test';
+process.env.PORT = process.env.PORT ?? '8080';
+process.env.DATABASE_URL =
+  process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5432/sv5tot_test';
+process.env.DEFAULT_SCHOOL_YEAR = process.env.DEFAULT_SCHOOL_YEAR ?? '2025-2026';
+process.env.JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET ?? 'test_access_secret';
+process.env.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET ?? 'test_refresh_secret';
+process.env.JWT_ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN ?? '15m';
+process.env.JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN ?? '7d';
+process.env.BCRYPT_SALT_ROUNDS = process.env.BCRYPT_SALT_ROUNDS ?? '10';
+process.env.SEED_DEFAULT_PASSWORD = process.env.SEED_DEFAULT_PASSWORD ?? 'Password@123';
+process.env.CORS_ORIGIN = process.env.CORS_ORIGIN ?? 'http://localhost:5173';
+process.env.UPLOAD_DIR = process.env.UPLOAD_DIR ?? './uploads';
+process.env.MAX_FILE_SIZE_MB = process.env.MAX_FILE_SIZE_MB ?? '20';
+process.env.STORAGE_DRIVER = process.env.STORAGE_DRIVER ?? 'local';
+process.env.VNPT_MODE = process.env.VNPT_MODE ?? 'mock';
+process.env.SMARTBOT_MODE = process.env.SMARTBOT_MODE ?? 'mock';
+process.env.LOG_LEVEL = process.env.LOG_LEVEL ?? 'silent';

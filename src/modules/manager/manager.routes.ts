@@ -1,0 +1,93 @@
+import { Role } from '@prisma/client';
+import { Router } from 'express';
+import { requireAuth } from '../../middlewares/auth.middleware';
+import { requireRole } from '../../middlewares/require-role.middleware';
+import { validate } from '../../middlewares/validate.middleware';
+import { asyncHandler } from '../../shared/utils/async-handler';
+import {
+  finalizeCollective,
+  getCollectiveAggregation,
+  listManagerCollectives,
+} from '../collective/collective.controller';
+import {
+  finalizeCollectiveSchema,
+  listManagerCollectivesQuerySchema,
+} from '../collective/collective.validation';
+import {
+  assignManagerReviewTask,
+  finalizeApplication,
+  getApplicationAggregation,
+  getManagerWorkloads,
+  listManagerApplications,
+  reopenFinalApplication,
+} from './manager.controller';
+import {
+  assignReviewTaskSchema,
+  finalizeApplicationSchema,
+  listManagerApplicationsQuerySchema,
+  reopenFinalSchema,
+} from './manager.validation';
+
+export const managerRouter = Router();
+
+managerRouter.get(
+  '/collective-profiles',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ query: listManagerCollectivesQuerySchema }),
+  asyncHandler(listManagerCollectives),
+);
+managerRouter.get(
+  '/collective-profiles/:id/aggregation',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  asyncHandler(getCollectiveAggregation),
+);
+managerRouter.post(
+  '/collective-profiles/:id/finalize',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ body: finalizeCollectiveSchema }),
+  asyncHandler(finalizeCollective),
+);
+
+managerRouter.get(
+  '/applications',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ query: listManagerApplicationsQuerySchema }),
+  asyncHandler(listManagerApplications),
+);
+managerRouter.get(
+  '/workloads',
+  requireAuth,
+  requireRole(Role.manager, Role.admin),
+  asyncHandler(getManagerWorkloads),
+);
+managerRouter.post(
+  '/review-tasks/:id/assign',
+  requireAuth,
+  requireRole(Role.manager, Role.admin),
+  validate({ body: assignReviewTaskSchema }),
+  asyncHandler(assignManagerReviewTask),
+);
+managerRouter.get(
+  '/applications/:id/aggregation',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  asyncHandler(getApplicationAggregation),
+);
+managerRouter.post(
+  '/applications/:id/finalize',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ body: finalizeApplicationSchema }),
+  asyncHandler(finalizeApplication),
+);
+managerRouter.post(
+  '/applications/:id/reopen-final',
+  requireAuth,
+  requireRole(Role.committee, Role.admin),
+  validate({ body: reopenFinalSchema }),
+  asyncHandler(reopenFinalApplication),
+);

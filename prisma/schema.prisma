@@ -1,0 +1,694 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  student
+  class_representative
+  officer
+  manager
+  committee
+  admin
+}
+
+enum Criterion {
+  ethics
+  academic
+  physical
+  volunteer
+  integration
+  priority
+  collective
+}
+
+enum Level {
+  school
+  university
+  city
+  central
+}
+
+enum ApplicationType {
+  individual
+  collective
+}
+
+enum ApplicationStatus {
+  not_started
+  draft
+  prechecked
+  ready_to_submit
+  submitted
+  supplement_required
+  under_review
+  resolution_needed
+  completed
+  rejected
+}
+
+enum FinalStatus {
+  pending
+  passed
+  failed
+  partially_passed
+}
+
+enum EvidenceSourceType {
+  metric_input
+  event_import
+  manual_upload
+  collective_import
+}
+
+enum IndexingStatus {
+  not_started
+  uploaded
+  pending_indexing
+  ocr_processing
+  extracting
+  checking_registry
+  indexed
+  failed
+  needs_manual_review
+}
+
+enum EvidenceStatus {
+  draft
+  pending_indexing
+  indexed
+  needs_supplement
+  under_review
+  accepted
+  rejected
+  resolution_needed
+}
+
+enum ReviewTaskStatus {
+  waiting
+  reviewing
+  supplement_required
+  accepted
+  rejected
+  resolution_needed
+}
+
+enum ReviewDecision {
+  accepted
+  rejected
+  supplement_required
+  resolution_needed
+}
+
+enum JobStatus {
+  queued
+  processing
+  completed
+  failed
+}
+
+enum JobType {
+  evidence_ocr
+  event_roster_indexing
+  evidence_card_generation
+  smartreader_extract
+}
+
+enum FileStorageType {
+  local
+  s3
+  r2
+}
+
+enum NotificationType {
+  system
+  deadline
+  supplement_required
+  precheck_completed
+  review_updated
+  result_available
+}
+
+enum ResolutionStatus {
+  open
+  in_review
+  resolved
+  rejected
+}
+
+enum KnowledgeDecision {
+  accepted
+  rejected
+  needs_supplement
+  reference_only
+}
+
+enum MetricType {
+  gpa
+  conduct_score
+  physical_score
+  volunteer_days
+  foreign_language_score
+}
+
+enum VerificationStatus {
+  unverified
+  pending
+  verified
+  rejected
+}
+
+enum EventStatus {
+  draft
+  active
+  archived
+}
+
+enum CollectiveStatus {
+  draft
+  prechecked
+  ready_to_submit
+  submitted
+  supplement_required
+  under_review
+  resolution_needed
+  completed
+  rejected
+}
+
+model User {
+  id                     String                  @id @default(uuid()) @db.Uuid
+  fullName               String
+  email                  String                  @unique
+  passwordHash           String
+  phone                  String?
+  role                   Role                    @default(student)
+  studentCode            String?                 @unique
+  className              String?
+  faculty                String?
+  avatarUrl              String?
+  isActive               Boolean                 @default(true)
+  lastLoginAt            DateTime?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  refreshTokens          RefreshToken[]
+  officerSpecializations OfficerSpecialization[]
+  applications           Application[]
+  uploadedFiles          File[]                  @relation("UploadedFiles")
+  ownedFiles             File[]                  @relation("OwnedFiles")
+  auditLogs              AuditLog[]
+  notifications          Notification[]
+  collectiveProfiles     CollectiveProfile[]
+  assignedReviewTasks    ReviewTask[]
+
+  @@index([role])
+  @@index([faculty])
+  @@index([isActive])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String
+  userAgent String?
+  ipAddress String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model OfficerSpecialization {
+  id           String    @id @default(uuid()) @db.Uuid
+  officerId    String    @db.Uuid
+  criterion    Criterion
+  facultyScope String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  officer      User      @relation(fields: [officerId], references: [id], onDelete: Cascade)
+
+  @@unique([officerId, criterion, facultyScope])
+  @@index([criterion])
+}
+
+model Application {
+  id                  String                     @id @default(uuid()) @db.Uuid
+  studentId           String                     @db.Uuid
+  schoolYear          String
+  applicationType     ApplicationType
+  targetLevel         Level
+  status              ApplicationStatus          @default(draft)
+  readinessScore      Float                      @default(0)
+  currentDraftVersion Int                        @default(1)
+  submittedAt         DateTime?
+  finalLevel          Level?
+  finalStatus         FinalStatus                @default(pending)
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+  student             User                       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  draftSnapshots      ApplicationDraftSnapshot[]
+  metrics             ApplicationMetric[]
+  evidences           Evidence[]
+  precheckResults     PrecheckResult[]
+  cascadeReviews      CascadeReview[]
+  reviewTasks         ReviewTask[]
+  resolutionCases     ResolutionCase[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+
+  @@unique([studentId, schoolYear, applicationType])
+  @@index([status, targetLevel])
+  @@index([studentId, schoolYear])
+}
+
+model ApplicationDraftSnapshot {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @db.Uuid
+  version       Int
+  snapshotJson  Json
+  createdBy     String      @db.Uuid
+  createdAt     DateTime    @default(now())
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, version])
+}
+
+model ApplicationMetric {
+  id                 String             @id @default(uuid()) @db.Uuid
+  applicationId      String             @db.Uuid
+  metricType         MetricType
+  value              Float
+  scale              Float?
+  evidenceFileId     String?            @db.Uuid
+  verificationStatus VerificationStatus @default(unverified)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  application        Application        @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, metricType])
+  @@index([verificationStatus])
+}
+
+model File {
+  id                              String              @id @default(uuid()) @db.Uuid
+  ownerId                         String              @db.Uuid
+  storageType                     FileStorageType
+  filePath                        String
+  publicUrl                       String?
+  originalName                    String
+  mimeType                        String
+  fileSize                        Int
+  uploadedBy                      String              @db.Uuid
+  createdAt                       DateTime            @default(now())
+  owner                           User                @relation("OwnedFiles", fields: [ownerId], references: [id], onDelete: Cascade)
+  uploader                        User                @relation("UploadedFiles", fields: [uploadedBy], references: [id], onDelete: Restrict)
+  evidenceFiles                   EvidenceFile[]
+  eventFiles                      EventFile[]
+  sampleCertificateEvents         EventRegistry[]     @relation("EventSampleCertificate")
+  sampleCertificateKnowledgeItems KnowledgeBaseItem[] @relation("KnowledgeSampleCertificate")
+
+  @@index([ownerId])
+  @@index([uploadedBy])
+}
+
+model Evidence {
+  id                  String               @id @default(uuid()) @db.Uuid
+  applicationId       String?              @db.Uuid
+  collectiveProfileId String?              @db.Uuid
+  evidenceName        String
+  criterion           Criterion
+  sourceType          EvidenceSourceType
+  eventId             String?              @db.Uuid
+  status              EvidenceStatus       @default(draft)
+  indexingStatus      IndexingStatus       @default(not_started)
+  confidence          Float?
+  assignedOfficerId   String?              @db.Uuid
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  application         Application?         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  collectiveProfile   CollectiveProfile?   @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+  event               EventRegistry?       @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  evidenceFiles       EvidenceFile[]
+  evidenceCard        EvidenceCard?
+  reviewTaskEvidences ReviewTaskEvidence[]
+  resolutionCases     ResolutionCase[]
+  collectiveEvidences CollectiveEvidence[]
+
+  @@index([applicationId, criterion])
+  @@index([collectiveProfileId, criterion])
+  @@index([evidenceName])
+  @@index([indexingStatus])
+  @@index([assignedOfficerId])
+}
+
+model EvidenceFile {
+  id         String   @id @default(uuid()) @db.Uuid
+  evidenceId String   @db.Uuid
+  fileId     String   @db.Uuid
+  fileRole   String?
+  evidence   Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+  file       File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@unique([evidenceId, fileId])
+}
+
+model EvidenceCard {
+  id                      String   @id @default(uuid()) @db.Uuid
+  evidenceId              String   @unique @db.Uuid
+  ocrText                 String?
+  extractedFieldsJson     Json?
+  warningsJson            Json?
+  matchedEventId          String?  @db.Uuid
+  matchedKnowledgeItemIds Json?
+  confidence              Float?
+  aiSummary               String?
+  rawAiResponse           Json?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  evidence                Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+}
+
+model EventRegistry {
+  id                      String             @id @default(uuid()) @db.Uuid
+  eventName               String
+  criterion               Criterion
+  organizer               String
+  organizerLevel          Level
+  startDate               DateTime?
+  endDate                 DateTime?
+  convertedValue          Float?
+  convertedUnit           String?
+  eligibleLevelsJson      Json?
+  participantCount        Int                @default(0)
+  rosterIndexed           Boolean            @default(false)
+  sampleCertificateFileId String?            @db.Uuid
+  status                  EventStatus        @default(draft)
+  createdBy               String             @db.Uuid
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  sampleCertificateFile   File?              @relation("EventSampleCertificate", fields: [sampleCertificateFileId], references: [id], onDelete: SetNull)
+  evidences               Evidence[]
+  eventFiles              EventFile[]
+  participants            EventParticipant[]
+
+  @@index([criterion])
+  @@index([status])
+  @@index([eventName])
+}
+
+model EventFile {
+  id                String         @id @default(uuid()) @db.Uuid
+  eventId           String         @db.Uuid
+  fileId            String         @db.Uuid
+  indexingStatus    IndexingStatus @default(uploaded)
+  columnMappingJson Json?
+  indexQualityScore Float?
+  createdAt         DateTime       @default(now())
+  event             EventRegistry  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  file              File           @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, fileId])
+}
+
+model EventParticipant {
+  id                  String        @id @default(uuid()) @db.Uuid
+  eventId             String        @db.Uuid
+  studentCode         String
+  studentName         String
+  className           String?
+  faculty             String?
+  participationStatus String?
+  indexedRow          Int?
+  convertedValue      Float?
+  sourceFileId        String?       @db.Uuid
+  event               EventRegistry @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, studentCode])
+  @@index([studentCode])
+}
+
+model KnowledgeBaseItem {
+  id                      String            @id @default(uuid()) @db.Uuid
+  evidenceName            String?
+  eventName               String?
+  criterion               Criterion
+  level                   Level?
+  decision                KnowledgeDecision
+  reason                  String?
+  sampleCertificateFileId String?           @db.Uuid
+  requiredFieldsJson      Json?
+  commonErrorsJson        Json?
+  usageCount              Int               @default(0)
+  createdBy               String            @db.Uuid
+  createdAt               DateTime          @default(now())
+  updatedAt               DateTime          @updatedAt
+  sampleCertificateFile   File?             @relation("KnowledgeSampleCertificate", fields: [sampleCertificateFileId], references: [id], onDelete: SetNull)
+
+  @@index([criterion, level])
+  @@index([evidenceName])
+  @@index([eventName])
+}
+
+model CriteriaVersion {
+  id            String         @id @default(uuid()) @db.Uuid
+  schoolYear    String
+  unitScope     String
+  level         Level
+  versionName   String
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  rules         CriteriaRule[]
+
+  @@unique([schoolYear, unitScope, level, versionName])
+  @@index([level, isActive])
+}
+
+model CriteriaRule {
+  id                       String          @id @default(uuid()) @db.Uuid
+  criteriaVersionId        String          @db.Uuid
+  criterion                Criterion
+  ruleKey                  String
+  ruleType                 String
+  thresholdJson            Json?
+  evidenceRequirementsJson Json?
+  humanReadableText        String
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+  criteriaVersion          CriteriaVersion @relation(fields: [criteriaVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([criteriaVersionId, ruleKey])
+  @@index([criterion])
+}
+
+model PrecheckResult {
+  id               String      @id @default(uuid()) @db.Uuid
+  applicationId    String      @db.Uuid
+  resultJson       Json
+  readinessScore   Float       @default(0)
+  missingItemsJson Json?
+  nextBestAction   String?
+  createdAt        DateTime    @default(now())
+  application      Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, createdAt])
+}
+
+model CascadeReview {
+  id                        String      @id @default(uuid()) @db.Uuid
+  applicationId             String      @db.Uuid
+  targetLevel               Level
+  suggestedLevel            Level?
+  levelResultsJson          Json
+  humanConfirmationRequired Boolean     @default(true)
+  createdAt                 DateTime    @default(now())
+  application               Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, createdAt])
+}
+
+model ReviewTask {
+  id                  String               @id @default(uuid()) @db.Uuid
+  applicationId       String?              @db.Uuid
+  collectiveProfileId String?              @db.Uuid
+  criterion           Criterion
+  assignedOfficerId   String?              @db.Uuid
+  status              ReviewTaskStatus     @default(waiting)
+  decision            ReviewDecision?
+  officerNote         String?
+  dueDate             DateTime?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  application         Application?         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  collectiveProfile   CollectiveProfile?   @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+  assignedOfficer     User?                @relation(fields: [assignedOfficerId], references: [id], onDelete: SetNull)
+  evidences           ReviewTaskEvidence[]
+
+  @@index([assignedOfficerId, status])
+  @@index([applicationId, criterion])
+  @@index([collectiveProfileId, criterion])
+}
+
+model ReviewTaskEvidence {
+  reviewTaskId String     @db.Uuid
+  evidenceId   String     @db.Uuid
+  reviewTask   ReviewTask @relation(fields: [reviewTaskId], references: [id], onDelete: Cascade)
+  evidence     Evidence   @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@id([reviewTaskId, evidenceId])
+}
+
+model ResolutionCase {
+  id                String           @id @default(uuid()) @db.Uuid
+  applicationId     String           @db.Uuid
+  evidenceId        String?          @db.Uuid
+  reason            String
+  status            ResolutionStatus @default(open)
+  committeeDecision String?
+  createdBy         String           @db.Uuid
+  closedBy          String?          @db.Uuid
+  createdAt         DateTime         @default(now())
+  closedAt          DateTime?
+  application       Application      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  evidence          Evidence?        @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([applicationId])
+}
+
+model IndexingJob {
+  id           String    @id @default(uuid()) @db.Uuid
+  jobType      JobType
+  targetId     String    @db.Uuid
+  status       JobStatus @default(queued)
+  attempts     Int       @default(0)
+  errorMessage String?
+  resultJson   Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([jobType, status])
+  @@index([targetId])
+}
+
+model AuditLog {
+  id                  String             @id @default(uuid()) @db.Uuid
+  actorId             String?            @db.Uuid
+  actorRole           Role?
+  action              String
+  targetType          String
+  targetId            String
+  applicationId       String?            @db.Uuid
+  collectiveProfileId String?            @db.Uuid
+  beforeStateJson     Json?
+  afterStateJson      Json?
+  note                String?
+  createdAt           DateTime           @default(now())
+  actor               User?              @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  application         Application?       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  collectiveProfile   CollectiveProfile? @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+
+  @@index([actorId])
+  @@index([applicationId])
+  @@index([collectiveProfileId])
+  @@index([targetType, targetId])
+}
+
+model Notification {
+  id                  String             @id @default(uuid()) @db.Uuid
+  userId              String             @db.Uuid
+  applicationId       String?            @db.Uuid
+  collectiveProfileId String?            @db.Uuid
+  type                NotificationType
+  title               String
+  message             String
+  readAt              DateTime?
+  createdAt           DateTime           @default(now())
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  application         Application?       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  collectiveProfile   CollectiveProfile? @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([applicationId])
+  @@index([collectiveProfileId])
+}
+
+model CollectiveProfile {
+  id               String                     @id @default(uuid()) @db.Uuid
+  representativeId String                     @db.Uuid
+  className        String
+  schoolYear       String
+  targetLevel      Level
+  status           CollectiveStatus           @default(draft)
+  readinessScore   Float                      @default(0)
+  submittedAt      DateTime?
+  finalLevel       Level?
+  finalStatus      FinalStatus                @default(pending)
+  finalNote        String?
+  completedAt      DateTime?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  representative   User                       @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  members          CollectiveMember[]
+  evidences        CollectiveEvidence[]
+  evidenceRecords  Evidence[]
+  precheckResults  CollectivePrecheckResult[]
+  reviewTasks      ReviewTask[]
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+
+  @@unique([representativeId, schoolYear, className])
+  @@index([status, targetLevel])
+}
+
+model CollectiveMember {
+  id                  String            @id @default(uuid()) @db.Uuid
+  collectiveProfileId String            @db.Uuid
+  studentCode         String
+  studentName         String
+  className           String?
+  faculty             String?
+  participationStatus String?
+  individualSv5tLevel String?
+  violationStatus     String?
+  note                String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  collectiveProfile   CollectiveProfile @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([collectiveProfileId, studentCode])
+}
+
+model CollectiveEvidence {
+  id                  String            @id @default(uuid()) @db.Uuid
+  collectiveProfileId String            @db.Uuid
+  evidenceId          String            @db.Uuid
+  collectiveCriterion String
+  createdAt           DateTime          @default(now())
+  collectiveProfile   CollectiveProfile @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+  evidence            Evidence          @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@unique([collectiveProfileId, evidenceId])
+}
+
+model CollectivePrecheckResult {
+  id                  String            @id @default(uuid()) @db.Uuid
+  collectiveProfileId String            @db.Uuid
+  resultJson          Json
+  readinessScore      Float             @default(0)
+  missingItemsJson    Json?
+  nextBestAction      String?
+  createdAt           DateTime          @default(now())
+  collectiveProfile   CollectiveProfile @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+
+  @@index([collectiveProfileId, createdAt])
+}

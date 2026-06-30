@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+uploads/**
+!uploads/.gitkeep
+!uploads/evidences/.gitkeep
+!uploads/event-rosters/.gitkeep
+!uploads/certificates/.gitkeep
+!uploads/exports/.gitkeep
