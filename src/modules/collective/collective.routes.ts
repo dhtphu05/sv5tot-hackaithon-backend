@@ -40,7 +40,7 @@ import {
 } from './collective.validation';
 
 export const collectiveRouter = Router();
-const viewers = [Role.class_representative, Role.officer, Role.manager, Role.committee, Role.admin];
+const viewers = [Role.class_representative, Role.manager, Role.admin];
 
 collectiveRouter.get(
   '/current',
@@ -128,7 +128,7 @@ collectiveRouter.post(
 collectiveRouter.post(
   '/:id/precheck',
   requireAuth,
-  requireRole(Role.class_representative, Role.manager, Role.committee, Role.admin),
+  requireRole(Role.class_representative, Role.manager, Role.admin),
   validate({ body: collectivePrecheckSchema }),
   asyncHandler(runCollectivePrecheck),
 );

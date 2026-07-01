@@ -36,21 +36,21 @@ reviewRouter.get(
 reviewRouter.post(
   '/tasks/:id/decision',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   validate({ body: taskDecisionSchema }),
   asyncHandler(decideReviewTask),
 );
 reviewRouter.post(
   '/tasks/:id/request-supplement',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   validate({ body: requestSupplementSchema }),
   asyncHandler(requestReviewTaskSupplement),
 );
 reviewRouter.post(
   '/tasks/:id/escalate-resolution',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   validate({ body: escalateResolutionSchema }),
   asyncHandler(escalateReviewTaskResolution),
 );
