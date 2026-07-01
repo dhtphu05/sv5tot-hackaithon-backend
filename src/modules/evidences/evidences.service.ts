@@ -8,7 +8,9 @@ import {
   Role,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-import { LocalStorageService } from '../../infrastructure/storage/local-storage.service';
+import { StorageService } from '../storage/storage.service';
+import { sanitizeFileName } from '../storage/storage.types';
+import { env } from '../../config/env';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -32,7 +34,7 @@ type UploadedEvidenceFile = Express.Multer.File;
 export class EvidencesService {
   constructor(
     private readonly evidencesRepository = new EvidencesRepository(),
-    private readonly storageService = new LocalStorageService(),
+    private readonly storageService = new StorageService(),
     private readonly jobsService = new JobsService(),
   ) {}
 
@@ -126,7 +128,10 @@ export class EvidencesService {
     assertApplicationOwner(evidence.application!, user);
     assertApplicationEditable(evidence.application!);
 
-    const filePaths = evidence.evidenceFiles.map((link) => link.file.filePath);
+    const filesToDelete = evidence.evidenceFiles.map((link) => ({
+      filePath: link.file.filePath,
+      storageType: link.file.storageType,
+    }));
 
     await prisma.$transaction(async (tx) => {
       await tx.evidenceCard.deleteMany({ where: { evidenceId: evidence.id } });
@@ -152,8 +157,8 @@ export class EvidencesService {
       });
     });
 
-    for (const filePath of filePaths) {
-      await this.storageService.deleteFile(filePath);
+    for (const f of filesToDelete) {
+      await this.storageService.deleteObject(f.filePath, f.storageType);
     }
 
     return { deleted: true };
@@ -176,21 +181,47 @@ export class EvidencesService {
       );
     }
 
-    const storedFile = await this.storageService.saveFile({
+    // Validate MIME Type
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'application/pdf'];
+    if (!allowedMimeTypes.includes(file.mimetype)) {
+      throw new AppError(
+        400,
+        ErrorCodes.FILE_TYPE_NOT_ALLOWED,
+        'File type not allowed. Only JPEG, PNG, and PDF are allowed.',
+      );
+    }
+
+    // Validate File Size
+    const maxSizeBytes = env.MAX_FILE_SIZE_MB * 1024 * 1024;
+    if (file.size > maxSizeBytes) {
+      throw new AppError(
+        400,
+        ErrorCodes.FILE_TOO_LARGE,
+        `File is too large. Max allowed size is ${env.MAX_FILE_SIZE_MB}MB.`,
+      );
+    }
+
+    // Generate Structured Object Key
+    const schoolYear = evidence.application?.schoolYear ?? 'unknown-year';
+    const applicationId = evidence.applicationId ?? 'unknown-app';
+    const timestamp = Date.now();
+    const safeOriginalName = sanitizeFileName(file.originalname);
+    const objectKey = `evidence/${schoolYear}/${applicationId}/${evidence.id}/${timestamp}-${safeOriginalName}`;
+
+    // Upload via StorageService
+    await this.storageService.uploadObject({
+      key: objectKey,
       buffer: file.buffer,
-      originalName: file.originalname,
-      mimeType: file.mimetype,
-      applicationId: evidence.applicationId!,
-      evidenceId: evidence.id,
+      contentType: file.mimetype,
     });
 
     const result = await prisma.$transaction(async (tx) => {
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
-          storageType: FileStorageType.local,
-          filePath: storedFile.filePath,
-          publicUrl: storedFile.publicUrl,
+          storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
+          filePath: objectKey,
+          publicUrl: null,
           originalName: file.originalname,
           mimeType: file.mimetype,
           fileSize: file.size,
