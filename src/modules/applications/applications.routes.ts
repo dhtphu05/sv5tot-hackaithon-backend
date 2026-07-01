@@ -28,42 +28,42 @@ export const applicationsRouter = Router();
 applicationsRouter.get(
   '/current',
   requireAuth,
-  requireRole(Role.student, Role.class_representative, Role.admin),
+  requireRole(Role.student),
   validate({ query: getCurrentApplicationQuerySchema }),
   asyncHandler(getCurrentApplication),
 );
 applicationsRouter.post(
   '/current/start',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
+  requireRole(Role.student),
   validate({ body: startApplicationSchema }),
   asyncHandler(startCurrentApplication),
 );
 applicationsRouter.patch(
   '/:id/target-level',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
+  requireRole(Role.student, Role.admin),
   validate({ body: updateTargetLevelSchema }),
   asyncHandler(updateApplicationTargetLevel),
 );
 applicationsRouter.patch(
   '/:id/draft',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
+  requireRole(Role.student, Role.admin),
   validate({ body: autosaveDraftSchema }),
   asyncHandler(autosaveApplicationDraft),
 );
 applicationsRouter.get(
   '/:id/timeline',
   requireAuth,
-  requireRole(Role.student, Role.class_representative, Role.admin),
+  requireRole(Role.student, Role.admin),
   validate({ query: timelineQuerySchema }),
   asyncHandler(getApplicationTimeline),
 );
 applicationsRouter.post(
   '/:id/submit',
   requireAuth,
-  requireRole(Role.student, Role.class_representative, Role.admin),
+  requireRole(Role.student, Role.admin),
   validate({ body: submitApplicationSchema }),
   asyncHandler(submitApplication),
 );

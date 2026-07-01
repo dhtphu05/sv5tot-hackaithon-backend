@@ -27,6 +27,14 @@ const demoUsers: SeedUser[] = [
     faculty: 'Khoa Công nghệ Thông tin',
   },
   {
+    email: 'student2@dut.udn.vn',
+    role: Role.student,
+    fullName: 'Demo Student 02',
+    studentCode: '102220003',
+    className: '22T_DT1',
+    faculty: 'Khoa Cong nghe Thong tin',
+  },
+  {
     email: 'classrep@dut.udn.vn',
     role: Role.class_representative,
     fullName: 'Trần Lớp Trưởng',
