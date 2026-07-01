@@ -31,12 +31,31 @@ const envSchema = z.object({
     .pipe(z.array(z.string().url()).min(1)),
   UPLOAD_DIR: z.string().min(1).default('./uploads'),
   MAX_FILE_SIZE_MB: z.coerce.number().int().positive().default(20),
-  STORAGE_DRIVER: z.enum(['local']).default('local'),
+  STORAGE_DRIVER: z.enum(['local', 'r2']).default('local'),
+  R2_BUCKET_NAME: z.string().optional(),
+  R2_ACCOUNT_ID: z.string().optional(),
+  R2_ENDPOINT: z.string().optional(),
+  R2_ACCESS_KEY_ID: z.string().optional(),
+  R2_SECRET_ACCESS_KEY: z.string().optional(),
   VNPT_MODE: z.enum(['mock', 'live']).default('mock'),
   VNPT_BASE_URL: z.string().optional().default(''),
   VNPT_API_KEY: z.string().optional().default(''),
   SMARTBOT_MODE: z.enum(['mock', 'live']).default('mock'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+}).refine((data) => {
+  if (data.STORAGE_DRIVER === 'r2') {
+    return (
+      !!data.R2_BUCKET_NAME &&
+      !!data.R2_ACCOUNT_ID &&
+      !!data.R2_ENDPOINT &&
+      !!data.R2_ACCESS_KEY_ID &&
+      !!data.R2_SECRET_ACCESS_KEY
+    );
+  }
+  return true;
+}, {
+  message: 'R2 configurations (R2_BUCKET_NAME, R2_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY) are required when STORAGE_DRIVER is set to "r2"',
+  path: ['STORAGE_DRIVER'],
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

@@ -5,6 +5,7 @@ import type { ListEvidencesQuery } from './evidences.validation';
 
 export const evidenceInclude = {
   application: { include: { student: true } },
+  collectiveProfile: true,
   evidenceFiles: {
     include: {
       file: true,
