@@ -13,7 +13,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { loadCriteriaRules, toJsonValue } from '../rules/criteria.loader';
-import { runPrecheck } from '../rules/precheck.engine';
+import { runPrecheck, type PrecheckEngineResult } from '../rules/precheck.engine';
 import type { RuleContext } from '../rules/rules.types';
 import { PrecheckRepository } from './precheck.repository';
 import type { RunPrecheckInput } from './precheck.validation';
@@ -111,7 +111,27 @@ export class PrecheckService {
   async getLatest(user: AuthenticatedUser, applicationId: string) {
     const application = await this.getApplication(applicationId);
     assertPrecheckAccess(application, user, true);
-    return this.precheckRepository.findLatest(application.id);
+    const latest = await this.precheckRepository.findLatest(application.id);
+    if (!latest) return null;
+
+    const result = latest.resultJson as Partial<PrecheckEngineResult>;
+    const missingItems = Array.isArray(result.missingItems)
+      ? result.missingItems
+      : Array.isArray(latest.missingItemsJson)
+        ? latest.missingItemsJson
+        : [];
+    return {
+      applicationId: application.id,
+      level: result.level ?? application.targetLevel,
+      readinessScore: result.readinessScore ?? latest.readinessScore,
+      readyToSubmit: Boolean(result.readyToSubmit),
+      criteriaResults: Array.isArray(result.criteriaResults) ? result.criteriaResults : [],
+      missingItems,
+      warnings: Array.isArray(result.warnings) ? result.warnings : [],
+      nextBestAction: result.nextBestAction ?? latest.nextBestAction ?? '',
+      humanConfirmationRequired: true,
+      createdAt: latest.createdAt,
+    };
   }
 
   private async getApplication(applicationId: string) {
