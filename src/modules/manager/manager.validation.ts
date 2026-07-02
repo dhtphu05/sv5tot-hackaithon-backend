@@ -14,6 +14,21 @@ export const listManagerApplicationsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
+export const listManagerResultsQuerySchema = z.object({
+  schoolYear: z
+    .string()
+    .regex(/^\d{4}-\d{4}$/)
+    .optional(),
+  finalStatus: z.nativeEnum(FinalStatus).optional(),
+  finalLevel: z.nativeEnum(Level).optional(),
+  targetLevel: z.nativeEnum(Level).optional(),
+  faculty: z.string().trim().min(1).optional(),
+  className: z.string().trim().min(1).optional(),
+  search: z.string().trim().min(1).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(100).default(20),
+});
+
 export const assignReviewTaskSchema = z
   .object({
     assignedOfficerId: z.string().uuid().optional(),
@@ -37,6 +52,25 @@ export const finalizeApplicationSchema = z.object({
   finalNote: z.string().min(1).max(3000),
   overrideAggregation: z.boolean().default(false),
   notifyStudent: z.boolean().default(true),
+}).superRefine((value, ctx) => {
+  if (
+    (value.finalStatus === FinalStatus.passed ||
+      value.finalStatus === FinalStatus.partially_passed) &&
+    !value.finalLevel
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'finalLevel is required when finalStatus is passed or partially_passed',
+      path: ['finalLevel'],
+    });
+  }
+  if (value.finalStatus === FinalStatus.failed && value.finalLevel) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'finalLevel must be null when finalStatus is failed',
+      path: ['finalLevel'],
+    });
+  }
 });
 
 export const reopenFinalSchema = z.object({
@@ -47,6 +81,7 @@ export const reopenFinalSchema = z.object({
 });
 
 export type ListManagerApplicationsQuery = z.infer<typeof listManagerApplicationsQuerySchema>;
+export type ListManagerResultsQuery = z.infer<typeof listManagerResultsQuerySchema>;
 export type AssignReviewTaskInput = z.infer<typeof assignReviewTaskSchema>;
 export type AggregateApplicationInput = z.infer<typeof aggregateApplicationSchema>;
 export type FinalizeApplicationInput = z.infer<typeof finalizeApplicationSchema>;

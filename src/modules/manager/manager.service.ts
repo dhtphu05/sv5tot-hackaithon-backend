@@ -3,7 +3,9 @@ import {
   ApplicationStatus,
   Criterion,
   FinalStatus,
+  Level,
   NotificationType,
+  ResolutionStatus,
   Role,
   ReviewTaskStatus,
   type Prisma,
@@ -20,6 +22,7 @@ import type {
   AssignReviewTaskInput,
   FinalizeApplicationInput,
   ListManagerApplicationsQuery,
+  ListManagerResultsQuery,
   ReopenFinalInput,
 } from './manager.validation';
 
@@ -89,6 +92,200 @@ export class ManagerService {
         limit: query.limit,
         total,
         totalPages: Math.ceil(total / query.limit),
+      },
+    };
+  }
+
+  async getDashboardSummary() {
+    const [
+      applicationStatusGroups,
+      targetLevelGroups,
+      finalStatusGroups,
+      finalLevelGroups,
+      taskStatusGroups,
+      resolutionStatusGroups,
+      closedResolutionCount,
+      workloadOfficers,
+      recentApplications,
+      recentFinalizedApplications,
+      totalApplications,
+      unfinalizedCount,
+    ] = await prisma.$transaction([
+      prisma.application.groupBy({
+        by: ['status'],
+        orderBy: { status: 'asc' },
+        _count: { _all: true },
+      }),
+      prisma.application.groupBy({
+        by: ['targetLevel'],
+        orderBy: { targetLevel: 'asc' },
+        _count: { _all: true },
+      }),
+      prisma.application.groupBy({
+        by: ['finalStatus'],
+        orderBy: { finalStatus: 'asc' },
+        _count: { _all: true },
+      }),
+      prisma.application.groupBy({
+        by: ['finalLevel'],
+        orderBy: { finalLevel: 'asc' },
+        where: { finalLevel: { not: null } },
+        _count: { _all: true },
+      }),
+      prisma.reviewTask.groupBy({
+        by: ['status'],
+        orderBy: { status: 'asc' },
+        _count: { _all: true },
+      }),
+      prisma.resolutionCase.groupBy({
+        by: ['status'],
+        orderBy: { status: 'asc' },
+        _count: { _all: true },
+      }),
+      prisma.resolutionCase.count({ where: { closedAt: { not: null } } }),
+      prisma.user.findMany({
+        where: { role: Role.officer, isActive: true },
+        include: {
+          officerSpecializations: { where: { isActive: true } },
+          assignedReviewTasks: { select: { status: true } },
+        },
+        orderBy: { fullName: 'asc' },
+      }),
+      prisma.application.findMany({
+        include: {
+          student: true,
+          reviewTasks: { select: { status: true } },
+          cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+        orderBy: [{ updatedAt: 'desc' }, { submittedAt: 'desc' }],
+        take: 8,
+      }),
+      prisma.application.findMany({
+        where: {
+          OR: [
+            { finalizedAt: { not: null } },
+            { finalStatus: { in: [FinalStatus.passed, FinalStatus.failed, FinalStatus.partially_passed] } },
+          ],
+        },
+        include: {
+          student: true,
+          finalizedBy: true,
+          reviewTasks: { select: { status: true } },
+          cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+        orderBy: [{ finalizedAt: 'desc' }, { updatedAt: 'desc' }],
+        take: 8,
+      }),
+      prisma.application.count(),
+      prisma.application.count({
+        where: {
+          OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }],
+        },
+      }),
+    ]);
+
+    const applicationOverview = {
+      totalApplications,
+      draftCount: countGroup(applicationStatusGroups, ApplicationStatus.draft),
+      submittedCount: countGroup(applicationStatusGroups, ApplicationStatus.submitted),
+      underReviewCount: countGroup(applicationStatusGroups, ApplicationStatus.under_review),
+      supplementRequiredCount: countGroup(
+        applicationStatusGroups,
+        ApplicationStatus.supplement_required,
+      ),
+      resolutionNeededCount: countGroup(applicationStatusGroups, ApplicationStatus.resolution_needed),
+      completedCount: countGroup(applicationStatusGroups, ApplicationStatus.completed),
+      rejectedCount: countGroup(applicationStatusGroups, ApplicationStatus.rejected),
+    };
+    const targetLevelBreakdown = levelCountMap(targetLevelGroups, 'targetLevel');
+    const finalStatusBreakdown = {
+      passed: countGroup(finalStatusGroups, FinalStatus.passed, 'finalStatus'),
+      failed: countGroup(finalStatusGroups, FinalStatus.failed, 'finalStatus'),
+      partiallyPassed: countGroup(finalStatusGroups, FinalStatus.partially_passed, 'finalStatus'),
+      pending: countGroup(finalStatusGroups, FinalStatus.pending, 'finalStatus'),
+    };
+    const achievedByLevel = levelCountMap(finalLevelGroups, 'finalLevel');
+    const finalLevelBreakdown = {
+      ...achievedByLevel,
+      notAchieved: countGroup(finalStatusGroups, FinalStatus.failed, 'finalStatus'),
+      unfinalized: unfinalizedCount,
+    };
+    const reviewTaskSummary = buildTaskSummaryFromStatuses(taskStatusGroups);
+    const resolutionSummary = {
+      open: countGroup(resolutionStatusGroups, ResolutionStatus.open, 'status'),
+      resolved: countGroup(resolutionStatusGroups, ResolutionStatus.resolved, 'status'),
+      rejected: countGroup(resolutionStatusGroups, ResolutionStatus.rejected, 'status'),
+      closed: closedResolutionCount,
+    };
+    const workloadByOfficer = workloadOfficers.map((officer) => {
+      const waitingCount = officer.assignedReviewTasks.filter(
+        (task) => task.status === ReviewTaskStatus.waiting || task.status === ReviewTaskStatus.reviewing,
+      ).length;
+      const completedCount = officer.assignedReviewTasks.filter(
+        (task) => task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected,
+      ).length;
+      return {
+        officerId: officer.id,
+        fullName: officer.fullName,
+        criterion: officer.officerSpecializations.map((item) => item.criterion).join(', ') || 'all',
+        assignedCount: officer.assignedReviewTasks.length,
+        waitingCount,
+        completedCount,
+      };
+    });
+
+    return {
+      applicationOverview,
+      targetLevelBreakdown,
+      finalStatusBreakdown,
+      finalLevelBreakdown,
+      reviewTaskSummary,
+      resolutionSummary,
+      workloadByOfficer,
+      recentApplications: recentApplications.map(toResultItem),
+      recentFinalizedApplications: recentFinalizedApplications.map(toResultItem),
+
+      // Backward-compatible fields for the existing analytics page.
+      totalApplications: applicationOverview.totalApplications,
+      submitted: applicationOverview.submittedCount,
+      underReview: applicationOverview.underReviewCount,
+      supplementRequired: applicationOverview.supplementRequiredCount,
+      resolutionNeeded: applicationOverview.resolutionNeededCount,
+      completed: applicationOverview.completedCount,
+      rejected: applicationOverview.rejectedCount,
+      totalReviewTasks: reviewTaskSummary.total,
+      waitingTasks: reviewTaskSummary.waiting,
+      reviewingTasks: countGroup(taskStatusGroups, ReviewTaskStatus.reviewing, 'status'),
+      byTargetLevel: targetLevelBreakdown,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+  }
+
+  async listResults(query: ListManagerResultsQuery) {
+    const where = buildResultsWhere(query);
+    const skip = (query.page - 1) * query.pageSize;
+    const [applications, total] = await prisma.$transaction([
+      prisma.application.findMany({
+        where,
+        include: {
+          student: true,
+          finalizedBy: true,
+          reviewTasks: { select: { status: true } },
+          cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+        orderBy: [{ finalizedAt: 'desc' }, { updatedAt: 'desc' }, { submittedAt: 'desc' }],
+        skip,
+        take: query.pageSize,
+      }),
+      prisma.application.count({ where }),
+    ]);
+
+    return {
+      items: applications.map(toResultItem),
+      pagination: {
+        page: query.page,
+        pageSize: query.pageSize,
+        total,
       },
     };
   }
@@ -367,6 +564,9 @@ export class ManagerService {
     applicationId: string,
     input: FinalizeApplicationInput,
   ) {
+    if (user.role !== Role.committee && user.role !== Role.admin) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only committee or admin can finalize results');
+    }
     if (
       (input.finalStatus === FinalStatus.passed ||
         input.finalStatus === FinalStatus.partially_passed) &&
@@ -374,11 +574,11 @@ export class ManagerService {
     ) {
       throw new AppError(400, ErrorCodes.FINAL_LEVEL_REQUIRED, 'Final level is required');
     }
-    if (input.overrideAggregation && user.role === Role.manager) {
+    if (input.finalStatus === FinalStatus.failed && input.finalLevel) {
       throw new AppError(
-        403,
-        ErrorCodes.FORBIDDEN,
-        'Only committee or admin can override aggregation',
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        'Final level must be null when final status is failed',
       );
     }
 
@@ -414,6 +614,9 @@ export class ManagerService {
           status,
           finalStatus: input.finalStatus,
           finalLevel: input.finalStatus === FinalStatus.failed ? null : input.finalLevel,
+          finalNote: input.finalNote,
+          finalizedAt: new Date(),
+          finalizedById: user.id,
         },
       });
       await createApplicationAudit(tx, {
@@ -427,11 +630,15 @@ export class ManagerService {
           status: before.status,
           finalStatus: before.finalStatus,
           finalLevel: before.finalLevel,
+          finalNote: before.finalNote,
         },
         afterStateJson: {
           status,
           finalStatus: input.finalStatus,
           finalLevel: updated.finalLevel,
+          finalNote: updated.finalNote,
+          finalizedAt: updated.finalizedAt,
+          finalizedById: updated.finalizedById,
           overrideAggregation: input.overrideAggregation,
         },
         note: input.finalNote,
@@ -482,7 +689,9 @@ export class ManagerService {
         finalResult: {
           finalStatus: updated.finalStatus,
           finalLevel: updated.finalLevel,
-          finalNote: input.finalNote,
+          finalNote: updated.finalNote,
+          finalizedAt: updated.finalizedAt,
+          finalizedById: updated.finalizedById,
         },
       };
     });
@@ -507,6 +716,9 @@ export class ManagerService {
           status: input.status,
           finalStatus: FinalStatus.pending,
           finalLevel: null,
+          finalNote: null,
+          finalizedAt: null,
+          finalizedById: null,
         },
       });
       await createApplicationAudit(tx, {
@@ -697,6 +909,128 @@ function toApplicationSummaryItem(
     resolutionTaskCount: count(ReviewTaskStatus.resolution_needed),
     updatedAt: application.updatedAt.toISOString(),
   };
+}
+
+function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWhereInput {
+  const and: Prisma.ApplicationWhereInput[] = [];
+  if (query.schoolYear) and.push({ schoolYear: query.schoolYear });
+  if (query.targetLevel) and.push({ targetLevel: query.targetLevel });
+  if (query.finalLevel) and.push({ finalLevel: query.finalLevel });
+  if (query.finalStatus) {
+    and.push(
+      query.finalStatus === FinalStatus.pending
+        ? { OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }] }
+        : { finalStatus: query.finalStatus },
+    );
+  }
+  if (query.faculty) and.push({ student: { faculty: query.faculty } });
+  if (query.className) and.push({ student: { className: query.className } });
+  if (query.search) {
+    and.push({
+      OR: [
+        { student: { fullName: { contains: query.search, mode: 'insensitive' } } },
+        { student: { studentCode: { contains: query.search, mode: 'insensitive' } } },
+        { student: { className: { contains: query.search, mode: 'insensitive' } } },
+        { student: { faculty: { contains: query.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  return and.length ? { AND: and } : {};
+}
+
+function toResultItem(application: {
+  id: string;
+  studentId: string;
+  schoolYear: string;
+  targetLevel: Level;
+  finalStatus: FinalStatus;
+  finalLevel: Level | null;
+  finalNote?: string | null;
+  status: ApplicationStatus;
+  readinessScore: number;
+  submittedAt: Date | null;
+  finalizedAt?: Date | null;
+  finalizedBy?: { id: string; fullName: string } | null;
+  student: {
+    id: string;
+    fullName: string;
+    studentCode: string | null;
+    className: string | null;
+    faculty: string | null;
+  };
+  reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  cascadeReviews: Array<{ suggestedLevel: Level | null }>;
+}) {
+  return {
+    applicationId: application.id,
+    studentId: application.studentId,
+    studentName: application.student.fullName,
+    studentCode: application.student.studentCode,
+    className: application.student.className,
+    faculty: application.student.faculty,
+    schoolYear: application.schoolYear,
+    targetLevel: application.targetLevel,
+    suggestedLevel: application.cascadeReviews[0]?.suggestedLevel ?? null,
+    finalStatus: application.finalStatus,
+    finalLevel: application.finalLevel,
+    finalNote: application.finalNote ?? null,
+    applicationStatus: application.status,
+    readinessScore: application.readinessScore,
+    submittedAt: application.submittedAt?.toISOString() ?? null,
+    finalizedAt: application.finalizedAt?.toISOString() ?? null,
+    finalizedBy: application.finalizedBy
+      ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
+      : null,
+    reviewTaskSummary: buildTaskSummary(application.reviewTasks),
+  };
+}
+
+function buildTaskSummary(tasks: Array<{ status: ReviewTaskStatus }>) {
+  const count = (status: ReviewTaskStatus) => tasks.filter((task) => task.status === status).length;
+  return {
+    total: tasks.length,
+    accepted: count(ReviewTaskStatus.accepted),
+    rejected: count(ReviewTaskStatus.rejected),
+    supplementRequired: count(ReviewTaskStatus.supplement_required),
+    resolutionNeeded: count(ReviewTaskStatus.resolution_needed),
+    waiting: count(ReviewTaskStatus.waiting),
+    reviewing: count(ReviewTaskStatus.reviewing),
+  };
+}
+
+function buildTaskSummaryFromStatuses(groups: GroupCount[]) {
+  return {
+    total: groups.reduce((sum, group) => sum + getGroupTotal(group), 0),
+    accepted: countGroup(groups, ReviewTaskStatus.accepted, 'status'),
+    rejected: countGroup(groups, ReviewTaskStatus.rejected, 'status'),
+    supplementRequired: countGroup(groups, ReviewTaskStatus.supplement_required, 'status'),
+    resolutionNeeded: countGroup(groups, ReviewTaskStatus.resolution_needed, 'status'),
+    waiting: countGroup(groups, ReviewTaskStatus.waiting, 'status'),
+  };
+}
+
+type GroupCount = {
+  _count?: { _all?: number } | true;
+  [key: string]: unknown;
+};
+
+function levelCountMap(groups: GroupCount[], key: string) {
+  return Object.values(Level).reduce(
+    (acc, level) => {
+      acc[level] = countGroup(groups, level, key);
+      return acc;
+    },
+    {} as Record<Level, number>,
+  );
+}
+
+function countGroup(groups: GroupCount[], value: string | null, key = 'status') {
+  const match = groups.find((group) => group[key] === value);
+  return match ? getGroupTotal(match) : 0;
+}
+
+function getGroupTotal(group: GroupCount) {
+  return typeof group._count === 'object' ? (group._count._all ?? 0) : 0;
 }
 
 function pickStudent(student: {

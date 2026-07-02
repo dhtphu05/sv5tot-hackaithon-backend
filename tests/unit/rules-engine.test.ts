@@ -29,6 +29,9 @@ const application = {
   submittedAt: null,
   finalLevel: null,
   finalStatus: FinalStatus.pending,
+  finalNote: null,
+  finalizedAt: null,
+  finalizedById: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 };
