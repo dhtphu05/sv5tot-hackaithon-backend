@@ -15,6 +15,16 @@ export async function getManagerWorkloads(req: Request, res: Response): Promise<
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function getManagerDashboardSummary(req: Request, res: Response): Promise<void> {
+  const data = await service.getDashboardSummary();
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function listManagerResults(req: Request, res: Response): Promise<void> {
+  const data = await service.listResults(req.query as never);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function assignManagerReviewTask(req: Request, res: Response): Promise<void> {
   const data = await service.reassignTask(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });

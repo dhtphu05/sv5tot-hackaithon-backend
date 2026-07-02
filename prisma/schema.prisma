@@ -208,6 +208,7 @@ model User {
   notifications          Notification[]
   collectiveProfiles     CollectiveProfile[]
   assignedReviewTasks    ReviewTask[]
+  finalizedApplications  Application[]             @relation("ApplicationFinalizedBy")
 
   @@index([role])
   @@index([faculty])
@@ -254,9 +255,13 @@ model Application {
   submittedAt         DateTime?
   finalLevel          Level?
   finalStatus         FinalStatus                @default(pending)
+  finalNote           String?
+  finalizedAt         DateTime?
+  finalizedById       String?                    @db.Uuid
   createdAt           DateTime                   @default(now())
   updatedAt           DateTime                   @updatedAt
   student             User                       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  finalizedBy         User?                      @relation("ApplicationFinalizedBy", fields: [finalizedById], references: [id], onDelete: SetNull)
   draftSnapshots      ApplicationDraftSnapshot[]
   metrics             ApplicationMetric[]
   evidences           Evidence[]
@@ -269,6 +274,8 @@ model Application {
 
   @@unique([studentId, schoolYear, applicationType])
   @@index([status, targetLevel])
+  @@index([finalStatus, finalLevel])
+  @@index([finalizedById])
   @@index([studentId, schoolYear])
 }
 
@@ -529,6 +536,10 @@ model ReviewTask {
   status              ReviewTaskStatus     @default(waiting)
   decision            ReviewDecision?
   officerNote         String?
+  officerSuggestedLevel Level?
+  levelAssessmentJson Json?
+  decisionReason      String?
+  supplementRequestJson Json?
   dueDate             DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt

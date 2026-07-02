@@ -6,6 +6,24 @@ export class FilesRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
 
   findById(id: string) {
-    return this.db.file.findUnique({ where: { id } });
+    return this.db.file.findUnique({
+      where: { id },
+      include: {
+        evidenceFiles: {
+          include: {
+            evidence: {
+              include: {
+                application: {
+                  include: {
+                    student: true,
+                    reviewTasks: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
   }
 }

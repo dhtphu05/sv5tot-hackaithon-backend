@@ -2,6 +2,8 @@
 import {
   ApplicationStatus,
   Criterion,
+  EvidenceStatus,
+  Level,
   NotificationType,
   ReviewDecision,
   ReviewTaskStatus,
@@ -20,12 +22,112 @@ import { getApplicationReviewProgress } from './review-progress.service';
 import { ReviewRepository } from './review.repository';
 import type { ListReviewTasksQuery, TaskDecisionInput } from './review.validation';
 
+type RequirementStatus = 'passed' | 'failed' | 'missing' | 'needs_review';
+type RiskLevel = 'low' | 'medium' | 'high';
+
 export class ReviewService {
   constructor(
     private readonly reviewRepository = new ReviewRepository(),
     private readonly assignmentService = new ReviewAssignmentService(),
     private readonly notificationsService = new NotificationsService(),
   ) {}
+
+  async getDashboard(user: AuthenticatedUser) {
+    const officer =
+      user.role === Role.officer
+        ? await prisma.user.findUnique({
+            where: { id: user.id },
+            include: {
+              officerSpecializations: {
+                where: { isActive: true },
+                select: { criterion: true, facultyScope: true },
+              },
+            },
+          })
+        : null;
+
+    const data = await this.reviewRepository.list(user, {
+      page: 1,
+      limit: 100,
+    });
+    const accessible = [];
+    for (const task of data.items) {
+      if (await this.canAccessTask(user, task, false)) {
+        accessible.push(task);
+      }
+    }
+
+    const now = Date.now();
+    const threeDays = 3 * 24 * 60 * 60 * 1000;
+    const listItems = accessible.map(toTaskListItem).sort(comparePriorityTasks);
+    const summary = {
+      totalAssigned: listItems.length,
+      waiting: listItems.filter((item) => item.status === ReviewTaskStatus.waiting).length,
+      reviewing: listItems.filter((item) => item.status === ReviewTaskStatus.reviewing).length,
+      supplementRequired: listItems.filter((item) => item.status === ReviewTaskStatus.supplement_required)
+        .length,
+      accepted: listItems.filter((item) => item.status === ReviewTaskStatus.accepted).length,
+      rejected: listItems.filter((item) => item.status === ReviewTaskStatus.rejected).length,
+      resolutionNeeded: listItems.filter((item) => item.status === ReviewTaskStatus.resolution_needed)
+        .length,
+      aiLowConfidence: listItems.filter((item) => (item.aiConfidence ?? 1) < 0.7).length,
+      overdue: listItems.filter((item) => item.dueDate && new Date(item.dueDate).getTime() < now).length,
+      dueSoon: listItems.filter((item) => {
+        if (!item.dueDate) return false;
+        const due = new Date(item.dueDate).getTime();
+        return due >= now && due <= now + threeDays;
+      }).length,
+    };
+
+    const bottleneckByCriterion = Object.values(Criterion).map((criterion) => ({
+      criterion,
+      total: listItems.filter((item) => item.criterion === criterion).length,
+      waiting: listItems.filter(
+        (item) => item.criterion === criterion && item.status === ReviewTaskStatus.waiting,
+      ).length,
+    }));
+
+    const recentActivity = await prisma.auditLog.findMany({
+      where: {
+        targetType: 'review_task',
+        targetId: { in: accessible.map((task) => task.id) },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    });
+
+    return {
+      officer: officer
+        ? {
+            id: officer.id,
+            fullName: officer.fullName,
+            specializations: officer.officerSpecializations.map((item) => item.criterion),
+            specializationScopes: officer.officerSpecializations,
+          }
+        : {
+            id: user.id,
+            fullName: user.fullName,
+            specializations: [],
+            specializationScopes: [],
+          },
+      summary,
+      priorityTasks: listItems.slice(0, 8).map((item) => ({
+        taskId: item.taskId,
+        applicationId: item.applicationId,
+        studentName: item.studentName,
+        studentCode: item.studentCode,
+        criterion: item.criterion,
+        targetLevel: item.targetLevel,
+        status: item.status,
+        aiConfidence: item.aiConfidence,
+        riskLevel: item.riskLevel,
+        dueDate: item.dueDate,
+        updatedAt: item.updatedAt,
+      })),
+      bottleneckByCriterion,
+      recentActivity,
+    };
+  }
 
   async listTasks(user: AuthenticatedUser, query: ListReviewTasksQuery) {
     const data = await this.reviewRepository.list(user, query);
@@ -35,14 +137,18 @@ export class ReviewService {
         items.push(toTaskListItem(task));
       }
     }
+    const filteredItems = query.riskLevel
+      ? items.filter((item) => item.riskLevel === query.riskLevel)
+      : items;
+    const limit = query.pageSize ?? query.limit;
 
     return {
-      items,
+      items: filteredItems,
       pagination: {
         page: query.page,
-        limit: query.limit,
-        total: data.total,
-        totalPages: Math.ceil(data.total / query.limit),
+        limit,
+        total: query.riskLevel ? filteredItems.length : data.total,
+        totalPages: Math.ceil((query.riskLevel ? filteredItems.length : data.total) / limit),
       },
     };
   }
@@ -125,12 +231,29 @@ export class ReviewService {
           fileSize: link.file.fileSize,
           publicUrl: link.file.publicUrl,
           fileRole: link.fileRole,
+          uploadedAt: link.file.createdAt,
+          createdAt: link.file.createdAt,
         })),
         card: evidence.evidenceCard
           ? {
               id: evidence.evidenceCard.id,
+              ocrText: evidence.evidenceCard.ocrText,
+              extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
+              warningsJson: evidence.evidenceCard.warningsJson || [],
+              matchedEventId: evidence.evidenceCard.matchedEventId,
+              matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
               confidence: evidence.evidenceCard.confidence,
-              warnings: evidence.evidenceCard.warningsJson || [],
+              aiSummary: evidence.evidenceCard.aiSummary,
+              createdAt: evidence.evidenceCard.createdAt,
+              updatedAt: evidence.evidenceCard.updatedAt,
+            }
+          : null,
+        event: evidence.event
+          ? {
+              id: evidence.event.id,
+              eventName: evidence.event.eventName,
+              organizer: evidence.event.organizer,
+              organizerLevel: evidence.event.organizerLevel,
             }
           : null,
       })),
@@ -140,14 +263,65 @@ export class ReviewService {
         null,
       cascade: taskForResponse.application?.cascadeReviews[0] ?? null,
       knowledgeBaseMatches,
-      criteriaChecklist: buildCriteriaChecklist(taskForResponse.criterion),
+      criteriaChecklist: buildCriteriaChecklist(taskForResponse),
+      criterionLevelAssessment: buildCriterionLevelAssessment(taskForResponse),
       audit: auditLogs,
     };
+  }
+
+  async getCriterionLevelAssessment(user: AuthenticatedUser, taskId: string) {
+    const task = await this.getTask(taskId);
+    await this.assertTaskAccess(user, task, false);
+    return buildCriterionLevelAssessment(task);
+  }
+
+  async getTaskTimeline(user: AuthenticatedUser, taskId: string) {
+    const task = await this.getTask(taskId);
+    await this.assertTaskAccess(user, task, false);
+
+    const auditLogs = await prisma.auditLog.findMany({
+      where: {
+        OR: [
+          { targetType: 'review_task', targetId: task.id },
+          ...(task.applicationId ? [{ applicationId: task.applicationId }] : []),
+          ...(task.collectiveProfileId ? [{ collectiveProfileId: task.collectiveProfileId }] : []),
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 40,
+    });
+
+    const evidenceEvents = task.evidences.flatMap((item) => {
+      const evidence = item.evidence;
+      return [
+        {
+          id: `${evidence.id}-created`,
+          action: 'EVIDENCE_CREATED',
+          targetType: 'evidence',
+          targetId: evidence.id,
+          note: evidence.evidenceName,
+          createdAt: evidence.createdAt,
+        },
+        ...evidence.evidenceFiles.map((link) => ({
+          id: `${evidence.id}-${link.fileId}-uploaded`,
+          action: 'EVIDENCE_FILE_UPLOADED',
+          targetType: 'file',
+          targetId: link.fileId,
+          note: link.file.originalName,
+          createdAt: link.file.createdAt,
+        })),
+      ];
+    });
+
+    return [...auditLogs, ...evidenceEvents].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
   }
 
   async decideTask(user: AuthenticatedUser, taskId: string, input: TaskDecisionInput) {
     const task = await this.getTask(taskId);
     await this.assertTaskAccess(user, task, true);
+    const officerNote = input.officerNote ?? input.note;
 
     if (task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected) {
       if (user.role !== Role.manager && user.role !== Role.admin) {
@@ -163,12 +337,30 @@ export class ReviewService {
       (input.decision === ReviewDecision.rejected ||
         input.decision === ReviewDecision.supplement_required ||
         input.decision === ReviewDecision.resolution_needed) &&
-      !input.officerNote
+      !officerNote
     ) {
       throw new AppError(
         400,
         ErrorCodes.DECISION_NOTE_REQUIRED,
         'Officer note is required for this decision',
+      );
+    }
+    if (
+      (input.decision === ReviewDecision.rejected ||
+        input.decision === ReviewDecision.resolution_needed) &&
+      (officerNote?.trim().length ?? 0) < 10
+    ) {
+      throw new AppError(
+        400,
+        ErrorCodes.DECISION_NOTE_REQUIRED,
+        'Decision note must be at least 10 characters',
+      );
+    }
+    if (input.decision === ReviewDecision.accepted && !input.officerSuggestedLevel) {
+      throw new AppError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        'officerSuggestedLevel is required when accepting a review task',
       );
     }
 
@@ -180,6 +372,25 @@ export class ReviewService {
           400,
           ErrorCodes.VALIDATION_ERROR,
           `Evidence ${ed.evidenceId} does not belong to this review task`,
+        );
+      }
+    }
+    for (const assessment of input.evidenceAssessments) {
+      if (!linkedEvidenceIds.has(assessment.evidenceId)) {
+        throw new AppError(
+          400,
+          ErrorCodes.VALIDATION_ERROR,
+          `Evidence ${assessment.evidenceId} does not belong to this review task`,
+        );
+      }
+      if (
+        assessment.assessment !== 'valid' &&
+        (!assessment.note || assessment.note.trim().length < 3)
+      ) {
+        throw new AppError(
+          400,
+          ErrorCodes.VALIDATION_ERROR,
+          'Evidence assessment note is required for invalid, supplement, or ambiguous evidence',
         );
       }
     }
@@ -200,7 +411,18 @@ export class ReviewService {
         data: {
           status,
           decision: input.decision,
-          officerNote: input.officerNote,
+          officerNote,
+          officerSuggestedLevel: input.officerSuggestedLevel ?? null,
+          levelAssessmentJson: {
+            ...(input.levelAssessmentJson ?? {}),
+            evidenceAssessments: input.evidenceAssessments,
+            submittedAt: new Date().toISOString(),
+          } as Prisma.InputJsonValue,
+          decisionReason: officerNote,
+          supplementRequestJson:
+            input.decision === ReviewDecision.supplement_required
+              ? ((input.supplementRequestJson ?? { note: officerNote }) as Prisma.InputJsonValue)
+              : undefined,
         },
         include: { application: { include: { student: true } }, assignedOfficer: true },
       });
@@ -253,7 +475,7 @@ export class ReviewService {
             metadata: { criterion: task.criterion, evidenceIds },
             type: NotificationType.supplement_required,
             title: 'Cần bổ sung minh chứng',
-            message: input.officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
+            message: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
           },
           tx,
         );
@@ -273,7 +495,7 @@ export class ReviewService {
           const createdCase = await tx.resolutionCase.create({
             data: {
               applicationId,
-              reason: input.officerNote ?? 'Cần hội đồng xem xét.',
+              reason: officerNote ?? 'Cần hội đồng xem xét.',
               createdBy: user.id,
               status: 'open',
             },
@@ -290,7 +512,7 @@ export class ReviewService {
             metadata: { criterion: task.criterion, evidenceIds },
             type: NotificationType.review_updated,
             title: 'Hồ sơ được chuyển hội đồng xem xét',
-            message: input.officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
+            message: officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
           },
           tx,
         );
@@ -299,27 +521,9 @@ export class ReviewService {
           applicationId,
           resolutionCaseId,
           'Có hồ sơ cần xử lý đối sánh',
-          input.officerNote ?? 'Một task được chuyển sang cần hội đồng xem xét.',
+          officerNote ?? 'Một task được chuyển sang cần hội đồng xem xét.',
           { reviewTaskId: task.id, criterion: task.criterion, evidenceIds },
         );
-      }
-
-      // Check if all required tasks are accepted -> complete application
-      if (input.decision === ReviewDecision.accepted) {
-        const allTasks = await tx.reviewTask.findMany({
-          where: { applicationId },
-        });
-        const allAccepted = allTasks.every((t) =>
-          t.id === task.id
-            ? status === ReviewTaskStatus.accepted
-            : t.status === ReviewTaskStatus.accepted,
-        );
-        if (allAccepted && allTasks.length > 0) {
-          await tx.application.update({
-            where: { id: applicationId },
-            data: { status: ApplicationStatus.completed },
-          });
-        }
       }
 
       // Audit application status changes
@@ -347,8 +551,13 @@ export class ReviewService {
         targetType: 'review_task',
         targetId: task.id,
         applicationId,
-        afterStateJson: { status, decision: input.decision },
-        note: input.officerNote,
+        afterStateJson: {
+          status,
+          decision: input.decision,
+          officerSuggestedLevel: input.officerSuggestedLevel ?? null,
+          evidenceAssessments: input.evidenceAssessments,
+        },
+        note: officerNote,
       });
 
       if (
@@ -407,6 +616,13 @@ export class ReviewService {
       decision: ReviewDecision.supplement_required,
       officerNote: input.reason,
       evidenceDecisions,
+      evidenceAssessments: [],
+      supplementRequestJson: {
+        reason: input.reason,
+        deadline: input.deadline ?? null,
+        evidenceIds: input.evidenceIds ?? [],
+        requestedFields: input.requestedFields ?? [],
+      },
     });
 
     if (input.deadline) {
@@ -461,6 +677,7 @@ export class ReviewService {
       decision: ReviewDecision.resolution_needed,
       officerNote: input.reason,
       evidenceDecisions,
+      evidenceAssessments: [],
     });
 
     await createApplicationAudit(prisma, {
@@ -525,16 +742,10 @@ export class ReviewService {
     if (task.assignedOfficerId === user.id) {
       return true;
     }
-    if (decision) {
-      return false;
-    }
-    return (
-      !task.assignedOfficerId &&
-      (await this.assignmentService.canOfficerHandleCriterion(
-        user.id,
-        task.criterion,
-        task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty,
-      ))
+    return this.assignmentService.canOfficerHandleCriterion(
+      user.id,
+      task.criterion,
+      task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty,
     );
   }
 
@@ -898,6 +1109,7 @@ function toTaskListItem(task: {
   dueDate: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  officerSuggestedLevel?: Level | null;
   application: {
     id: string;
     schoolYear: string;
@@ -922,14 +1134,52 @@ function toTaskListItem(task: {
     };
   } | null;
   assignedOfficer: { id: string; fullName: string } | null;
+  evidences?: Array<{
+    evidence: {
+      status: EvidenceStatus;
+      confidence: number | null;
+      evidenceCard: { confidence: number | null; warningsJson: Prisma.JsonValue | null } | null;
+    };
+  }>;
   _count: { evidences: number };
 }) {
+  const aiConfidence = getTaskAiConfidence(task.evidences ?? []);
+  const targetLevel = task.application?.targetLevel ?? task.collectiveProfile?.targetLevel ?? 'school';
+  const riskLevel = getTaskRiskLevel({
+    status: task.status,
+    dueDate: task.dueDate,
+    targetLevel: targetLevel as Level,
+    aiConfidence,
+    evidences: task.evidences ?? [],
+  });
+  const evidenceSupplementCount =
+    task.evidences?.filter((item) => item.evidence.status === EvidenceStatus.needs_supplement)
+      .length ?? 0;
+
   return {
     id: task.id,
+    taskId: task.id,
+    applicationId: task.application?.id ?? task.collectiveProfile?.id ?? '',
+    studentName:
+      task.application?.student.fullName ??
+      task.collectiveProfile?.representative.fullName ??
+      task.collectiveProfile?.className ??
+      '',
+    studentCode: task.application?.student.studentCode ?? '',
+    className: task.application?.student.className ?? task.collectiveProfile?.className ?? null,
+    faculty:
+      task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty ?? null,
+    schoolYear: task.application?.schoolYear ?? task.collectiveProfile?.schoolYear ?? '',
+    targetLevel,
+    applicationStatus: task.application?.status ?? task.collectiveProfile?.status ?? null,
     criterion: task.criterion,
     status: task.status,
     decision: task.decision,
     dueDate: task.dueDate,
+    aiConfidence,
+    riskLevel,
+    supplementCount: evidenceSupplementCount,
+    officerSuggestedLevel: task.officerSuggestedLevel ?? null,
     application: task.application,
     collectiveProfile: task.collectiveProfile,
     evidenceCount: task._count.evidences,
@@ -948,6 +1198,10 @@ function toTaskDetail(task: NonNullable<Awaited<ReturnType<ReviewRepository['fin
     status: task.status,
     decision: task.decision,
     officerNote: task.officerNote,
+    officerSuggestedLevel: task.officerSuggestedLevel,
+    levelAssessmentJson: task.levelAssessmentJson,
+    decisionReason: task.decisionReason,
+    supplementRequestJson: task.supplementRequestJson,
     assignedOfficer: task.assignedOfficer,
     dueDate: task.dueDate,
     createdAt: task.createdAt,
@@ -964,12 +1218,263 @@ function metricForCriterion(criterion: Criterion) {
   return undefined;
 }
 
-function buildCriteriaChecklist(criterion: Criterion) {
-  return [
-    {
-      criterion,
-      humanConfirmationRequired: true,
-      note: 'Officer decision là xác nhận theo tiêu chí/task, chưa phải kết quả cuối cùng toàn hồ sơ.',
-    },
-  ];
+function buildCriteriaChecklist(
+  task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
+) {
+  return buildCriterionLevelAssessment(task).levels.flatMap((level) =>
+    level.requirements.map((requirement) => ({
+      id: `${level.level}-${requirement.key}`,
+      label: `${levelLabel(level.level)} - ${requirement.label}`,
+      passed: requirement.status === 'passed' ? true : requirement.status === 'failed' ? false : null,
+      required: true,
+      note: requirement.reason,
+    })),
+  );
+}
+
+function buildCriterionLevelAssessment(
+  task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
+) {
+  const levels = [Level.school, Level.university, Level.city, Level.central].map((level) => {
+    const requirements = buildLevelRequirements(task, level);
+    const status = summarizeRequirementStatus(requirements);
+    return {
+      level,
+      status,
+      score: scoreForStatus(status),
+      requirements,
+      summary: levelSummary(level, status),
+    };
+  });
+  const passed = levels.filter((level) => level.status === 'passed');
+
+  return {
+    taskId: task.id,
+    criterion: task.criterion,
+    targetLevel: task.application?.targetLevel ?? task.collectiveProfile?.targetLevel ?? null,
+    levels,
+    suggestedCriterionLevel: passed.at(-1)?.level ?? null,
+    humanConfirmationRequired: true,
+  };
+}
+
+function buildLevelRequirements(
+  task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
+  level: Level,
+) {
+  const metricType = metricForCriterion(task.criterion);
+  const metric = metricType
+    ? task.application?.metrics.find((item) => item.metricType === metricType)
+    : null;
+  const threshold = metricThreshold(task.criterion, level);
+  const evidences = task.evidences.map((item) => item.evidence);
+  const indexedEvidence = evidences.filter(
+    (evidence) =>
+      evidence.indexingStatus === 'indexed' ||
+      evidence.status === EvidenceStatus.accepted ||
+      evidence.sourceType === 'event_import',
+  );
+  const lowConfidenceEvidence = evidences.some(
+    (evidence) => (evidence.evidenceCard?.confidence ?? evidence.confidence ?? 1) < 0.7,
+  );
+  const warnings = evidences.flatMap((evidence) => jsonArray(evidence.evidenceCard?.warningsJson));
+  const requirements: Array<{
+    key: string;
+    label: string;
+    status: RequirementStatus;
+    actualValue: string | null;
+    requiredValue: string;
+    source: string;
+    reason: string;
+  }> = [];
+
+  if (threshold !== null) {
+    requirements.push({
+      key: metricType ?? 'metric',
+      label: metricLabel(task.criterion),
+      status: metric ? (metric.value >= threshold ? 'passed' : 'failed') : 'missing',
+      actualValue: metric ? String(metric.value) : null,
+      requiredValue: `>= ${threshold}`,
+      source: 'application_metrics',
+      reason: metric
+        ? metric.value >= threshold
+          ? `${metricLabel(task.criterion)} đạt ngưỡng ${levelLabel(level)}`
+          : `${metricLabel(task.criterion)} chưa đạt ngưỡng ${levelLabel(level)}`
+        : `Chưa có dữ liệu ${metricLabel(task.criterion)}`,
+    });
+  }
+
+  requirements.push({
+    key: 'evidence',
+    label: 'Có minh chứng phù hợp',
+    status:
+      evidences.length === 0
+        ? 'missing'
+        : indexedEvidence.length > 0 && !lowConfidenceEvidence
+          ? 'passed'
+          : 'needs_review',
+    actualValue: String(indexedEvidence.length || evidences.length),
+    requiredValue: '>= 1 minh chứng',
+    source: 'evidences',
+    reason:
+      evidences.length === 0
+        ? 'Chưa có minh chứng cho tiêu chí'
+        : lowConfidenceEvidence
+          ? 'Có minh chứng AI confidence thấp, cần cán bộ xác nhận'
+          : 'Có minh chứng để đối chiếu',
+  });
+
+  if (warnings.length > 0) {
+    requirements.push({
+      key: 'warnings',
+      label: 'Cảnh báo AI / OCR',
+      status: 'needs_review',
+      actualValue: `${warnings.length} cảnh báo`,
+      requiredValue: 'Không có cảnh báo chặn',
+      source: 'evidence_cards',
+      reason: 'AI/OCR phát hiện cảnh báo, cán bộ cần kiểm tra thủ công',
+    });
+  }
+
+  if (task.criterion === Criterion.academic && level !== Level.school) {
+    requirements.push({
+      key: 'academic_achievement',
+      label: 'Minh chứng thành tích học thuật/NCKH',
+      status: evidences.some((evidence) => /nckh|giải|khen|olympic/i.test(evidence.evidenceName))
+        ? 'passed'
+        : 'needs_review',
+      actualValue: null,
+      requiredValue: 'Có minh chứng thành tích nếu xét cấp cao',
+      source: 'evidences',
+      reason: 'Cấp cao cần cán bộ đối chiếu thêm thành tích học thuật nếu quy định yêu cầu',
+    });
+  }
+
+  return requirements;
+}
+
+function summarizeRequirementStatus(requirements: Array<{ status: RequirementStatus }>) {
+  if (requirements.some((item) => item.status === 'failed')) return 'failed';
+  if (requirements.some((item) => item.status === 'missing')) return 'missing';
+  if (requirements.some((item) => item.status === 'needs_review')) return 'needs_review';
+  return 'passed';
+}
+
+function scoreForStatus(status: string) {
+  if (status === 'passed') return 100;
+  if (status === 'needs_review') return 60;
+  if (status === 'missing') return 30;
+  return 0;
+}
+
+function metricThreshold(criterion: Criterion, level: Level) {
+  const table: Partial<Record<Criterion, Record<Level, number>>> = {
+    academic: { school: 3, university: 3.2, city: 3.4, central: 3.6 },
+    ethics: { school: 80, university: 85, city: 90, central: 90 },
+    physical: { school: 70, university: 75, city: 80, central: 85 },
+    volunteer: { school: 3, university: 5, city: 7, central: 10 },
+    integration: { school: 1, university: 1, city: 1, central: 1 },
+  };
+  return table[criterion]?.[level] ?? null;
+}
+
+function metricLabel(criterion: Criterion) {
+  if (criterion === Criterion.academic) return 'GPA';
+  if (criterion === Criterion.ethics) return 'Điểm rèn luyện';
+  if (criterion === Criterion.physical) return 'Điểm/thành tích thể lực';
+  if (criterion === Criterion.volunteer) return 'Số ngày tình nguyện';
+  if (criterion === Criterion.integration) return 'Minh chứng hội nhập';
+  return 'Chỉ số tiêu chí';
+}
+
+function levelLabel(level: Level) {
+  const labels: Record<Level, string> = {
+    school: 'Cấp Trường',
+    university: 'Cấp ĐHĐN',
+    city: 'Cấp Thành phố',
+    central: 'Cấp Trung ương',
+  };
+  return labels[level];
+}
+
+function levelSummary(level: Level, status: string) {
+  if (status === 'passed') return `Có thể đạt ${levelLabel(level)}`;
+  if (status === 'failed') return `Chưa đạt ${levelLabel(level)}`;
+  if (status === 'missing') return `Thiếu dữ liệu để xét ${levelLabel(level)}`;
+  return `Cần cán bộ xác nhận ${levelLabel(level)}`;
+}
+
+function jsonArray(value: Prisma.JsonValue | null | undefined): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function getTaskAiConfidence(
+  evidences: Array<{
+    evidence: { confidence: number | null; evidenceCard: { confidence: number | null } | null };
+  }>,
+) {
+  const values = evidences
+    .map((item) => item.evidence.evidenceCard?.confidence ?? item.evidence.confidence)
+    .filter((value): value is number => typeof value === 'number');
+  if (!values.length) return null;
+  return Math.min(...values);
+}
+
+function getTaskRiskLevel(input: {
+  status: ReviewTaskStatus;
+  dueDate: Date | null;
+  targetLevel: Level;
+  aiConfidence: number | null;
+  evidences: Array<{
+    evidence: {
+      status: EvidenceStatus;
+      evidenceCard: { warningsJson: Prisma.JsonValue | null } | null;
+    };
+  }>;
+}): RiskLevel {
+  const now = Date.now();
+  const due = input.dueDate?.getTime();
+  const hasWarnings = input.evidences.some(
+    (item) => jsonArray(item.evidence.evidenceCard?.warningsJson).length > 0,
+  );
+  if (
+    input.status === ReviewTaskStatus.resolution_needed ||
+    (due !== undefined && due < now) ||
+    (input.aiConfidence !== null && input.aiConfidence < 0.55) ||
+    input.targetLevel === Level.central
+  ) {
+    return 'high';
+  }
+  if (
+    input.status === ReviewTaskStatus.supplement_required ||
+    (due !== undefined && due <= now + 3 * 24 * 60 * 60 * 1000) ||
+    (input.aiConfidence !== null && input.aiConfidence < 0.7) ||
+    hasWarnings ||
+    input.targetLevel === Level.city
+  ) {
+    return 'medium';
+  }
+  return 'low';
+}
+
+function comparePriorityTasks(
+  a: ReturnType<typeof toTaskListItem>,
+  b: ReturnType<typeof toTaskListItem>,
+) {
+  const riskWeight: Record<RiskLevel, number> = { high: 0, medium: 1, low: 2 };
+  const levelWeight: Record<string, number> = { central: 0, city: 1, university: 2, school: 3 };
+  const now = Date.now();
+  const aOverdue = a.dueDate && new Date(a.dueDate).getTime() < now ? 0 : 1;
+  const bOverdue = b.dueDate && new Date(b.dueDate).getTime() < now ? 0 : 1;
+  if (aOverdue !== bOverdue) return aOverdue - bOverdue;
+  if (riskWeight[a.riskLevel] !== riskWeight[b.riskLevel]) {
+    return riskWeight[a.riskLevel] - riskWeight[b.riskLevel];
+  }
+  const aConfidence = a.aiConfidence ?? 1;
+  const bConfidence = b.aiConfidence ?? 1;
+  if (aConfidence !== bConfidence) return aConfidence - bConfidence;
+  if (levelWeight[a.targetLevel] !== levelWeight[b.targetLevel]) {
+    return levelWeight[a.targetLevel] - levelWeight[b.targetLevel];
+  }
+  return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
 }

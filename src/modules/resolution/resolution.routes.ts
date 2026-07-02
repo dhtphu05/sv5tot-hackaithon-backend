@@ -7,6 +7,7 @@ import { asyncHandler } from '../../shared/utils/async-handler';
 import {
   decideResolutionCase,
   getResolutionCase,
+  listMyEscalatedCases,
   listResolutionCases,
   reopenResolutionCase,
   updateResolutionCaseStatus,
@@ -20,6 +21,13 @@ import {
 
 export const resolutionRouter = Router();
 
+resolutionRouter.get(
+  '/my-escalated-cases',
+  requireAuth,
+  requireRole(Role.officer),
+  validate({ query: listResolutionCasesQuerySchema }),
+  asyncHandler(listMyEscalatedCases),
+);
 resolutionRouter.get(
   '/cases',
   requireAuth,

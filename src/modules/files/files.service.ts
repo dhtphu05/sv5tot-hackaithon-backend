@@ -3,6 +3,7 @@ import { Role } from '@prisma/client';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { prisma } from '../../infrastructure/database/prisma';
 import { FilesRepository } from './files.repository';
 import { StorageService } from '../storage/storage.service';
 
@@ -42,16 +43,52 @@ export class FilesService {
     }
 
     const isOwner = file.ownerId === user.id;
-    const isStaff =
-      user.role === Role.officer ||
-      user.role === Role.manager ||
-      user.role === Role.committee ||
-      user.role === Role.admin;
+    const canViewAll =
+      user.role === Role.manager || user.role === Role.committee || user.role === Role.admin;
+    const canOfficerView =
+      user.role === Role.officer ? await this.canOfficerAccessEvidenceFile(user, file) : false;
 
-    if (!isOwner && !isStaff) {
+    if (!isOwner && !canViewAll && !canOfficerView) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Access denied to this file');
     }
 
     return this.storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
+  }
+
+  private async canOfficerAccessEvidenceFile(
+    user: AuthenticatedUser,
+    file: NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>,
+  ) {
+    const evidenceLinks = file.evidenceFiles ?? [];
+    if (!evidenceLinks.length) return false;
+
+    for (const link of evidenceLinks) {
+      const evidence = link.evidence;
+      if (evidence.assignedOfficerId === user.id) return true;
+      const tasks = evidence.application?.reviewTasks ?? [];
+      if (
+        tasks.some(
+          (task) => task.assignedOfficerId === user.id && task.criterion === evidence.criterion,
+        )
+      ) {
+        return true;
+      }
+      const spec = await prisma.officerSpecialization.findFirst({
+        where: {
+          officerId: user.id,
+          criterion: evidence.criterion,
+          isActive: true,
+          OR: [
+            { facultyScope: null },
+            ...(evidence.application?.student.faculty
+              ? [{ facultyScope: evidence.application.student.faculty }]
+              : []),
+          ],
+        },
+      });
+      if (spec) return true;
+    }
+
+    return false;
   }
 }

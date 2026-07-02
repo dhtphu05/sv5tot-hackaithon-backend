@@ -8,7 +8,10 @@ import {
   decideReviewTask,
   ensureReviewTasks,
   escalateReviewTaskResolution,
+  getCriterionLevelAssessment,
+  getReviewDashboard,
   getReviewTaskDetail,
+  getReviewTaskTimeline,
   listReviewTasks,
   requestReviewTaskSupplement,
 } from './review.controller';
@@ -21,6 +24,13 @@ import {
 } from './review.validation';
 
 export const reviewRouter = Router();
+
+reviewRouter.get(
+  '/dashboard',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  asyncHandler(getReviewDashboard),
+);
 
 reviewRouter.post(
   '/applications/:applicationId/tasks/ensure',
@@ -42,6 +52,18 @@ reviewRouter.get(
   requireAuth,
   requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   asyncHandler(getReviewTaskDetail),
+);
+reviewRouter.get(
+  '/tasks/:id/criterion-level-assessment',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  asyncHandler(getCriterionLevelAssessment),
+);
+reviewRouter.get(
+  '/tasks/:id/timeline',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  asyncHandler(getReviewTaskTimeline),
 );
 reviewRouter.post(
   '/tasks/:id/decision',

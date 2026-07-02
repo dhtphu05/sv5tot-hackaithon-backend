@@ -6,7 +6,19 @@ export class UsersRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
 
   findById(id: string) {
-    return this.db.user.findUnique({ where: { id } });
+    return this.db.user.findUnique({
+      where: { id },
+      include: {
+        officerSpecializations: {
+          where: { isActive: true },
+          select: {
+            criterion: true,
+            facultyScope: true,
+            isActive: true,
+          },
+        },
+      },
+    });
   }
 
   updateById(id: string, data: UpdateMeInput) {

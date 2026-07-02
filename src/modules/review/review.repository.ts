@@ -1,5 +1,5 @@
 // Owns officer review tasks, decisions, supplements, and escalation persistence.
-import { Role, type Prisma } from '@prisma/client';
+import { Role, type Criterion, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import type { ListReviewTasksQuery } from './review.validation';
@@ -8,6 +8,16 @@ export const reviewTaskListInclude = {
   application: { include: { student: true } },
   collectiveProfile: { include: { representative: true } },
   assignedOfficer: true,
+  evidences: {
+    include: {
+      evidence: {
+        include: {
+          evidenceCard: true,
+          evidenceFiles: { include: { file: true } },
+        },
+      },
+    },
+  },
   _count: { select: { evidences: true } },
 } satisfies Prisma.ReviewTaskInclude;
 
@@ -42,42 +52,89 @@ export const reviewTaskDetailInclude = {
 } satisfies Prisma.ReviewTaskInclude;
 
 export class ReviewRepository {
-  buildTaskWhere(
+  async buildTaskWhere(
     user: AuthenticatedUser,
     query: ListReviewTasksQuery,
-  ): Prisma.ReviewTaskWhereInput {
-    const base: Prisma.ReviewTaskWhereInput = {
-      ...(query.status ? { status: query.status } : {}),
-      ...(query.criterion ? { criterion: query.criterion } : {}),
-      ...(query.applicationId ? { applicationId: query.applicationId } : {}),
-      ...(query.assignedOfficerId ? { assignedOfficerId: query.assignedOfficerId } : {}),
-      ...(query.q
-        ? {
-            OR: [
-              {
-                application: { student: { fullName: { contains: query.q, mode: 'insensitive' } } },
+  ): Promise<Prisma.ReviewTaskWhereInput> {
+    const search = query.q ?? query.search;
+    const now = new Date();
+    const dueSoonLimit = new Date(now);
+    dueSoonLimit.setDate(dueSoonLimit.getDate() + 3);
+
+    const andFilters: Prisma.ReviewTaskWhereInput[] = [];
+    if (query.status) andFilters.push({ status: query.status });
+    if (query.supplementRequired) andFilters.push({ status: 'supplement_required' });
+    if (query.resolutionNeeded) andFilters.push({ status: 'resolution_needed' });
+    if (query.criterion) andFilters.push({ criterion: query.criterion });
+    if (query.applicationId) andFilters.push({ applicationId: query.applicationId });
+    if (query.assignedOfficerId) andFilters.push({ assignedOfficerId: query.assignedOfficerId });
+    if (query.targetLevel) {
+      andFilters.push({
+        OR: [
+          { application: { targetLevel: query.targetLevel } },
+          { collectiveProfile: { targetLevel: query.targetLevel } },
+        ],
+      });
+    }
+    if (query.faculty) {
+      andFilters.push({
+        OR: [
+          { application: { student: { faculty: query.faculty } } },
+          { collectiveProfile: { representative: { faculty: query.faculty } } },
+        ],
+      });
+    }
+    if (query.className) {
+      andFilters.push({
+        OR: [
+          { application: { student: { className: query.className } } },
+          { collectiveProfile: { className: query.className } },
+        ],
+      });
+    }
+    if (query.aiConfidenceMax !== undefined) {
+      andFilters.push({
+        evidences: {
+          some: {
+            evidence: {
+              OR: [
+                { confidence: { lte: query.aiConfidenceMax } },
+                { evidenceCard: { confidence: { lte: query.aiConfidenceMax } } },
+              ],
+            },
+          },
+        },
+      });
+    }
+    if (query.overdue) andFilters.push({ dueDate: { lt: now } });
+    if (query.dueSoon) andFilters.push({ dueDate: { gte: now, lte: dueSoonLimit } });
+    if (search) {
+      andFilters.push({
+        OR: [
+          {
+            application: { student: { fullName: { contains: search, mode: 'insensitive' } } },
+          },
+          {
+            application: {
+              student: { studentCode: { contains: search, mode: 'insensitive' } },
+            },
+          },
+          {
+            collectiveProfile: {
+              className: { contains: search, mode: 'insensitive' },
+            },
+          },
+          {
+            evidences: {
+              some: {
+                evidence: { evidenceName: { contains: search, mode: 'insensitive' } },
               },
-              {
-                application: {
-                  student: { studentCode: { contains: query.q, mode: 'insensitive' } },
-                },
-              },
-              {
-                collectiveProfile: {
-                  className: { contains: query.q, mode: 'insensitive' },
-                },
-              },
-              {
-                evidences: {
-                  some: {
-                    evidence: { evidenceName: { contains: query.q, mode: 'insensitive' } },
-                  },
-                },
-              },
-            ],
-          }
-        : {}),
-    };
+            },
+          },
+        ],
+      });
+    }
+    const base: Prisma.ReviewTaskWhereInput = andFilters.length ? { AND: andFilters } : {};
 
     if (user.role === Role.manager || user.role === Role.admin) {
       return query.assignedToMe ? { ...base, assignedOfficerId: user.id } : base;
@@ -87,35 +144,74 @@ export class ReviewRepository {
       return { ...base, status: query.status ?? 'resolution_needed' };
     }
 
+    const specializations = await prisma.officerSpecialization.findMany({
+      where: { officerId: user.id, isActive: true },
+      select: { criterion: true, facultyScope: true },
+    });
+    const criteria = Array.from(new Set(specializations.map((item) => item.criterion)));
+    const facultyScopes = specializations
+      .map((item) => item.facultyScope)
+      .filter((item): item is string => Boolean(item));
+    const scopedCriteriaByFaculty = specializations.filter((item) => item.facultyScope);
+    const hasGlobalCriterion = (criterion: Criterion) =>
+      specializations.some((item) => item.criterion === criterion && !item.facultyScope);
+
     return {
       ...base,
       OR: [
         { assignedOfficerId: user.id },
-        {
-          assignedOfficerId: null,
-          OR: [
-            { application: { student: { faculty: user.faculty ?? undefined } } },
-            {
-              collectiveProfile: {
-                representative: { faculty: user.faculty ?? undefined },
+        ...(criteria.length
+          ? [
+              {
+                criterion: { in: criteria },
+                OR: [
+                  ...criteria
+                    .filter((criterion) => hasGlobalCriterion(criterion))
+                    .map((criterion) => ({ criterion })),
+                  ...(facultyScopes.length
+                    ? [
+                        {
+                          application: {
+                            student: { faculty: { in: facultyScopes } },
+                          },
+                        },
+                        {
+                          collectiveProfile: {
+                            representative: { faculty: { in: facultyScopes } },
+                          },
+                        },
+                      ]
+                    : []),
+                  ...scopedCriteriaByFaculty.map((spec) => ({
+                    criterion: spec.criterion,
+                    OR: [
+                      { application: { student: { faculty: spec.facultyScope ?? undefined } } },
+                      {
+                        collectiveProfile: {
+                          representative: { faculty: spec.facultyScope ?? undefined },
+                        },
+                      },
+                    ],
+                  })),
+                ],
               },
-            },
-          ],
-        },
+            ]
+          : []),
       ],
     };
   }
 
   async list(user: AuthenticatedUser, query: ListReviewTasksQuery) {
-    const skip = (query.page - 1) * query.limit;
-    const where = this.buildTaskWhere(user, query);
+    const limit = query.pageSize ?? query.limit;
+    const skip = (query.page - 1) * limit;
+    const where = await this.buildTaskWhere(user, query);
     const [items, total] = await prisma.$transaction([
       prisma.reviewTask.findMany({
         where,
         include: reviewTaskListInclude,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ dueDate: 'asc' }, { updatedAt: 'asc' }],
         skip,
-        take: query.limit,
+        take: limit,
       }),
       prisma.reviewTask.count({ where }),
     ]);

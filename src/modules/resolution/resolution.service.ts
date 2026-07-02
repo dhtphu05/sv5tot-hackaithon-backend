@@ -62,6 +62,42 @@ export class ResolutionService {
     };
   }
 
+  async listMyEscalatedCases(user: AuthenticatedUser, query: ListResolutionCasesQuery) {
+    if (user.role !== Role.officer) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only officers can view their escalated cases');
+    }
+
+    const where = await buildListWhere(user, query);
+    const myScope: Prisma.ResolutionCaseWhereInput = {
+      OR: [
+        { createdBy: user.id },
+        { application: { reviewTasks: { some: { assignedOfficerId: user.id } } } },
+      ],
+    };
+    const finalWhere: Prisma.ResolutionCaseWhereInput = { AND: [where, myScope] };
+    const skip = (query.page - 1) * query.limit;
+    const [items, total] = await prisma.$transaction([
+      prisma.resolutionCase.findMany({
+        where: finalWhere,
+        include: resolutionInclude,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: query.limit,
+      }),
+      prisma.resolutionCase.count({ where: finalWhere }),
+    ]);
+
+    return {
+      items: items.map(toResolutionListItem),
+      pagination: {
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalPages: Math.ceil(total / query.limit),
+      },
+    };
+  }
+
   async getCaseDetail(user: AuthenticatedUser, caseId: string) {
     const resolutionCase = await this.getCase(caseId);
     await this.assertCanViewCase(user, resolutionCase);

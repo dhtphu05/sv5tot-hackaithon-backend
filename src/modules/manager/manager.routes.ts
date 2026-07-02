@@ -19,7 +19,9 @@ import {
   finalizeApplication,
   getApplicationAggregation,
   getApplicationSummary,
+  getManagerDashboardSummary,
   getManagerWorkloads,
+  listManagerResults,
   listManagerApplications,
   reopenFinalApplication,
 } from './manager.controller';
@@ -28,6 +30,7 @@ import {
   assignReviewTaskSchema,
   finalizeApplicationSchema,
   listManagerApplicationsQuerySchema,
+  listManagerResultsQuerySchema,
   reopenFinalSchema,
 } from './manager.validation';
 
@@ -73,6 +76,19 @@ managerRouter.get(
   requireRole(Role.manager, Role.admin),
   asyncHandler(getManagerWorkloads),
 );
+managerRouter.get(
+  '/dashboard-summary',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  asyncHandler(getManagerDashboardSummary),
+);
+managerRouter.get(
+  '/results',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ query: listManagerResultsQuerySchema }),
+  asyncHandler(listManagerResults),
+);
 managerRouter.post(
   '/review-tasks/:id/assign',
   requireAuth,
@@ -109,7 +125,7 @@ managerRouter.post(
 managerRouter.post(
   '/applications/:id/finalize',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.committee, Role.admin),
   validate({ body: finalizeApplicationSchema }),
   asyncHandler(finalizeApplication),
 );

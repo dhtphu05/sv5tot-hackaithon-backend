@@ -5,6 +5,11 @@ import { ReviewService } from './review.service';
 
 const service = new ReviewService();
 
+export async function getReviewDashboard(req: Request, res: Response): Promise<void> {
+  const data = await service.getDashboard(req.user!);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function listReviewTasks(req: Request, res: Response): Promise<void> {
   const data = await service.listTasks(req.user!, req.query as never);
   sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
@@ -12,6 +17,16 @@ export async function listReviewTasks(req: Request, res: Response): Promise<void
 
 export async function getReviewTaskDetail(req: Request, res: Response): Promise<void> {
   const data = await service.getTaskDetail(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function getCriterionLevelAssessment(req: Request, res: Response): Promise<void> {
+  const data = await service.getCriterionLevelAssessment(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function getReviewTaskTimeline(req: Request, res: Response): Promise<void> {
+  const data = await service.getTaskTimeline(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });
 }
 

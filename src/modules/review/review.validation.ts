@@ -1,14 +1,25 @@
-import { Criterion, EvidenceStatus, ReviewDecision, ReviewTaskStatus } from '@prisma/client';
+import { Criterion, EvidenceStatus, Level, ReviewDecision, ReviewTaskStatus } from '@prisma/client';
 import { z } from 'zod';
 
 export const listReviewTasksQuerySchema = z.object({
   status: z.nativeEnum(ReviewTaskStatus).optional(),
   criterion: z.nativeEnum(Criterion).optional(),
+  targetLevel: z.nativeEnum(Level).optional(),
+  faculty: z.string().trim().optional(),
+  className: z.string().trim().optional(),
+  search: z.string().trim().optional(),
+  riskLevel: z.enum(['low', 'medium', 'high']).optional(),
+  aiConfidenceMax: z.coerce.number().min(0).max(1).optional(),
+  dueSoon: z.coerce.boolean().optional(),
+  overdue: z.coerce.boolean().optional(),
+  supplementRequired: z.coerce.boolean().optional(),
+  resolutionNeeded: z.coerce.boolean().optional(),
   assignedToMe: z.coerce.boolean().optional(),
   assignedOfficerId: z.string().uuid().optional(),
   applicationId: z.string().uuid().optional(),
   q: z.string().trim().optional(),
   page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().positive().max(100).optional(),
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
@@ -22,10 +33,22 @@ export const evidenceDecisionSchema = z.object({
   note: z.string().max(1000).optional(),
 });
 
+export const evidenceAssessmentSchema = z.object({
+  evidenceId: z.string().uuid(),
+  assessment: z.enum(['valid', 'invalid', 'needs_supplement', 'ambiguous']),
+  note: z.string().max(1000).optional(),
+  tags: z.array(z.string().trim().min(1).max(100)).default([]),
+});
+
 export const taskDecisionSchema = z.object({
   decision: z.nativeEnum(ReviewDecision),
+  officerSuggestedLevel: z.nativeEnum(Level).nullable().optional(),
+  levelAssessmentJson: z.record(z.unknown()).optional(),
+  supplementRequestJson: z.record(z.unknown()).optional(),
+  note: z.string().max(2000).optional(),
   officerNote: z.string().max(2000).optional(),
   evidenceDecisions: z.array(evidenceDecisionSchema).default([]),
+  evidenceAssessments: z.array(evidenceAssessmentSchema).default([]),
 });
 
 export const requestSupplementSchema = z.object({
