@@ -8,8 +8,30 @@ export class AuthRepository {
     return this.db.user.findUnique({ where: { email } });
   }
 
+  findUserByStudentCode(studentCode: string) {
+    return this.db.user.findUnique({ where: { studentCode } });
+  }
+
   findUserById(id: string) {
     return this.db.user.findUnique({ where: { id } });
+  }
+
+  createStudentUser(input: {
+    fullName: string;
+    email: string;
+    passwordHash: string;
+    studentCode: string;
+    className?: string;
+    faculty?: string;
+    phone?: string;
+    lastLoginAt?: Date;
+  }) {
+    return this.db.user.create({
+      data: {
+        ...input,
+        role: 'student',
+      },
+    });
   }
 
   updateLastLogin(userId: string) {

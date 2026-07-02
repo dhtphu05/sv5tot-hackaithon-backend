@@ -72,6 +72,7 @@ Collection nam trong `data`, pagination nam trong `meta.pagination`.
 
 | Method  | URL                 | Auth                      | Body                                |
 | ------- | ------------------- | ------------------------- | ----------------------------------- |
+| `POST`  | `/api/auth/register`| Public                    | `{ fullName, email, password, studentCode, className?, faculty?, phone? }` |
 | `POST`  | `/api/auth/login`   | Public                    | `{ email, password }`               |
 | `POST`  | `/api/auth/refresh` | Public                    | `{ refreshToken }`                  |
 | `POST`  | `/api/auth/logout`  | Bearer                    | `{ refreshToken? }`                 |
@@ -88,7 +89,9 @@ Login:
 }
 ```
 
-`data` cua login:
+Register tra cung `data` shape voi login va tao tai khoan role `student`.
+
+`data` cua login/register:
 
 ```ts
 interface LoginData {

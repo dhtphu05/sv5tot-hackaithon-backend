@@ -3,7 +3,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import { sha256 } from '../../shared/utils/hash';
 import { pickSafeUser } from '../../shared/utils/pick-safe-user';
 import { AuthRepository } from './auth.repository';
-import type { LoginInput, LogoutInput, RefreshInput } from './auth.validation';
+import type { LoginInput, LogoutInput, RefreshInput, RegisterInput } from './auth.validation';
 import { PasswordService } from './password.service';
 import { TokenService } from './token.service';
 
@@ -13,6 +13,49 @@ export class AuthService {
     private readonly passwordService = new PasswordService(),
     private readonly tokenService = new TokenService(),
   ) {}
+
+  async register(input: RegisterInput, context: { userAgent?: string; ipAddress?: string }) {
+    const existingEmail = await this.authRepository.findUserByEmail(input.email);
+
+    if (existingEmail) {
+      throw new AppError(409, ErrorCodes.CONFLICT, 'Email is already registered');
+    }
+
+    const existingStudentCode = await this.authRepository.findUserByStudentCode(input.studentCode);
+
+    if (existingStudentCode) {
+      throw new AppError(409, ErrorCodes.CONFLICT, 'Student code is already registered');
+    }
+
+    const passwordHash = await this.passwordService.hashPassword(input.password);
+    const user = await this.authRepository.createStudentUser({
+      fullName: input.fullName,
+      email: input.email,
+      passwordHash,
+      studentCode: input.studentCode,
+      className: input.className,
+      faculty: input.faculty,
+      phone: input.phone,
+      lastLoginAt: new Date(),
+    });
+
+    const accessToken = this.tokenService.createAccessToken(user.id);
+    const refreshToken = this.tokenService.createRefreshToken(user.id);
+
+    await this.authRepository.createRefreshToken({
+      userId: user.id,
+      tokenHash: sha256(refreshToken.token),
+      userAgent: context.userAgent,
+      ipAddress: context.ipAddress,
+      expiresAt: refreshToken.expiresAt,
+    });
+
+    return {
+      user: pickSafeUser(user),
+      accessToken,
+      refreshToken: refreshToken.token,
+    };
+  }
 
   async login(input: LoginInput, context: { userAgent?: string; ipAddress?: string }) {
     const user = await this.authRepository.findUserByEmail(input.email);

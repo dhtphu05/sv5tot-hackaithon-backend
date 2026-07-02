@@ -4,6 +4,15 @@ import { AuthService } from './auth.service';
 
 const authService = new AuthService();
 
+export async function register(req: Request, res: Response): Promise<void> {
+  const data = await authService.register(req.body, {
+    userAgent: req.header('user-agent'),
+    ipAddress: req.ip,
+  });
+
+  sendSuccess(res, data, { requestId: req.requestId }, 201);
+}
+
 export async function login(req: Request, res: Response): Promise<void> {
   const data = await authService.login(req.body, {
     userAgent: req.header('user-agent'),
