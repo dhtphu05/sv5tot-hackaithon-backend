@@ -5,10 +5,15 @@ export const listReviewTasksQuerySchema = z.object({
   status: z.nativeEnum(ReviewTaskStatus).optional(),
   criterion: z.nativeEnum(Criterion).optional(),
   assignedToMe: z.coerce.boolean().optional(),
+  assignedOfficerId: z.string().uuid().optional(),
   applicationId: z.string().uuid().optional(),
-  q: z.string().trim().min(1).optional(),
+  q: z.string().trim().optional(),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
+export const ensureTasksSchema = z.object({
+  mode: z.enum(['missing_only', 'all']).default('missing_only'),
 });
 
 export const evidenceDecisionSchema = z.object({

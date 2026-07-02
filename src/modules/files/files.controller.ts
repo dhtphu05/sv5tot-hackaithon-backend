@@ -38,7 +38,7 @@ export async function downloadLocalFile(req: Request, res: Response): Promise<vo
     }
 
     res.sendFile(targetPath);
-  } catch (err) {
+  } catch {
     res.status(401).json({ error: 'Unauthorized or link expired' });
   }
 }

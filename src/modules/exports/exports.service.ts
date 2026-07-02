@@ -1,5 +1,5 @@
 // Owns export job requests for applications and review results.
-import { FileStorageType, Role, type Prisma } from '@prisma/client';
+import { FileStorageType, ReviewTaskStatus, Role, type Prisma } from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { uploadConfig } from '../../config/upload';
@@ -10,10 +10,57 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
-import type { ExportReviewResultsInput } from './exports.validation';
+import type {
+  ExportApplicationsQuery,
+  ExportReviewResultsInput,
+  ExportReviewTasksQuery,
+} from './exports.validation';
 
 export class ExportsService {
   constructor(private readonly storage = new LocalStorageService()) {}
+
+  async exportApplicationsJson(user: AuthenticatedUser, query: ExportApplicationsQuery) {
+    const items = await this.buildApplicationRows(query);
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: 'EXPORT_APPLICATIONS_JSON',
+      targetType: 'export',
+      targetId: 'applications.json',
+      afterStateJson: { rowCount: items.length, filters: query },
+    });
+    return {
+      exportedAt: new Date().toISOString(),
+      filters: query,
+      items,
+    };
+  }
+
+  async exportApplicationsCsv(user: AuthenticatedUser, query: ExportApplicationsQuery) {
+    const items = await this.buildApplicationRows(query);
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: 'EXPORT_APPLICATIONS_CSV',
+      targetType: 'export',
+      targetId: 'applications.csv',
+      afterStateJson: { rowCount: items.length, filters: query },
+    });
+    return toCsv(items, applicationCsvHeaders);
+  }
+
+  async exportReviewTasksCsv(user: AuthenticatedUser, query: ExportReviewTasksQuery) {
+    const items = await this.buildReviewTaskRows(query);
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: 'EXPORT_REVIEW_TASKS_CSV',
+      targetType: 'export',
+      targetId: 'review-tasks.csv',
+      afterStateJson: { rowCount: items.length, filters: query },
+    });
+    return toCsv(items, reviewTaskCsvHeaders);
+  }
 
   async exportReviewResults(user: AuthenticatedUser, input: ExportReviewResultsInput) {
     const data = await this.buildRows(input);
@@ -135,10 +182,139 @@ export class ExportsService {
           ?.note ?? null,
     }));
   }
+
+  private async buildApplicationRows(query: ExportApplicationsQuery) {
+    const where = buildApplicationWhere(query);
+    const applications = await prisma.application.findMany({
+      where,
+      include: {
+        student: true,
+        evidences: { select: { id: true } },
+        reviewTasks: { select: { status: true } },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { submittedAt: 'desc' }],
+    });
+
+    return applications.map((application) => {
+      const count = (status: ReviewTaskStatus) =>
+        application.reviewTasks.filter((task) => task.status === status).length;
+      return {
+        applicationId: application.id,
+        schoolYear: application.schoolYear,
+        applicationType: application.applicationType,
+        targetLevel: application.targetLevel,
+        status: application.status,
+        studentCode: application.student.studentCode,
+        studentName: application.student.fullName,
+        className: application.student.className,
+        faculty: application.student.faculty,
+        evidenceCount: application.evidences.length,
+        reviewTaskCount: application.reviewTasks.length,
+        acceptedTaskCount: count(ReviewTaskStatus.accepted),
+        rejectedTaskCount: count(ReviewTaskStatus.rejected),
+        supplementTaskCount: count(ReviewTaskStatus.supplement_required),
+        resolutionTaskCount: count(ReviewTaskStatus.resolution_needed),
+        updatedAt: application.updatedAt.toISOString(),
+      };
+    });
+  }
+
+  private async buildReviewTaskRows(query: ExportReviewTasksQuery) {
+    const where: Prisma.ReviewTaskWhereInput = {
+      ...(query.criterion ? { criterion: query.criterion } : {}),
+      application: buildApplicationWhere(query),
+    };
+    const tasks = await prisma.reviewTask.findMany({
+      where,
+      include: {
+        assignedOfficer: true,
+        application: { include: { student: true } },
+        evidences: { select: { evidenceId: true } },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    return tasks.map((task) => ({
+      reviewTaskId: task.id,
+      applicationId: task.applicationId,
+      schoolYear: task.application?.schoolYear,
+      targetLevel: task.application?.targetLevel,
+      applicationStatus: task.application?.status,
+      criterion: task.criterion,
+      status: task.status,
+      decision: task.decision,
+      assignedOfficerId: task.assignedOfficerId,
+      assignedOfficerName: task.assignedOfficer?.fullName,
+      studentCode: task.application?.student.studentCode,
+      studentName: task.application?.student.fullName,
+      className: task.application?.student.className,
+      faculty: task.application?.student.faculty,
+      evidenceCount: task.evidences.length,
+      dueDate: task.dueDate?.toISOString() ?? null,
+      updatedAt: task.updatedAt.toISOString(),
+    }));
+  }
 }
 
-function toCsv(rows: Array<Record<string, unknown>>): string {
-  const headers = [
+function buildApplicationWhere(input: ExportApplicationsQuery): Prisma.ApplicationWhereInput {
+  return {
+    ...(input.schoolYear ? { schoolYear: input.schoolYear } : {}),
+    ...(input.status ? { status: input.status } : {}),
+    ...(input.targetLevel ? { targetLevel: input.targetLevel } : {}),
+    ...(input.faculty ? { student: { faculty: input.faculty } } : {}),
+    ...(input.fromDate || input.toDate
+      ? {
+          updatedAt: {
+            ...(input.fromDate ? { gte: new Date(input.fromDate) } : {}),
+            ...(input.toDate ? { lte: new Date(input.toDate) } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+const applicationCsvHeaders = [
+  'applicationId',
+  'schoolYear',
+  'applicationType',
+  'targetLevel',
+  'status',
+  'studentCode',
+  'studentName',
+  'className',
+  'faculty',
+  'evidenceCount',
+  'reviewTaskCount',
+  'acceptedTaskCount',
+  'rejectedTaskCount',
+  'supplementTaskCount',
+  'resolutionTaskCount',
+  'updatedAt',
+] as const;
+
+const reviewTaskCsvHeaders = [
+  'reviewTaskId',
+  'applicationId',
+  'schoolYear',
+  'targetLevel',
+  'applicationStatus',
+  'criterion',
+  'status',
+  'decision',
+  'assignedOfficerId',
+  'assignedOfficerName',
+  'studentCode',
+  'studentName',
+  'className',
+  'faculty',
+  'evidenceCount',
+  'dueDate',
+  'updatedAt',
+] as const;
+
+function toCsv<T extends Record<string, unknown>>(
+  rows: T[],
+  headers: readonly string[] = [
     'studentCode',
     'fullName',
     'className',
@@ -153,7 +329,8 @@ function toCsv(rows: Array<Record<string, unknown>>): string {
     'completedAt',
     'criteriaTaskStatuses',
     'finalNote',
-  ];
+  ],
+): string {
   return [
     headers.join(','),
     ...rows.map((row) => headers.map((header) => escapeCsv(row[header])).join(',')),

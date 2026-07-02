@@ -1,10 +1,11 @@
 // Owns evidence records, evidence files, indexing triggers, and evidence cards.
 import {
+  ApplicationStatus,
   EvidenceSourceType,
   EvidenceStatus,
   FileStorageType,
   IndexingStatus,
-  JobType,
+  ReviewTaskStatus,
   Role,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
@@ -20,7 +21,7 @@ import {
   assertApplicationOwner,
   createApplicationAudit,
 } from '../applications/application.helpers';
-import { JobsService, runIndexingJob } from '../jobs/jobs.service';
+import { JobsService } from '../jobs/jobs.service';
 import { EvidencesRepository } from './evidences.repository';
 import type {
   CreateEvidenceInput,
@@ -59,17 +60,67 @@ export class EvidencesService {
     assertApplicationOwner(application, user);
     assertApplicationEditable(application);
 
+    // Business rule: sourceType = collective_import: chỉ role class_representative/manager/admin được tạo
+    if (input.sourceType === EvidenceSourceType.collective_import) {
+      if (
+        user.role !== Role.class_representative &&
+        user.role !== Role.manager &&
+        user.role !== Role.admin
+      ) {
+        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only class representatives or managers can create collective imports');
+      }
+    }
+
+    // Business rule: sourceType = event_import: phải có metadata.eventId hoặc eventId
+    if (input.sourceType === EvidenceSourceType.event_import) {
+      const eventId = input.eventId ?? input.metadata?.eventId;
+      if (!eventId) {
+        throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'eventId or metadata.eventId is required for event_import');
+      }
+    }
+
+    // Determine initial status based on sourceType
+    let status: EvidenceStatus = EvidenceStatus.draft;
+    let indexingStatus: IndexingStatus = IndexingStatus.not_started;
+
+    if (
+      input.sourceType === EvidenceSourceType.metric_input ||
+      input.sourceType === EvidenceSourceType.event_import ||
+      input.sourceType === EvidenceSourceType.collective_import
+    ) {
+      status = EvidenceStatus.under_review;
+      indexingStatus = IndexingStatus.indexed;
+    }
+
+    const eventId = input.eventId ?? input.metadata?.eventId ?? null;
+
     const evidence = await prisma.$transaction(async (tx) => {
       const created = await tx.evidence.create({
         data: {
           applicationId,
           evidenceName: input.evidenceName,
           criterion: input.criterion,
-          sourceType: EvidenceSourceType.manual_upload,
-          status: EvidenceStatus.draft,
-          indexingStatus: IndexingStatus.not_started,
+          sourceType: input.sourceType,
+          eventId: eventId,
+          status,
+          indexingStatus,
         },
       });
+
+      // Optionally create an EvidenceCard with description/metadata to store them without schema changes
+      if (input.description || input.metadata) {
+        await tx.evidenceCard.create({
+          data: {
+            evidenceId: created.id,
+            ocrText: input.description ?? 'Minh chứng được nhập thủ công.',
+            extractedFieldsJson: (input.metadata ?? {}) as any,
+            warningsJson: [],
+            confidence: 1.0,
+            aiSummary: 'Minh chứng xét duyệt thủ công không dùng AI.',
+            rawAiResponse: { manual: true },
+          },
+        });
+      }
 
       await createApplicationAudit(tx, {
         actorId: user.id,
@@ -82,6 +133,7 @@ export class EvidencesService {
           evidenceName: created.evidenceName,
           criterion: created.criterion,
           sourceType: created.sourceType,
+          status: created.status,
         },
       });
 
@@ -95,6 +147,18 @@ export class EvidencesService {
     const evidence = await this.getRequiredEvidence(evidenceId);
     assertApplicationOwner(evidence.application!, user);
     assertApplicationEditable(evidence.application!);
+
+    if (
+      evidence.status === EvidenceStatus.accepted ||
+      evidence.status === EvidenceStatus.rejected ||
+      evidence.status === EvidenceStatus.resolution_needed
+    ) {
+      throw new AppError(
+        400,
+        ErrorCodes.EVIDENCE_NOT_EDITABLE,
+        'Cannot update evidence that has already been decided or escalated',
+      );
+    }
 
     await prisma.$transaction(async (tx) => {
       const updated = await tx.evidence.update({
@@ -127,6 +191,18 @@ export class EvidencesService {
     const evidence = await this.getRequiredEvidence(evidenceId);
     assertApplicationOwner(evidence.application!, user);
     assertApplicationEditable(evidence.application!);
+
+    if (
+      evidence.status === EvidenceStatus.accepted ||
+      evidence.status === EvidenceStatus.rejected ||
+      evidence.status === EvidenceStatus.resolution_needed
+    ) {
+      throw new AppError(
+        400,
+        ErrorCodes.EVIDENCE_NOT_EDITABLE,
+        'Cannot delete evidence that has already been decided or escalated',
+      );
+    }
 
     const filesToDelete = evidence.evidenceFiles.map((link) => ({
       filePath: link.file.filePath,
@@ -164,21 +240,84 @@ export class EvidencesService {
     return { deleted: true };
   }
 
-  async uploadFile(user: AuthenticatedUser, evidenceId: string, file?: UploadedEvidenceFile) {
+  async uploadFile(
+    user: AuthenticatedUser,
+    evidenceId: string,
+    file?: UploadedEvidenceFile,
+    body?: { displayName?: string; note?: string },
+  ) {
     if (!file) {
       throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Evidence file is required');
     }
 
     const evidence = await this.getRequiredEvidence(evidenceId);
-    assertApplicationOwner(evidence.application!, user);
-    assertApplicationEditable(evidence.application!);
 
-    if (evidence.sourceType !== EvidenceSourceType.manual_upload) {
-      throw new AppError(
-        400,
-        ErrorCodes.EVIDENCE_NOT_EDITABLE,
-        'Evidence source is not uploadable',
-      );
+    // Business rule: Student phải là owner application nếu role student.
+    // Application còn editable hoặc đang supplement_required cho evidence/criterion đó.
+    if (user.role === Role.student || user.role === Role.class_representative) {
+      assertApplicationOwner(evidence.application!, user);
+
+      if (evidence.application!.status === ApplicationStatus.supplement_required) {
+        // Check if there is an active supplement request for this criterion
+        const hasSupplementTask = await prisma.reviewTask.findFirst({
+          where: {
+            applicationId: evidence.applicationId,
+            criterion: evidence.criterion,
+            status: ReviewTaskStatus.supplement_required,
+          },
+        });
+        if (!hasSupplementTask) {
+          throw new AppError(
+            403,
+            ErrorCodes.EVIDENCE_NOT_EDITABLE,
+            'This evidence/criterion does not require supplement',
+          );
+        }
+      } else {
+        assertApplicationEditable(evidence.application!);
+      }
+    }
+
+    // Business rule: Officer/manager có thể upload file bổ sung chỉ khi workflow cho phép.
+    const isStaff =
+      user.role === Role.officer ||
+      user.role === Role.manager ||
+      user.role === Role.admin ||
+      user.role === Role.committee;
+
+    if (isStaff) {
+      const allowedStaffStatuses: ApplicationStatus[] = [
+        ApplicationStatus.under_review,
+        ApplicationStatus.supplement_required,
+        ApplicationStatus.resolution_needed,
+        ApplicationStatus.draft,
+        ApplicationStatus.prechecked,
+        ApplicationStatus.ready_to_submit,
+      ];
+      if (!allowedStaffStatuses.includes(evidence.application!.status)) {
+        throw new AppError(
+          403,
+          ErrorCodes.EVIDENCE_NOT_EDITABLE,
+          `Workflow does not allow staff to upload files when application status is ${evidence.application!.status}`,
+        );
+      }
+    }
+
+    // Business rule: Không cho upload vào evidence accepted/rejected/completed trừ manager/admin.
+    const isManagerOrAdmin = user.role === Role.manager || user.role === Role.admin;
+    if (!isManagerOrAdmin) {
+      if (
+        evidence.status === EvidenceStatus.accepted ||
+        evidence.status === EvidenceStatus.rejected ||
+        evidence.application!.status === ApplicationStatus.completed ||
+        evidence.application!.status === ApplicationStatus.rejected
+      ) {
+        throw new AppError(
+          403,
+          ErrorCodes.EVIDENCE_NOT_EDITABLE,
+          'Cannot upload files to already finalized evidence or application unless you are manager/admin',
+        );
+      }
     }
 
     // Validate MIME Type
@@ -192,21 +331,20 @@ export class EvidencesService {
     }
 
     // Validate File Size
-    const maxSizeBytes = env.MAX_FILE_SIZE_MB * 1024 * 1024;
+    const maxSizeBytes = (env.MAX_FILE_SIZE_MB || 10) * 1024 * 1024;
     if (file.size > maxSizeBytes) {
       throw new AppError(
         400,
         ErrorCodes.FILE_TOO_LARGE,
-        `File is too large. Max allowed size is ${env.MAX_FILE_SIZE_MB}MB.`,
+        `File is too large. Max allowed size is ${env.MAX_FILE_SIZE_MB || 10}MB.`,
       );
     }
 
     // Generate Structured Object Key
-    const schoolYear = evidence.application?.schoolYear ?? 'unknown-year';
     const applicationId = evidence.applicationId ?? 'unknown-app';
     const timestamp = Date.now();
     const safeOriginalName = sanitizeFileName(file.originalname);
-    const objectKey = `evidence/${schoolYear}/${applicationId}/${evidence.id}/${timestamp}-${safeOriginalName}`;
+    const objectKey = `applications/${applicationId}/evidences/${evidence.id}/${timestamp}-${safeOriginalName}`;
 
     // Upload via StorageService
     await this.storageService.uploadObject({
@@ -216,13 +354,14 @@ export class EvidencesService {
     });
 
     const result = await prisma.$transaction(async (tx) => {
+      const originalName = body?.displayName || file.originalname;
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
           storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
           filePath: objectKey,
           publicUrl: null,
-          originalName: file.originalname,
+          originalName,
           mimeType: file.mimetype,
           fileSize: file.size,
           uploadedBy: user.id,
@@ -238,20 +377,31 @@ export class EvidencesService {
         },
       });
 
+      // Status rule sau upload
+      let status = evidence.status;
+      let indexingStatus = evidence.indexingStatus;
+
+      if (evidence.sourceType === EvidenceSourceType.manual_upload) {
+        status = EvidenceStatus.under_review;
+        indexingStatus = IndexingStatus.indexed;
+      }
+
       const updatedEvidence = await tx.evidence.update({
         where: { id: evidence.id },
         data: {
-          indexingStatus: IndexingStatus.uploaded,
-          status: EvidenceStatus.pending_indexing,
+          status,
+          indexingStatus,
         },
-      });
-
-      const job = await tx.indexingJob.create({
-        data: {
-          jobType: JobType.evidence_ocr,
-          targetId: evidence.id,
-          status: 'queued',
-          attempts: 0,
+        include: {
+          application: { include: { student: true } },
+          collectiveProfile: true,
+          evidenceFiles: {
+            include: {
+              file: true,
+            },
+            orderBy: { id: 'asc' as const },
+          },
+          evidenceCard: true,
         },
       });
 
@@ -264,67 +414,62 @@ export class EvidencesService {
         applicationId: evidence.applicationId,
         afterStateJson: { filePath: fileRecord.filePath, mimeType: fileRecord.mimeType },
       });
+
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
-        action: auditActions.EVIDENCE_FILE_UPLOADED,
+        action: 'EVIDENCE_FILE_UPLOADED',
         targetType: 'evidence',
         targetId: evidence.id,
         applicationId: evidence.applicationId,
-        afterStateJson: { fileId: fileRecord.id, fileRole },
-      });
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActions.INDEXING_JOB_CREATED,
-        targetType: 'job',
-        targetId: job.id,
-        applicationId: evidence.applicationId,
-        afterStateJson: { jobType: job.jobType, status: job.status },
+        afterStateJson: { fileId: fileRecord.id, fileRole, displayName: originalName },
+        note: body?.note || 'Uploaded file.',
       });
 
-      return { evidence: updatedEvidence, file: fileRecord, job };
+      if (evidence.sourceType === EvidenceSourceType.manual_upload) {
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'EVIDENCE_READY_FOR_MANUAL_REVIEW',
+          targetType: 'evidence',
+          targetId: evidence.id,
+          applicationId: evidence.applicationId,
+          afterStateJson: { status, indexingStatus },
+        });
+      }
+
+      return {
+        evidence: this.toEvidenceDto(updatedEvidence, user),
+        file: {
+          id: fileRecord.id,
+          evidenceId: evidence.id,
+          fileName: fileRecord.originalName,
+          mimeType: fileRecord.mimeType,
+          size: fileRecord.fileSize,
+          storageType: fileRecord.storageType,
+          storageKey: fileRecord.filePath,
+          publicUrl: fileRecord.publicUrl,
+          uploadedAt: fileRecord.createdAt.toISOString(),
+        },
+        job: null,
+        jobId: null,
+        mode: 'non_ai',
+      };
     });
 
     return result;
   }
 
-  async startIndexing(user: AuthenticatedUser, evidenceId: string, input: StartIndexingInput) {
+  async startIndexing(user: AuthenticatedUser, evidenceId: string, _input: StartIndexingInput) {
     const evidence = await this.getRequiredEvidence(evidenceId);
     this.assertCanViewEvidence(user, evidence);
 
-    if (evidence.evidenceFiles.length === 0) {
-      throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Evidence has no files');
-    }
-
-    if (evidence.indexingStatus === IndexingStatus.indexed && !input.force) {
-      return {
-        job: null,
-        evidence: this.toEvidenceDto(evidence, user),
-        card: evidence.evidenceCard,
-      };
-    }
-
-    const existing = await this.jobsService.getActiveJobForTarget(
-      evidence.id,
-      JobType.evidence_ocr,
-    );
-    const job = existing
-      ? existing
-      : (await this.jobsService.enqueueIndexingJob(evidence.id, JobType.evidence_ocr)).job;
-
-    if (input.runMode === 'sync') {
-      const completedJob = await runIndexingJob(job.id);
-      const refreshed = await this.getRequiredEvidence(evidence.id);
-      return {
-        job: completedJob,
-        evidence: this.toEvidenceDto(refreshed, user),
-      };
-    }
-
     return {
-      job,
       evidence: this.toEvidenceDto(evidence, user),
+      job: null,
+      jobId: null,
+      mode: 'non_ai_disabled',
+      message: 'Indexing/OCR is disabled in this sprint; evidence is ready for manual review.',
     };
   }
 
@@ -334,8 +479,19 @@ export class EvidencesService {
 
     if (!evidence.evidenceCard) {
       return {
-        card: null,
-        indexingStatus: evidence.indexingStatus,
+        card: {
+          id: 'mock-card-' + evidence.id,
+          ocrText: "Minh chứng được xác nhận thủ công.",
+          extractedFieldsJson: {},
+          warningsJson: [],
+          matchedEventId: evidence.eventId,
+          matchedKnowledgeItemIds: [],
+          confidence: 1.0,
+          aiSummary: "Minh chứng xét duyệt thủ công không dùng AI trích xuất.",
+          createdAt: evidence.createdAt,
+          updatedAt: evidence.updatedAt,
+        },
+        indexingStatus: IndexingStatus.indexed,
       };
     }
 

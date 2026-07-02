@@ -6,12 +6,14 @@ import { validate } from '../../middlewares/validate.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
 import {
   decideReviewTask,
+  ensureReviewTasks,
   escalateReviewTaskResolution,
   getReviewTaskDetail,
   listReviewTasks,
   requestReviewTaskSupplement,
 } from './review.controller';
 import {
+  ensureTasksSchema,
   escalateResolutionSchema,
   listReviewTasksQuerySchema,
   requestSupplementSchema,
@@ -19,6 +21,14 @@ import {
 } from './review.validation';
 
 export const reviewRouter = Router();
+
+reviewRouter.post(
+  '/applications/:applicationId/tasks/ensure',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.admin),
+  validate({ body: ensureTasksSchema }),
+  asyncHandler(ensureReviewTasks),
+);
 
 reviewRouter.get(
   '/tasks',

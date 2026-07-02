@@ -1,10 +1,30 @@
 // Owns committee resolution cases and final dispute decisions validation.
-import { Criterion, KnowledgeDecision, ResolutionStatus } from '@prisma/client';
+import { Criterion } from '@prisma/client';
 import { z } from 'zod';
 
+export const resolutionStatusQuerySchema = z.enum([
+  'open',
+  'analyzing',
+  'committee_review',
+  'in_review',
+  'resolved',
+  'closed',
+  'rejected',
+]);
+
+export const resolutionPrioritySchema = z.enum(['low', 'normal', 'high']);
+
+export const resolutionFinalDecisionSchema = z.enum([
+  'accepted',
+  'rejected',
+  'supplement_required',
+  'closed_no_action',
+]);
+
 export const listResolutionCasesQuerySchema = z.object({
-  status: z.nativeEnum(ResolutionStatus).optional(),
+  status: resolutionStatusQuerySchema.optional(),
   criterion: z.nativeEnum(Criterion).optional(),
+  priority: resolutionPrioritySchema.optional(),
   applicationId: z.string().uuid().optional(),
   evidenceId: z.string().uuid().optional(),
   q: z.string().trim().min(1).optional(),
@@ -12,19 +32,23 @@ export const listResolutionCasesQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
+export const evidenceResolutionDecisionSchema = z.object({
+  evidenceId: z.string().uuid(),
+  decision: resolutionFinalDecisionSchema.exclude(['closed_no_action']),
+  note: z.string().trim().max(1000).optional(),
+});
+
 export const resolutionDecisionSchema = z.object({
-  decision: z.nativeEnum(KnowledgeDecision),
-  committeeNote: z.string().min(1).max(2000),
-  updateRelatedTask: z.boolean().default(true),
-  saveToKnowledgeBase: z.boolean().default(false),
-  knowledgeBase: z
-    .object({
-      decision: z.nativeEnum(KnowledgeDecision),
-      reason: z.string().min(1).max(2000),
-      requiredFields: z.array(z.string()).default([]),
-      commonErrors: z.array(z.string()).default([]),
-    })
-    .optional(),
+  decision: resolutionFinalDecisionSchema,
+  note: z.string().trim().min(1).max(2000),
+  updateKnowledgeBase: z.boolean().default(false),
+  knowledgeBaseTitle: z.string().trim().max(255).optional(),
+  evidenceDecisions: z.array(evidenceResolutionDecisionSchema).default([]),
+});
+
+export const resolutionStatusUpdateSchema = z.object({
+  status: resolutionStatusQuerySchema,
+  note: z.string().trim().max(2000).optional(),
 });
 
 export const reopenResolutionCaseSchema = z.object({
@@ -33,4 +57,5 @@ export const reopenResolutionCaseSchema = z.object({
 
 export type ListResolutionCasesQuery = z.infer<typeof listResolutionCasesQuerySchema>;
 export type ResolutionDecisionInput = z.infer<typeof resolutionDecisionSchema>;
+export type ResolutionStatusUpdateInput = z.infer<typeof resolutionStatusUpdateSchema>;
 export type ReopenResolutionCaseInput = z.infer<typeof reopenResolutionCaseSchema>;

@@ -6,18 +6,18 @@ import { EvidencesService } from './evidences.service';
 const evidencesService = new EvidencesService();
 
 export async function listApplicationEvidences(req: Request, res: Response): Promise<void> {
-  const data = await evidencesService.list(req.user!, String(req.params.id), req.query as never);
-  sendSuccess(res, data.items, { requestId: req.requestId, pagination: data.pagination });
+  const data = await evidencesService.list(req.user!, String(req.params.applicationId ?? req.params.id), req.query as never);
+  sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
 }
 
 export async function createApplicationEvidence(req: Request, res: Response): Promise<void> {
-  const data = await evidencesService.create(req.user!, String(req.params.id), req.body);
-  sendSuccess(res, data, { requestId: req.requestId }, 201);
+  const evidence = await evidencesService.create(req.user!, String(req.params.applicationId ?? req.params.id), req.body);
+  sendSuccess(res, { evidence }, { requestId: req.requestId }, 201);
 }
 
 export async function updateEvidence(req: Request, res: Response): Promise<void> {
-  const data = await evidencesService.update(req.user!, String(req.params.id), req.body);
-  sendSuccess(res, data, { requestId: req.requestId });
+  const evidence = await evidencesService.update(req.user!, String(req.params.id), req.body);
+  sendSuccess(res, { evidence }, { requestId: req.requestId });
 }
 
 export async function deleteEvidence(req: Request, res: Response): Promise<void> {
@@ -26,7 +26,7 @@ export async function deleteEvidence(req: Request, res: Response): Promise<void>
 }
 
 export async function uploadEvidenceFile(req: Request, res: Response): Promise<void> {
-  const data = await evidencesService.uploadFile(req.user!, String(req.params.id), req.file);
+  const data = await evidencesService.uploadFile(req.user!, String(req.params.id), req.file, req.body);
   sendSuccess(res, data, { requestId: req.requestId }, 201);
 }
 

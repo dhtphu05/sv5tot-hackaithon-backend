@@ -7,11 +7,16 @@ const service = new ReviewService();
 
 export async function listReviewTasks(req: Request, res: Response): Promise<void> {
   const data = await service.listTasks(req.user!, req.query as never);
-  sendSuccess(res, data.items, { requestId: req.requestId, pagination: data.pagination });
+  sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
 }
 
 export async function getReviewTaskDetail(req: Request, res: Response): Promise<void> {
   const data = await service.getTaskDetail(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function ensureReviewTasks(req: Request, res: Response): Promise<void> {
+  const data = await service.ensureReviewTasks(req.user!, String(req.params.applicationId), req.body);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 

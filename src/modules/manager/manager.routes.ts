@@ -14,14 +14,17 @@ import {
   listManagerCollectivesQuerySchema,
 } from '../collective/collective.validation';
 import {
+  aggregateApplication,
   assignManagerReviewTask,
   finalizeApplication,
   getApplicationAggregation,
+  getApplicationSummary,
   getManagerWorkloads,
   listManagerApplications,
   reopenFinalApplication,
 } from './manager.controller';
 import {
+  aggregateApplicationSchema,
   assignReviewTaskSchema,
   finalizeApplicationSchema,
   listManagerApplicationsQuerySchema,
@@ -59,6 +62,12 @@ managerRouter.get(
   asyncHandler(listManagerApplications),
 );
 managerRouter.get(
+  '/workload',
+  requireAuth,
+  requireRole(Role.manager, Role.admin),
+  asyncHandler(getManagerWorkloads),
+);
+managerRouter.get(
   '/workloads',
   requireAuth,
   requireRole(Role.manager, Role.admin),
@@ -71,11 +80,31 @@ managerRouter.post(
   validate({ body: assignReviewTaskSchema }),
   asyncHandler(assignManagerReviewTask),
 );
+managerRouter.patch(
+  '/review-tasks/:id/reassign',
+  requireAuth,
+  requireRole(Role.manager, Role.admin),
+  validate({ body: assignReviewTaskSchema }),
+  asyncHandler(assignManagerReviewTask),
+);
+managerRouter.get(
+  '/applications/:id/summary',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  asyncHandler(getApplicationSummary),
+);
 managerRouter.get(
   '/applications/:id/aggregation',
   requireAuth,
   requireRole(Role.manager, Role.committee, Role.admin),
   asyncHandler(getApplicationAggregation),
+);
+managerRouter.post(
+  '/applications/:id/aggregate',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ body: aggregateApplicationSchema }),
+  asyncHandler(aggregateApplication),
 );
 managerRouter.post(
   '/applications/:id/finalize',

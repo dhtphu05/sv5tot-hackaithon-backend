@@ -1,11 +1,11 @@
 // Owns officer review tasks, decisions, supplements, and escalation.
 import {
   ApplicationStatus,
+  Criterion,
   NotificationType,
   ReviewDecision,
   ReviewTaskStatus,
   Role,
-  type Criterion,
   type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
@@ -14,16 +14,14 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
-import { NotificationsService } from '../notifications/notifications.service';
+import {
+  createNotification,
+  NotificationsService,
+} from '../notifications/notifications.service';
 import { ReviewAssignmentService } from './review-assignment.service';
 import { getApplicationReviewProgress } from './review-progress.service';
 import { ReviewRepository } from './review.repository';
-import type {
-  EscalateResolutionInput,
-  ListReviewTasksQuery,
-  RequestSupplementInput,
-  TaskDecisionInput,
-} from './review.validation';
+import type { ListReviewTasksQuery, TaskDecisionInput } from './review.validation';
 
 export class ReviewService {
   constructor(
@@ -79,28 +77,65 @@ export class ReviewService {
       })),
     );
 
+    const auditLogs = taskForResponse.applicationId
+      ? await prisma.auditLog.findMany({
+          where: { applicationId: taskForResponse.applicationId },
+          orderBy: { createdAt: 'desc' },
+        })
+      : [];
+
     return {
       task: toTaskDetail(taskForResponse),
       application: taskForResponse.application
-        ? toApplicationSummary(taskForResponse.application)
+        ? {
+            id: taskForResponse.application.id,
+            schoolYear: taskForResponse.application.schoolYear,
+            targetLevel: taskForResponse.application.targetLevel,
+            applicationType: taskForResponse.application.applicationType,
+            status: taskForResponse.application.status,
+          }
         : null,
       collectiveProfile: taskForResponse.collectiveProfile,
-      student: taskForResponse.application?.student ?? null,
+      student: taskForResponse.application?.student
+        ? {
+            id: taskForResponse.application.student.id,
+            fullName: taskForResponse.application.student.fullName,
+            studentCode: taskForResponse.application.student.studentCode,
+            className: taskForResponse.application.student.className,
+            faculty: taskForResponse.application.student.faculty,
+            email: taskForResponse.application.student.email,
+          }
+        : null,
       metrics:
         taskForResponse.application?.metrics.filter(
           (metric) => metric.metricType === metricForCriterion(taskForResponse.criterion),
         ) ?? [],
       evidences: evidences.map((evidence) => ({
         id: evidence.id,
+        applicationId: evidence.applicationId,
         evidenceName: evidence.evidenceName,
         criterion: evidence.criterion,
         sourceType: evidence.sourceType,
         status: evidence.status,
         indexingStatus: evidence.indexingStatus,
         confidence: evidence.confidence,
-        files: evidence.evidenceFiles.map((item) => item.file),
-        card: evidence.evidenceCard,
-        event: evidence.event,
+        createdAt: evidence.createdAt,
+        updatedAt: evidence.updatedAt,
+        files: (evidence.evidenceFiles || []).map((link) => ({
+          id: link.file.id,
+          originalName: link.file.originalName,
+          mimeType: link.file.mimeType,
+          fileSize: link.file.fileSize,
+          publicUrl: link.file.publicUrl,
+          fileRole: link.fileRole,
+        })),
+        card: evidence.evidenceCard
+          ? {
+              id: evidence.evidenceCard.id,
+              confidence: evidence.evidenceCard.confidence,
+              warnings: evidence.evidenceCard.warningsJson || [],
+            }
+          : null,
       })),
       precheck:
         taskForResponse.application?.precheckResults[0] ??
@@ -109,6 +144,7 @@ export class ReviewService {
       cascade: taskForResponse.application?.cascadeReviews[0] ?? null,
       knowledgeBaseMatches,
       criteriaChecklist: buildCriteriaChecklist(taskForResponse.criterion),
+      audit: auditLogs,
     };
   }
 
@@ -139,6 +175,18 @@ export class ReviewService {
       );
     }
 
+    // Verify evidenceDecisions belong to task
+    const linkedEvidenceIds = new Set(task.evidences.map((te) => te.evidenceId));
+    for (const ed of input.evidenceDecisions) {
+      if (!linkedEvidenceIds.has(ed.evidenceId)) {
+        throw new AppError(
+          400,
+          ErrorCodes.VALIDATION_ERROR,
+          `Evidence ${ed.evidenceId} does not belong to this review task`,
+        );
+      }
+    }
+
     if (task.collectiveProfileId && task.collectiveProfile) {
       return this.decideCollectiveTask(user, task, input);
     }
@@ -160,12 +208,38 @@ export class ReviewService {
         include: { application: { include: { student: true } }, assignedOfficer: true },
       });
 
-      for (const evidenceDecision of input.evidenceDecisions) {
-        await tx.evidence.update({
-          where: { id: evidenceDecision.evidenceId },
-          data: { status: evidenceDecision.status },
+      // Update specific or all linked evidences based on decision status
+      const evidenceIds = task.evidences.map((e) => e.evidenceId);
+      if (input.evidenceDecisions.length > 0) {
+        for (const ed of input.evidenceDecisions) {
+          await tx.evidence.update({
+            where: { id: ed.evidenceId },
+            data: { status: ed.status },
+          });
+        }
+      } else {
+        let defaultEvidenceStatus = 'under_review';
+        if (input.decision === ReviewDecision.accepted) defaultEvidenceStatus = 'accepted';
+        if (input.decision === ReviewDecision.rejected) defaultEvidenceStatus = 'rejected';
+        if (input.decision === ReviewDecision.supplement_required) defaultEvidenceStatus = 'needs_supplement';
+        if (input.decision === ReviewDecision.resolution_needed) defaultEvidenceStatus = 'resolution_needed';
+
+        await tx.evidence.updateMany({
+          where: { id: { in: evidenceIds } },
+          data: { status: defaultEvidenceStatus as any },
         });
       }
+
+      // Audit status updates
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: 'EVIDENCE_STATUS_UPDATED',
+        targetType: 'review_task',
+        targetId: task.id,
+        applicationId,
+        afterStateJson: { decision: input.decision },
+      });
 
       if (input.decision === ReviewDecision.supplement_required) {
         await tx.application.update({
@@ -176,7 +250,9 @@ export class ReviewService {
           {
             userId: application.studentId,
             applicationId,
-            type: NotificationType.supplement_required,
+            reviewTaskId: task.id,
+            metadata: { criterion: task.criterion, evidenceIds },
+            type: NotificationType.supplement_requested,
             title: 'Cần bổ sung minh chứng',
             message: input.officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
           },
@@ -189,42 +265,106 @@ export class ReviewService {
           where: { id: applicationId },
           data: { status: ApplicationStatus.resolution_needed },
         });
-        await tx.resolutionCase.create({
-          data: {
-            applicationId,
-            reason: input.officerNote ?? 'Cần hội đồng xem xét.',
-            createdBy: user.id,
-          },
+
+        const existingCase = await tx.resolutionCase.findFirst({
+          where: { applicationId, status: 'open' },
         });
+        let resolutionCaseId = existingCase?.id ?? null;
+        if (!existingCase) {
+          const createdCase = await tx.resolutionCase.create({
+            data: {
+              applicationId,
+              reason: input.officerNote ?? 'Cần hội đồng xem xét.',
+              createdBy: user.id,
+              status: 'open',
+            },
+          });
+          resolutionCaseId = createdCase.id;
+        }
+
+        await this.notificationsService.create(
+          {
+            userId: application.studentId,
+            applicationId,
+            reviewTaskId: task.id,
+            resolutionCaseId,
+            metadata: { criterion: task.criterion, evidenceIds },
+            type: NotificationType.resolution_updated,
+            title: 'Hồ sơ được chuyển hội đồng xem xét',
+            message: input.officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
+          },
+          tx,
+        );
         await notifyManagers(
           tx,
           applicationId,
+          resolutionCaseId,
           'Có hồ sơ cần xử lý đối sánh',
           input.officerNote ?? 'Một task được chuyển sang cần hội đồng xem xét.',
+          { reviewTaskId: task.id, criterion: task.criterion, evidenceIds },
         );
       }
+
+      // Check if all required tasks are accepted -> complete application
+      if (input.decision === ReviewDecision.accepted) {
+        const allTasks = await tx.reviewTask.findMany({
+          where: { applicationId },
+        });
+        const allAccepted = allTasks.every((t) =>
+          t.id === task.id ? status === ReviewTaskStatus.accepted : t.status === ReviewTaskStatus.accepted,
+        );
+        if (allAccepted && allTasks.length > 0) {
+          await tx.application.update({
+            where: { id: applicationId },
+            data: { status: ApplicationStatus.completed },
+          });
+        }
+      }
+
+      // Audit application status changes
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: 'APPLICATION_STATUS_UPDATED',
+        targetType: 'application',
+        targetId: applicationId,
+        applicationId,
+        afterStateJson: { status: application.status },
+      });
+
+      let auditActionName = 'REVIEW_DECISION_ACCEPTED';
+      if (input.decision === ReviewDecision.rejected) auditActionName = 'REVIEW_DECISION_REJECTED';
+      if (input.decision === ReviewDecision.supplement_required) auditActionName = 'REVIEW_SUPPLEMENT_REQUESTED';
+      if (input.decision === ReviewDecision.resolution_needed) auditActionName = 'REVIEW_ESCALATED_TO_RESOLUTION';
 
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
-        action: auditActions.REVIEW_TASK_DECIDED,
-        targetType: 'review_task',
-        targetId: task.id,
-        applicationId,
-        beforeStateJson: { status: task.status, decision: task.decision },
-        afterStateJson: { status, decision: input.decision },
-        note: input.officerNote,
-      });
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: decisionAuditAction(input.decision),
+        action: auditActionName,
         targetType: 'review_task',
         targetId: task.id,
         applicationId,
         afterStateJson: { status, decision: input.decision },
         note: input.officerNote,
       });
+
+      if (
+        input.decision !== ReviewDecision.supplement_required &&
+        input.decision !== ReviewDecision.resolution_needed
+      ) {
+        await this.notificationsService.create(
+          {
+            userId: application.studentId,
+            applicationId,
+            reviewTaskId: task.id,
+            metadata: { criterion: task.criterion, decision: input.decision },
+            type: NotificationType.review_updated,
+            title: 'Đánh giá hồ sơ đã cập nhật',
+            message: `Tiêu chí ${task.criterion} đã được đánh giá: ${input.decision}.`,
+          },
+          tx,
+        );
+      }
 
       return saved;
     });
@@ -245,108 +385,87 @@ export class ReviewService {
     };
   }
 
-  requestSupplement(user: AuthenticatedUser, taskId: string, input: RequestSupplementInput) {
-    return this.decideTask(user, taskId, {
+  async requestSupplement(
+    user: AuthenticatedUser,
+    taskId: string,
+    input: {
+      reason: string;
+      deadline?: string;
+      evidenceIds?: string[];
+      requestedFields?: string[];
+    },
+  ) {
+    const evidenceDecisions = (input.evidenceIds || []).map((id) => ({
+      evidenceId: id,
+      status: 'needs_supplement' as any,
+    }));
+
+    const result = await this.decideTask(user, taskId, {
       decision: ReviewDecision.supplement_required,
       officerNote: input.reason,
-      evidenceDecisions: [],
-    }).then(async (result) => {
-      if (input.deadline) {
-        await prisma.reviewTask.update({
-          where: { id: taskId },
-          data: { dueDate: new Date(input.deadline) },
-        });
-      }
-      await createApplicationAudit(prisma, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActions.SUPPLEMENT_REQUESTED,
-        targetType: 'review_task',
-        targetId: taskId,
-        applicationId: result.application?.id,
-        collectiveProfileId: result.collectiveProfile?.id,
-        afterStateJson: {
-          requestedEvidenceName: input.requestedEvidenceName,
-          allowedCriteria: input.allowedCriteria,
-          deadline: input.deadline,
-        },
-        note: input.reason,
-      });
-      return result;
+      evidenceDecisions,
     });
+
+    if (input.deadline) {
+      await prisma.reviewTask.update({
+        where: { id: taskId },
+        data: { dueDate: new Date(input.deadline) },
+      });
+    }
+
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: 'REVIEW_SUPPLEMENT_REQUESTED',
+      targetType: 'review_task',
+      targetId: taskId,
+      applicationId: result.application?.id,
+      afterStateJson: {
+        requestedFields: input.requestedFields,
+        evidenceIds: input.evidenceIds,
+        deadline: input.deadline,
+      },
+      note: input.reason,
+    });
+
+    return result;
   }
 
   async escalateResolution(
     user: AuthenticatedUser,
     taskId: string,
-    input: EscalateResolutionInput,
+    input: {
+      reason: string;
+      evidenceIds?: string[];
+      priority?: string;
+    },
   ) {
-    const task = await this.getTask(taskId);
-    await this.assertTaskAccess(user, task, true);
-    if (task.collectiveProfileId && task.collectiveProfile) {
-      return this.decideCollectiveTask(user, task, {
-        decision: ReviewDecision.resolution_needed,
-        officerNote: input.reason,
-        evidenceDecisions: [],
-      });
-    }
-    if (!task.applicationId || !task.application) {
-      throw new AppError(409, ErrorCodes.REVIEW_TASK_NOT_FOUND, 'Review task owner is missing');
-    }
-    const applicationId = task.applicationId;
+    const evidenceDecisions = (input.evidenceIds || []).map((id) => ({
+      evidenceId: id,
+      status: 'resolution_needed' as any,
+    }));
 
-    const updated = await prisma.$transaction(async (tx) => {
-      const saved = await tx.reviewTask.update({
-        where: { id: task.id },
-        data: {
-          status: ReviewTaskStatus.resolution_needed,
-          decision: ReviewDecision.resolution_needed,
-          officerNote: input.reason,
-        },
-      });
-      const resolutionCase = await tx.resolutionCase.create({
-        data: {
-          applicationId,
-          evidenceId: input.evidenceId,
-          reason: input.reason,
-          createdBy: user.id,
-        },
-      });
-      await tx.application.update({
-        where: { id: applicationId },
-        data: { status: ApplicationStatus.resolution_needed },
-      });
-      await notifyManagers(tx, applicationId, 'Có hồ sơ cần hội đồng xem xét', input.reason);
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActions.RESOLUTION_CASE_CREATED,
-        targetType: 'resolution_case',
-        targetId: resolutionCase.id,
-        applicationId,
-        afterStateJson: { evidenceId: input.evidenceId, status: resolutionCase.status },
-        note: input.reason,
-      });
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActions.REVIEW_TASK_ESCALATED_RESOLUTION,
-        targetType: 'review_task',
-        targetId: task.id,
-        applicationId,
-        beforeStateJson: { status: task.status },
-        afterStateJson: { status: ReviewTaskStatus.resolution_needed },
-        note: input.reason,
-      });
-      return saved;
+    const result = await this.decideTask(user, taskId, {
+      decision: ReviewDecision.resolution_needed,
+      officerNote: input.reason,
+      evidenceDecisions,
     });
 
-    return {
-      task: updated,
-      application: { id: applicationId, status: ApplicationStatus.resolution_needed },
-      collectiveProfile: null,
-      reviewProgress: await getApplicationReviewProgress(applicationId),
-    };
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: 'REVIEW_ESCALATED_TO_RESOLUTION',
+      targetType: 'review_task',
+      targetId: taskId,
+      applicationId: result.application?.id,
+      afterStateJson: {
+        evidenceIds: input.evidenceIds,
+        priority: input.priority || 'normal',
+      },
+      note: input.reason,
+    });
+
+    return result;
   }
 
   private async getTask(taskId: string) {
@@ -359,7 +478,7 @@ export class ReviewService {
 
   private async assertTaskAccess(
     user: AuthenticatedUser,
-    task: Awaited<ReturnType<ReviewRepository['findDetail']>> & {},
+    task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
     decision: boolean,
   ) {
     if (!(await this.canAccessTask(user, task, decision))) {
@@ -474,7 +593,9 @@ export class ReviewService {
           {
             userId: collectiveProfile.representativeId,
             collectiveProfileId: profileId,
-            type: NotificationType.supplement_required,
+            reviewTaskId: task.id,
+            metadata: { criterion: task.criterion },
+            type: NotificationType.supplement_requested,
             title: 'Cần bổ sung hồ sơ tập thể',
             message: input.officerNote ?? 'Hồ sơ tập thể cần bổ sung.',
           },
@@ -512,6 +633,195 @@ export class ReviewService {
       reviewProgress: null,
     };
   }
+
+  async ensureReviewTasks(
+    user: AuthenticatedUser,
+    applicationId: string,
+    input: { mode?: 'missing_only' | 'all' },
+  ) {
+    const application = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: { student: true },
+    });
+
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    const allowedStatuses = ['submitted', 'under_review', 'supplement_required', 'resolution_needed'];
+    if (application.status === 'draft') {
+      throw new AppError(400, ErrorCodes.INVALID_APPLICATION_STATUS, 'Cannot ensure tasks for draft application');
+    }
+    if (!allowedStatuses.includes(application.status)) {
+      throw new AppError(
+        400,
+        ErrorCodes.INVALID_APPLICATION_STATUS,
+        'Application must be submitted or under review to ensure tasks',
+      );
+    }
+
+    // Find all evidences for this application
+    const evidences = await prisma.evidence.findMany({
+      where: { applicationId },
+    });
+
+    // 5 main criteria + any criteria with evidences
+    const criteriaToEnsure = new Set<Criterion>([
+      Criterion.ethics,
+      Criterion.academic,
+      Criterion.physical,
+      Criterion.volunteer,
+      Criterion.integration,
+    ]);
+    for (const ev of evidences) {
+      criteriaToEnsure.add(ev.criterion);
+    }
+
+    // Existing tasks to prevent duplicate (idempotency check)
+    const existingTasks = await prisma.reviewTask.findMany({
+      where: { applicationId },
+    });
+    const existingCriteria = new Set(existingTasks.map((t) => t.criterion));
+
+    const criteriaToCreate = Array.from(criteriaToEnsure).filter(
+      (c) => !existingCriteria.has(c),
+    );
+
+    const createdTasks: any[] = [];
+
+    await prisma.$transaction(async (tx) => {
+      for (const criterion of criteriaToCreate) {
+        // Find assigned officer with matching criterion and minimum workload
+        const assignedOfficerId = await this.findAssignedOfficer(
+          criterion,
+          application.student?.faculty,
+        );
+
+        // Create the task
+        const task = await tx.reviewTask.create({
+          data: {
+            applicationId,
+            criterion,
+            assignedOfficerId,
+            status: 'waiting',
+          },
+        });
+
+        // Link existing evidences to this task
+        const matchingEvidences = evidences.filter((e) => e.criterion === criterion);
+        for (const ev of matchingEvidences) {
+          await tx.reviewTaskEvidence.create({
+            data: {
+              reviewTaskId: task.id,
+              evidenceId: ev.id,
+            },
+          });
+        }
+
+        createdTasks.push(task);
+
+        // Audit for each created task
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'REVIEW_TASK_CREATED',
+          targetType: 'review_task',
+          targetId: task.id,
+          applicationId,
+          afterStateJson: { criterion, status: 'waiting' },
+        });
+
+        if (assignedOfficerId) {
+          await createApplicationAudit(tx, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: 'REVIEW_TASK_ASSIGNED',
+            targetType: 'review_task',
+            targetId: task.id,
+            applicationId,
+            afterStateJson: { assignedOfficerId },
+          });
+        }
+      }
+
+      // Update application status if submitted
+      if (application.status === 'submitted') {
+        await tx.application.update({
+          where: { id: applicationId },
+          data: { status: 'under_review' },
+        });
+      }
+
+      // Audit for ensure execution
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: 'REVIEW_TASKS_ENSURED',
+        targetType: 'application',
+        targetId: applicationId,
+        applicationId,
+        afterStateJson: { count: createdTasks.length, mode: input.mode || 'missing_only' },
+      });
+    });
+
+    return {
+      ensuredCount: criteriaToCreate.length,
+      createdTaskIds: createdTasks.map((t) => t.id),
+    };
+  }
+
+  private async findAssignedOfficer(
+    criterion: Criterion,
+    faculty?: string | null,
+  ): Promise<string | null> {
+    const specs = await prisma.officerSpecialization.findMany({
+      where: {
+        criterion,
+        isActive: true,
+        officer: { isActive: true },
+      },
+      include: {
+        officer: {
+          include: {
+            assignedReviewTasks: {
+              where: {
+                status: {
+                  in: ['waiting', 'reviewing', 'supplement_required'],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (specs.length === 0) return null;
+
+    // Filter by faculty scope preference if faculty is provided
+    let candidateSpecs = specs;
+    if (faculty) {
+      const matchingFaculty = specs.filter((s) => s.facultyScope === faculty);
+      if (matchingFaculty.length > 0) {
+        candidateSpecs = matchingFaculty;
+      } else {
+        // Fallback to global scopes (where facultyScope is null or empty)
+        candidateSpecs = specs.filter((s) => !s.facultyScope);
+      }
+    }
+
+    if (candidateSpecs.length === 0) {
+      candidateSpecs = specs;
+    }
+
+    // Sort by active task count
+    candidateSpecs.sort((a, b) => {
+      const countA = a.officer.assignedReviewTasks.length;
+      const countB = b.officer.assignedReviewTasks.length;
+      return countA - countB;
+    });
+
+    return candidateSpecs[0].officerId;
+  }
 }
 
 function mapDecisionToStatus(decision: ReviewDecision): ReviewTaskStatus {
@@ -533,8 +843,10 @@ function decisionAuditAction(decision: ReviewDecision): string {
 async function notifyManagers(
   tx: Prisma.TransactionClient,
   applicationId: string,
+  resolutionCaseId: string | null,
   title: string,
   message: string,
+  metadata?: unknown,
 ) {
   const managers = await tx.user.findMany({
     where: { role: { in: [Role.manager, Role.committee, Role.admin] }, isActive: true },
@@ -543,15 +855,18 @@ async function notifyManagers(
 
   await Promise.all(
     managers.map((manager) =>
-      tx.notification.create({
-        data: {
+      createNotification(
+        {
           userId: manager.id,
           applicationId,
-          type: NotificationType.review_updated,
+          resolutionCaseId,
+          type: NotificationType.resolution_updated,
           title,
           message,
+          metadata,
         },
-      }),
+        tx,
+      ),
     ),
   );
 }
@@ -618,24 +933,6 @@ function toTaskDetail(task: NonNullable<Awaited<ReturnType<ReviewRepository['fin
     dueDate: task.dueDate,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
-  };
-}
-
-function toApplicationSummary(taskApplication: {
-  id: string;
-  schoolYear: string;
-  targetLevel: string;
-  status: string;
-  readinessScore: number;
-  submittedAt: Date | null;
-}) {
-  return {
-    id: taskApplication.id,
-    schoolYear: taskApplication.schoolYear,
-    targetLevel: taskApplication.targetLevel,
-    status: taskApplication.status,
-    readinessScore: taskApplication.readinessScore,
-    submittedAt: taskApplication.submittedAt,
   };
 }
 

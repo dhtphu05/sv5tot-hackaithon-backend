@@ -7,7 +7,7 @@ const service = new ManagerService();
 
 export async function listManagerApplications(req: Request, res: Response): Promise<void> {
   const data = await service.listApplications(req.query as never);
-  sendSuccess(res, data.items, { requestId: req.requestId, pagination: data.pagination });
+  sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
 }
 
 export async function getManagerWorkloads(req: Request, res: Response): Promise<void> {
@@ -16,12 +16,22 @@ export async function getManagerWorkloads(req: Request, res: Response): Promise<
 }
 
 export async function assignManagerReviewTask(req: Request, res: Response): Promise<void> {
-  const data = await service.assignTask(req.user!, String(req.params.id), req.body);
+  const data = await service.reassignTask(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
 export async function getApplicationAggregation(req: Request, res: Response): Promise<void> {
   const data = await service.getAggregation(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function getApplicationSummary(req: Request, res: Response): Promise<void> {
+  const data = await service.getApplicationSummary(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function aggregateApplication(req: Request, res: Response): Promise<void> {
+  const data = await service.aggregateApplication(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 

@@ -9,11 +9,13 @@ import {
   getResolutionCase,
   listResolutionCases,
   reopenResolutionCase,
+  updateResolutionCaseStatus,
 } from './resolution.controller';
 import {
   listResolutionCasesQuerySchema,
   reopenResolutionCaseSchema,
   resolutionDecisionSchema,
+  resolutionStatusUpdateSchema,
 } from './resolution.validation';
 
 export const resolutionRouter = Router();
@@ -21,15 +23,22 @@ export const resolutionRouter = Router();
 resolutionRouter.get(
   '/cases',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   validate({ query: listResolutionCasesQuerySchema }),
   asyncHandler(listResolutionCases),
 );
 resolutionRouter.get(
   '/cases/:id',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   asyncHandler(getResolutionCase),
+);
+resolutionRouter.post(
+  '/cases/:id/resolve',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ body: resolutionDecisionSchema }),
+  asyncHandler(decideResolutionCase),
 );
 resolutionRouter.post(
   '/cases/:id/decision',
@@ -37,6 +46,13 @@ resolutionRouter.post(
   requireRole(Role.manager, Role.committee, Role.admin),
   validate({ body: resolutionDecisionSchema }),
   asyncHandler(decideResolutionCase),
+);
+resolutionRouter.patch(
+  '/cases/:id/status',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ body: resolutionStatusUpdateSchema }),
+  asyncHandler(updateResolutionCaseStatus),
 );
 resolutionRouter.post(
   '/cases/:id/reopen',

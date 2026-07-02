@@ -14,9 +14,21 @@ export const listManagerApplicationsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-export const assignReviewTaskSchema = z.object({
-  officerId: z.string().uuid(),
-  note: z.string().max(1000).optional(),
+export const assignReviewTaskSchema = z
+  .object({
+    assignedOfficerId: z.string().uuid().optional(),
+    officerId: z.string().uuid().optional(),
+    reason: z.string().trim().max(1000).optional(),
+    note: z.string().trim().max(1000).optional(),
+    overrideSpecialization: z.boolean().default(false),
+  })
+  .refine((value) => value.assignedOfficerId || value.officerId, {
+    message: 'assignedOfficerId is required',
+    path: ['assignedOfficerId'],
+  });
+
+export const aggregateApplicationSchema = z.object({
+  note: z.string().trim().max(2000).optional(),
 });
 
 export const finalizeApplicationSchema = z.object({
@@ -36,5 +48,6 @@ export const reopenFinalSchema = z.object({
 
 export type ListManagerApplicationsQuery = z.infer<typeof listManagerApplicationsQuerySchema>;
 export type AssignReviewTaskInput = z.infer<typeof assignReviewTaskSchema>;
+export type AggregateApplicationInput = z.infer<typeof aggregateApplicationSchema>;
 export type FinalizeApplicationInput = z.infer<typeof finalizeApplicationSchema>;
 export type ReopenFinalInput = z.infer<typeof reopenFinalSchema>;

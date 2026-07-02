@@ -1,11 +1,13 @@
 // Owns event registry, roster indexing, participants, and application imports.
 import {
+  ApplicationStatus,
   EventStatus,
   EvidenceSourceType,
   EvidenceStatus,
   FileStorageType,
   IndexingStatus,
   JobType,
+  ReviewTaskStatus,
   Role,
   type EventRegistry,
 } from '@prisma/client';
@@ -28,9 +30,11 @@ import {
 } from './event-participant.normalizer';
 import { EventRegistryRepository } from './event-registry.repository';
 import type {
-  ApplicationIdBody,
+  CheckParticipantInput,
   ConfirmIndexInput,
   CreateEventInput,
+  ImportParticipantsJsonInput,
+  ImportToApplicationInput,
   ListEventsQuery,
   ParticipantsQuery,
   StartRosterIndexingInput,
@@ -59,6 +63,17 @@ export class EventRegistryService {
   }
 
   async create(user: AuthenticatedUser, input: CreateEventInput) {
+    let status: EventStatus = EventStatus.draft;
+    if (input.status === 'confirmed') {
+      status = EventStatus.active;
+    } else if (input.status === 'archived') {
+      if (user.role === Role.officer) {
+        status = EventStatus.draft;
+      } else {
+        status = EventStatus.archived;
+      }
+    }
+
     const event = await prisma.$transaction(async (tx) => {
       const created = await tx.eventRegistry.create({
         data: {
@@ -68,12 +83,9 @@ export class EventRegistryService {
           organizerLevel: input.organizerLevel,
           startDate: input.startDate ? new Date(input.startDate) : undefined,
           endDate: input.endDate ? new Date(input.endDate) : undefined,
-          convertedValue: input.convertedValue,
-          convertedUnit: input.convertedUnit,
-          eligibleLevelsJson: input.eligibleLevels ?? [],
           participantCount: 0,
           rosterIndexed: false,
-          status: EventStatus.draft,
+          status,
           createdBy: user.id,
         },
       });
@@ -81,10 +93,10 @@ export class EventRegistryService {
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
-        action: auditActions.EVENT_CREATED,
+        action: status === EventStatus.active ? 'EVENT_CONFIRMED' : auditActions.EVENT_CREATED,
         targetType: 'event',
         targetId: created.id,
-        afterStateJson: { eventName: created.eventName, criterion: created.criterion },
+        afterStateJson: { eventName: created.eventName, criterion: created.criterion, status: created.status },
       });
 
       return created;
@@ -106,6 +118,17 @@ export class EventRegistryService {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot change criterion after roster indexing');
     }
 
+    let mappedStatus: EventStatus | undefined;
+    if (input.status) {
+      if (input.status === 'confirmed') {
+        mappedStatus = EventStatus.active;
+      } else if (input.status === 'archived') {
+        mappedStatus = EventStatus.archived;
+      } else {
+        mappedStatus = EventStatus.draft;
+      }
+    }
+
     const updated = await prisma.$transaction(async (tx) => {
       const saved = await tx.eventRegistry.update({
         where: { id: event.id },
@@ -116,20 +139,23 @@ export class EventRegistryService {
           ...(input.organizerLevel ? { organizerLevel: input.organizerLevel } : {}),
           ...(input.startDate ? { startDate: new Date(input.startDate) } : {}),
           ...(input.endDate ? { endDate: new Date(input.endDate) } : {}),
-          ...(input.convertedValue !== undefined ? { convertedValue: input.convertedValue } : {}),
-          ...(input.convertedUnit ? { convertedUnit: input.convertedUnit } : {}),
-          ...(input.eligibleLevels ? { eligibleLevelsJson: input.eligibleLevels } : {}),
-          ...(input.status ? { status: input.status } : {}),
+          ...(mappedStatus ? { status: mappedStatus } : {}),
         },
       });
+
+      let auditAction: string = auditActions.EVENT_UPDATED;
+      if (mappedStatus && mappedStatus !== event.status) {
+        if (mappedStatus === EventStatus.active) {
+          auditAction = 'EVENT_CONFIRMED';
+        } else if (mappedStatus === EventStatus.archived) {
+          auditAction = auditActions.EVENT_ARCHIVED;
+        }
+      }
 
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
-        action:
-          input.status === EventStatus.archived
-            ? auditActions.EVENT_ARCHIVED
-            : auditActions.EVENT_UPDATED,
+        action: auditAction,
         targetType: 'event',
         targetId: event.id,
         beforeStateJson: { status: event.status, criterion: event.criterion },
@@ -140,6 +166,27 @@ export class EventRegistryService {
     });
 
     return this.getDetail(user, updated.id);
+  }
+
+  async delete(user: AuthenticatedUser, eventId: string) {
+    const event = await this.getRequiredEvent(eventId);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.eventParticipant.deleteMany({ where: { eventId: event.id } });
+      await tx.eventFile.deleteMany({ where: { eventId: event.id } });
+      await tx.eventRegistry.delete({ where: { id: event.id } });
+
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: 'EVENT_DELETED',
+        targetType: 'event',
+        targetId: event.id,
+        beforeStateJson: { eventName: event.eventName },
+      });
+    });
+
+    return { deleted: true };
   }
 
   async uploadRosterFile(user: AuthenticatedUser, eventId: string, file?: UploadedRosterFile) {
@@ -405,75 +452,265 @@ export class EventRegistryService {
     return this.getDetail(user, event.id);
   }
 
-  async checkParticipant(user: AuthenticatedUser, eventId: string, input: ApplicationIdBody) {
-    const application = await this.getRequiredApplication(input.applicationId);
-    assertApplicationOwner(application, user);
-
+  async importParticipants(
+    user: AuthenticatedUser,
+    eventId: string,
+    input: ImportParticipantsJsonInput,
+  ) {
     const event = await this.getRequiredEvent(eventId);
-    this.assertActiveIndexedEvent(event);
 
-    if (!user.studentCode) {
-      throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'Student code is required');
+    if (event.status === EventStatus.archived) {
+      throw new AppError(400, ErrorCodes.EVENT_NOT_ACTIVE, 'Cannot import participants to archived events');
+    }
+
+    // studentCode required, trim, unique trong cùng event
+    const studentCodes = input.participants.map((p) => p.studentCode.trim());
+    const uniqueCodes = new Set(studentCodes);
+    if (uniqueCodes.size !== studentCodes.length) {
+      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'Duplicate studentCode found in import list');
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      if (input.mode === 'replace') {
+        await tx.eventParticipant.deleteMany({ where: { eventId: event.id } });
+      }
+
+      for (const p of input.participants) {
+        const trimmedCode = p.studentCode.trim();
+        await tx.eventParticipant.upsert({
+          where: {
+            eventId_studentCode: {
+              eventId: event.id,
+              studentCode: trimmedCode,
+            },
+          },
+          update: {
+            studentName: p.fullName,
+            className: p.className || null,
+            faculty: p.faculty || null,
+            participationStatus: p.attendanceStatus || 'confirmed',
+            convertedValue: p.convertedValue || null,
+          },
+          create: {
+            eventId: event.id,
+            studentCode: trimmedCode,
+            studentName: p.fullName,
+            className: p.className || null,
+            faculty: p.faculty || null,
+            participationStatus: p.attendanceStatus || 'confirmed',
+            convertedValue: p.convertedValue || null,
+          },
+        });
+      }
+
+      // Recalculate participantCount
+      const totalParticipants = await tx.eventParticipant.count({
+        where: { eventId: event.id },
+      });
+
+      await tx.eventRegistry.update({
+        where: { id: event.id },
+        data: {
+          participantCount: totalParticipants,
+          rosterIndexed: totalParticipants > 0 ? true : event.rosterIndexed,
+        },
+      });
+
+      // Audit log
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: 'EVENT_PARTICIPANTS_IMPORTED',
+        targetType: 'event',
+        targetId: event.id,
+        afterStateJson: { count: input.participants.length, mode: input.mode },
+      });
+
+      return {
+        importedCount: input.participants.length,
+        mode: input.mode,
+        eventId: event.id,
+      };
+    });
+
+    return result;
+  }
+
+  async checkParticipant(
+    user: AuthenticatedUser,
+    eventId: string,
+    input: CheckParticipantInput,
+  ) {
+    const event = await this.getRequiredEvent(eventId);
+
+    // Rule: Chỉ check event confirmed cho student.
+    const isStudent = user.role === Role.student || user.role === Role.class_representative;
+    if (isStudent) {
+      if (event.status !== EventStatus.active) {
+        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only check confirmed events');
+      }
+    }
+
+    // Determine target studentCode
+    let targetStudentCode = input.studentCode;
+    if (!targetStudentCode) {
+      if (isStudent) {
+        targetStudentCode = user.studentCode || undefined;
+      }
+    }
+
+    if (!targetStudentCode) {
+      throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'studentCode is required');
+    }
+
+    // Rule: Nếu requester là student và gửi studentCode khác mình, trả FORBIDDEN.
+    if (isStudent) {
+      if (targetStudentCode !== user.studentCode) {
+        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only check their own student code');
+      }
     }
 
     const participant = await prisma.eventParticipant.findUnique({
       where: {
         eventId_studentCode: {
           eventId: event.id,
-          studentCode: user.studentCode,
+          studentCode: targetStudentCode,
         },
       },
     });
 
-    await createApplicationAudit(prisma, {
-      actorId: user.id,
-      actorRole: user.role,
-      action: auditActions.EVENT_PARTICIPANT_CHECKED,
-      targetType: 'event',
-      targetId: event.id,
-      applicationId: application.id,
-      afterStateJson: { found: Boolean(participant), studentCode: user.studentCode },
+    const isParticipant = Boolean(participant);
+
+    // Audit only if requested or as a general log
+    await prisma.auditLog.create({
+      data: {
+        actorId: user.id,
+        actorRole: user.role,
+        action: 'EVENT_PARTICIPANT_CHECKED',
+        targetType: 'event',
+        targetId: event.id,
+        afterStateJson: { found: isParticipant, studentCode: targetStudentCode },
+      },
     });
 
-    return participant
-      ? { found: true, participant, canImport: true, reason: null }
-      : {
-          found: false,
-          participant: null,
-          canImport: false,
-          reason: 'Không tìm thấy MSSV của bạn trong danh sách đã xác nhận.',
-        };
+    return {
+      eventId: event.id,
+      studentCode: targetStudentCode,
+      isParticipant,
+      participant: participant
+        ? {
+            id: participant.id,
+            fullName: participant.studentName,
+            className: participant.className,
+            faculty: participant.faculty,
+            attendanceStatus: participant.participationStatus || 'confirmed',
+          }
+        : null,
+    };
   }
 
-  async importToApplication(user: AuthenticatedUser, eventId: string, input: ApplicationIdBody) {
+  async importToApplication(
+    user: AuthenticatedUser,
+    eventId: string,
+    input: ImportToApplicationInput,
+  ) {
     const application = await this.getRequiredApplication(input.applicationId);
-    assertApplicationOwner(application, user);
-    assertApplicationEditable(application);
+
+    // Business rules: Requester role student:
+    // - applicationId phải thuộc chính student đó.
+    // - application phải còn editable hoặc đang supplement_required đúng criterion.
+    const isStudent = user.role === Role.student || user.role === Role.class_representative;
+    if (isStudent) {
+      assertApplicationOwner(application, user);
+    }
 
     const event = await this.getRequiredEvent(eventId);
-    this.assertActiveIndexedEvent(event);
+    if (event.status !== EventStatus.active) {
+      throw new AppError(400, ErrorCodes.EVENT_NOT_ACTIVE, 'Event is not confirmed');
+    }
 
-    if (!user.studentCode) {
-      throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'Student code is required');
+    if (isStudent) {
+      if (application.status === ApplicationStatus.supplement_required) {
+        // Check if there is an active supplement request for this criterion
+        const hasSupplementTask = await prisma.reviewTask.findFirst({
+          where: {
+            applicationId: application.id,
+            criterion: event.criterion,
+            status: ReviewTaskStatus.supplement_required,
+          },
+        });
+        if (!hasSupplementTask) {
+          throw new AppError(
+            403,
+            ErrorCodes.APPLICATION_NOT_EDITABLE,
+            'This criterion does not require supplement',
+          );
+        }
+      } else {
+        assertApplicationEditable(application);
+      }
+    }
+
+    // Determine target studentCode
+    let targetStudentCode: string;
+    if (isStudent) {
+      if (!user.studentCode) {
+        throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'Student code is required');
+      }
+      targetStudentCode = user.studentCode;
+    } else {
+      // Staff importing on behalf of the student
+      const appStudent = await prisma.user.findUnique({
+        where: { id: application.studentId },
+      });
+      if (!appStudent || !appStudent.studentCode) {
+        throw new AppError(404, ErrorCodes.STUDENT_CODE_REQUIRED, 'Target student has no student code');
+      }
+      targetStudentCode = appStudent.studentCode;
     }
 
     const participant = await prisma.eventParticipant.findUnique({
-      where: { eventId_studentCode: { eventId: event.id, studentCode: user.studentCode } },
+      where: {
+        eventId_studentCode: {
+          eventId: event.id,
+          studentCode: targetStudentCode,
+        },
+      },
     });
+
     if (!participant) {
-      throw new AppError(404, ErrorCodes.PARTICIPANT_NOT_FOUND, 'Participant was not found');
+      throw new AppError(
+        404,
+        ErrorCodes.PARTICIPANT_NOT_FOUND,
+        `Student ${targetStudentCode} is not in the confirmed participant list of this event`,
+      );
     }
 
+    // Check duplicate evidence
     const existing = await prisma.evidence.findFirst({
       where: {
         applicationId: application.id,
         sourceType: EvidenceSourceType.event_import,
         eventId: event.id,
       },
-      include: { evidenceCard: true },
+      include: {
+        evidenceFiles: { include: { file: true } },
+        evidenceCard: true,
+      },
     });
+
     if (existing) {
-      throw new AppError(409, ErrorCodes.EVENT_ALREADY_IMPORTED, 'Event already imported');
+      return {
+        evidence: this.formatEvidenceDto(existing),
+        event: this.toEventDto(event),
+        participant: {
+          id: participant.id,
+          studentCode: participant.studentCode,
+          fullName: participant.studentName,
+          attendanceStatus: participant.participationStatus || 'confirmed',
+        },
+        alreadyImported: true,
+      };
     }
 
     const warnings = this.buildEventImportWarnings(event, participant);
@@ -483,15 +720,17 @@ export class EventRegistryService {
         ? 0.85
         : 0.95;
 
+    const name = input.evidenceName || `Tham gia ${event.eventName}`;
+
     const result = await prisma.$transaction(async (tx) => {
       const evidence = await tx.evidence.create({
         data: {
           applicationId: application.id,
-          evidenceName: event.eventName,
+          evidenceName: name,
           criterion: event.criterion,
           sourceType: EvidenceSourceType.event_import,
           eventId: event.id,
-          status: EvidenceStatus.indexed,
+          status: EvidenceStatus.under_review,
           indexingStatus: IndexingStatus.indexed,
           confidence,
         },
@@ -513,6 +752,7 @@ export class EventRegistryService {
         className: participant.className,
         faculty: participant.faculty,
         participationStatus: participant.participationStatus,
+        importedFrom: 'event_registry',
       };
 
       const card = await tx.evidenceCard.create({
@@ -525,7 +765,7 @@ export class EventRegistryService {
           matchedKnowledgeItemIds: [],
           confidence,
           aiSummary:
-            'Minh chứng này được tạo từ danh sách sự kiện đã được cán bộ xác nhận. Cán bộ xét duyệt vẫn là người xác nhận kết quả cuối cùng.',
+            'Minh chứng này được tạo từ danh sách sự kiện đã được cán bộ xác nhận. Cán bộ xét duyệt vẫn là người xét duyệt cuối cùng.',
           rawAiResponse: { source: 'event_registry_import' },
         },
       });
@@ -533,26 +773,44 @@ export class EventRegistryService {
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
-        action: auditActions.EVENT_EVIDENCE_IMPORTED,
-        targetType: 'evidence',
-        targetId: evidence.id,
+        action: 'EVENT_IMPORTED_TO_APPLICATION',
+        targetType: 'event',
+        targetId: event.id,
         applicationId: application.id,
-        afterStateJson: { eventId: event.id, confidence },
+        afterStateJson: { evidenceId: evidence.id, studentCode: targetStudentCode },
+        note: input.note || 'Imported event registry record.',
       });
+
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
-        action: auditActions.EVENT_IMPORT_EVIDENCE_CARD_CREATED,
+        action: 'EVIDENCE_CREATED_FROM_EVENT',
         targetType: 'evidence',
         targetId: evidence.id,
         applicationId: application.id,
-        afterStateJson: { cardId: card.id },
+        afterStateJson: { eventId: event.id, studentCode: targetStudentCode },
       });
 
-      return { evidence, card };
+      return {
+        evidence: {
+          ...evidence,
+          evidenceFiles: [],
+          evidenceCard: card,
+        },
+      };
     });
 
-    return result;
+    return {
+      evidence: this.formatEvidenceDto(result.evidence),
+      event: this.toEventDto(event),
+      participant: {
+        id: participant.id,
+        studentCode: participant.studentCode,
+        fullName: participant.studentName,
+        attendanceStatus: participant.participationStatus || 'confirmed',
+      },
+      alreadyImported: false,
+    };
   }
 
   private async getRequiredEvent(eventId: string) {
@@ -571,16 +829,9 @@ export class EventRegistryService {
 
   private assertCanViewEvent(user: AuthenticatedUser, event: EventRegistry): void {
     if (user.role === Role.student || user.role === Role.class_representative) {
-      this.assertActiveIndexedEvent(event);
-    }
-  }
-
-  private assertActiveIndexedEvent(event: EventRegistry): void {
-    if (event.status !== EventStatus.active) {
-      throw new AppError(403, ErrorCodes.EVENT_NOT_ACTIVE, 'Event is not active');
-    }
-    if (!event.rosterIndexed) {
-      throw new AppError(403, ErrorCodes.EVENT_NOT_INDEXED, 'Event roster is not indexed');
+      if (event.status !== EventStatus.active) {
+        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only view confirmed events');
+      }
     }
   }
 
@@ -615,9 +866,25 @@ export class EventRegistryService {
     return warnings;
   }
 
+  private assertActiveIndexedEvent(event: EventRegistry): void {
+    if (event.status !== EventStatus.active) {
+      throw new AppError(403, ErrorCodes.EVENT_NOT_ACTIVE, 'Event is not active');
+    }
+    if (!event.rosterIndexed) {
+      throw new AppError(403, ErrorCodes.EVENT_NOT_INDEXED, 'Event roster is not indexed');
+    }
+  }
+
   private toEventDto(
     event: EventRegistry & { eventFiles?: unknown[]; sampleCertificateFile?: unknown },
   ) {
+    let apiStatus: 'draft' | 'confirmed' | 'archived' = 'draft';
+    if (event.status === EventStatus.active) {
+      apiStatus = 'confirmed';
+    } else if (event.status === EventStatus.archived) {
+      apiStatus = 'archived';
+    }
+
     return {
       id: event.id,
       eventName: event.eventName,
@@ -631,11 +898,41 @@ export class EventRegistryService {
       eligibleLevels: event.eligibleLevelsJson,
       participantCount: event.participantCount,
       rosterIndexed: event.rosterIndexed,
-      status: event.status,
+      status: apiStatus,
       eventFiles: event.eventFiles,
       sampleCertificateFile: event.sampleCertificateFile,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
+    };
+  }
+
+  private formatEvidenceDto(evidence: any) {
+    return {
+      id: evidence.id,
+      applicationId: evidence.applicationId,
+      evidenceName: evidence.evidenceName,
+      criterion: evidence.criterion,
+      sourceType: evidence.sourceType,
+      status: evidence.status,
+      indexingStatus: evidence.indexingStatus,
+      confidence: evidence.confidence,
+      createdAt: evidence.createdAt,
+      updatedAt: evidence.updatedAt,
+      files: (evidence.evidenceFiles || []).map((link: any) => ({
+        id: link.file.id,
+        originalName: link.file.originalName,
+        mimeType: link.file.mimeType,
+        fileSize: link.file.fileSize,
+        publicUrl: link.file.publicUrl,
+        fileRole: link.fileRole,
+      })),
+      card: evidence.evidenceCard
+        ? {
+            id: evidence.evidenceCard.id,
+            confidence: evidence.evidenceCard.confidence,
+            warnings: evidence.evidenceCard.warningsJson || [],
+          }
+        : null,
     };
   }
 }

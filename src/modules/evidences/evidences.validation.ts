@@ -12,7 +12,10 @@ export const listEvidencesQuerySchema = z.object({
 export const createEvidenceSchema = z.object({
   evidenceName: z.string().trim().min(3).max(255),
   criterion: z.nativeEnum(Criterion),
-  sourceType: z.literal(EvidenceSourceType.manual_upload).default(EvidenceSourceType.manual_upload),
+  sourceType: z.nativeEnum(EvidenceSourceType).default(EvidenceSourceType.manual_upload),
+  description: z.string().trim().optional(),
+  metadata: z.record(z.any()).optional(),
+  eventId: z.string().uuid().optional(),
 });
 
 export const updateEvidenceSchema = z.object({

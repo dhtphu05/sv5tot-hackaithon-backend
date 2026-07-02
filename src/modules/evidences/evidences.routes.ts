@@ -24,7 +24,7 @@ import {
 export const evidencesRouter = Router();
 
 evidencesRouter.get(
-  '/applications/:id/evidences',
+  '/applications/:applicationId/evidences',
   requireAuth,
   requireRole(
     Role.student,
@@ -38,7 +38,7 @@ evidencesRouter.get(
   asyncHandler(listApplicationEvidences),
 );
 evidencesRouter.post(
-  '/applications/:id/evidences',
+  '/applications/:applicationId/evidences',
   requireAuth,
   requireRole(Role.student, Role.class_representative),
   validate({ body: createEvidenceSchema }),

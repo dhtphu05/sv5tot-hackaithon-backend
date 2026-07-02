@@ -18,15 +18,30 @@ export class EventRegistryRepository {
   async list(user: AuthenticatedUser, query: ListEventsQuery) {
     const studentVisibility =
       user.role === Role.student || user.role === Role.class_representative
-        ? { status: EventStatus.active, rosterIndexed: true }
+        ? { status: EventStatus.active }
         : query.status
-          ? { status: query.status }
+          ? {
+              status:
+                query.status === 'confirmed'
+                  ? EventStatus.active
+                  : query.status === 'draft'
+                    ? EventStatus.draft
+                    : EventStatus.archived,
+            }
           : {};
 
     const where: Prisma.EventRegistryWhereInput = {
       ...studentVisibility,
       ...(query.criterion ? { criterion: query.criterion } : {}),
       ...(query.organizerLevel ? { organizerLevel: query.organizerLevel } : {}),
+      ...(query.fromDate || query.toDate
+        ? {
+            startDate: {
+              ...(query.fromDate ? { gte: new Date(query.fromDate) } : {}),
+              ...(query.toDate ? { lte: new Date(query.toDate) } : {}),
+            },
+          }
+        : {}),
       ...(query.q
         ? {
             OR: [
