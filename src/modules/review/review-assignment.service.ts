@@ -31,12 +31,14 @@ export class ReviewAssignmentService {
       include: { officer: true },
     });
 
-    const eligible = specializations.filter((item) => {
+    const scopedEligible = specializations.filter((item) => {
       if (!item.facultyScope) {
         return true;
       }
       return input.faculty ? item.facultyScope === input.faculty : false;
     });
+
+    const eligible = scopedEligible.length > 0 ? scopedEligible : specializations;
 
     const filtered = eligible.filter((item) => !input.excludeOfficerIds?.includes(item.officerId));
 

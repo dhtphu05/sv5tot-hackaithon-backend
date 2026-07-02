@@ -45,6 +45,17 @@ import type {
 } from './collective.validation';
 
 type UploadedFile = Express.Multer.File;
+type RosterInvalidRow = {
+  row: number;
+  reason: string;
+  data?: Record<string, string>;
+};
+
+type RosterParseResult = {
+  rows: UpsertCollectiveMemberInput[];
+  totalRows: number;
+  invalidRows: RosterInvalidRow[];
+};
 
 const editableStatuses = new Set<CollectiveStatus>([
   CollectiveStatus.draft,
@@ -299,17 +310,15 @@ export class CollectiveService {
     if (!file) {
       throw new AppError(400, ErrorCodes.COLLECTIVE_ROSTER_INVALID, 'Roster file is required');
     }
-    const rows = await parseRosterFile(file);
+    const { rows, totalRows, invalidRows } = await parseRosterFile(file);
     if (rows.length === 0) {
-      throw new AppError(400, ErrorCodes.COLLECTIVE_ROSTER_INVALID, 'Roster has no valid rows');
-    }
-    const duplicateCodes = findDuplicates(rows.map((row) => row.studentCode));
-    if (duplicateCodes.length > 0) {
-      throw new AppError(
-        409,
-        ErrorCodes.COLLECTIVE_MEMBER_DUPLICATED,
-        `Duplicate student codes: ${duplicateCodes.join(', ')}`,
-      );
+      return {
+        totalRows,
+        inserted: 0,
+        updated: 0,
+        skipped: invalidRows.length,
+        invalidRows,
+      };
     }
     const storedRoster = await this.storageService.saveFile({
       buffer: file.buffer,
@@ -362,11 +371,11 @@ export class CollectiveService {
     });
     const updated = rows.filter((row) => existingCodes.has(row.studentCode)).length;
     return {
-      totalRows: rows.length,
+      totalRows,
       inserted: rows.length - updated,
       updated,
-      skipped: 0,
-      invalidRows: [],
+      skipped: invalidRows.length,
+      invalidRows,
     };
   }
 
@@ -1022,7 +1031,7 @@ export class CollectiveService {
   }
 }
 
-async function parseRosterFile(file: UploadedFile): Promise<UpsertCollectiveMemberInput[]> {
+async function parseRosterFile(file: UploadedFile): Promise<RosterParseResult> {
   const isXlsx =
     file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
     file.originalname.toLowerCase().endsWith('.xlsx');
@@ -1034,20 +1043,36 @@ async function parseRosterFile(file: UploadedFile): Promise<UpsertCollectiveMemb
         .split(/\r?\n/)
         .filter((line) => line.trim())
         .map(parseCsvLine);
-  if (matrix.length < 2) return [];
+  if (matrix.length < 2) return { rows: [], totalRows: 0, invalidRows: [] };
   const headers = matrix[0].map((value) => canonicalHeader(normalizeHeader(value)));
-  return matrix.slice(1).map((values, index) => {
+  const rows: UpsertCollectiveMemberInput[] = [];
+  const invalidRows: RosterInvalidRow[] = [];
+  const seenCodes = new Map<string, number>();
+
+  matrix.slice(1).forEach((values, index) => {
+    const rowNumber = index + 2;
     const row = Object.fromEntries(headers.map((header, column) => [header, values[column] ?? '']));
-    const studentCode = row.studentCode;
-    const studentName = row.studentName;
-    if (!studentCode || !studentName) {
-      throw new AppError(
-        400,
-        ErrorCodes.COLLECTIVE_ROSTER_INVALID,
-        `Invalid roster row ${index + 2}`,
-      );
+    const studentCode = row.studentCode?.trim();
+    const studentName = row.studentName?.trim();
+    const reasons: string[] = [];
+
+    if (!studentCode) reasons.push('Thiếu MSSV');
+    if (!studentName) reasons.push('Thiếu Họ và tên');
+    if (studentCode && seenCodes.has(studentCode)) {
+      reasons.push(`Trùng MSSV với dòng ${seenCodes.get(studentCode)}`);
     }
-    return {
+
+    if (reasons.length > 0 || !studentCode || !studentName) {
+      invalidRows.push({
+        row: rowNumber,
+        reason: reasons.join('; '),
+        data: row,
+      });
+      return;
+    }
+
+    seenCodes.set(studentCode, rowNumber);
+    rows.push({
       studentCode,
       studentName,
       className: row.className || undefined,
@@ -1056,8 +1081,14 @@ async function parseRosterFile(file: UploadedFile): Promise<UpsertCollectiveMemb
       individualSv5tLevel: normalizeLevel(row.individualSv5tLevel),
       violationStatus: normalizeViolation(row.violationStatus),
       note: row.note || undefined,
-    };
+    });
   });
+
+  return {
+    rows,
+    totalRows: matrix.length - 1,
+    invalidRows,
+  };
 }
 
 function normalizeHeader(value: string): string {
@@ -1155,14 +1186,4 @@ function normalizeLevel(value?: string): string {
     none: 'none',
   };
   return mapping[normalized ?? ''] ?? 'unknown';
-}
-
-function findDuplicates(values: string[]): string[] {
-  const seen = new Set<string>();
-  const duplicates = new Set<string>();
-  for (const value of values) {
-    if (seen.has(value)) duplicates.add(value);
-    seen.add(value);
-  }
-  return [...duplicates];
 }

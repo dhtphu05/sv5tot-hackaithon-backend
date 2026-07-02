@@ -3,11 +3,17 @@ import { requireAuth } from '../../middlewares/auth.middleware';
 import { loginRateLimitMiddleware } from '../../middlewares/rate-limit.middleware';
 import { validate } from '../../middlewares/validate.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
-import { login, logout, refresh } from './auth.controller';
-import { loginSchema, logoutSchema, refreshSchema } from './auth.validation';
+import { login, logout, refresh, register } from './auth.controller';
+import { loginSchema, logoutSchema, refreshSchema, registerSchema } from './auth.validation';
 
 export const authRouter = Router();
 
+authRouter.post(
+  '/register',
+  loginRateLimitMiddleware,
+  validate({ body: registerSchema }),
+  asyncHandler(register),
+);
 authRouter.post(
   '/login',
   loginRateLimitMiddleware,

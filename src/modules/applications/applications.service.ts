@@ -403,7 +403,7 @@ export class ApplicationsService {
       );
 
       return reviewTasks;
-    });
+    }, { maxWait: 10_000, timeout: 30_000 });
 
     return {
       application: {
@@ -641,7 +641,12 @@ function hasPriorityPrecheckResult(value?: Prisma.JsonValue): boolean {
     if (!item || typeof item !== 'object') {
       return false;
     }
-    return (item as { criterion?: unknown }).criterion === Criterion.priority;
+    const result = item as { criterion?: unknown; evidenceRefs?: unknown };
+    return (
+      result.criterion === Criterion.priority &&
+      Array.isArray(result.evidenceRefs) &&
+      result.evidenceRefs.length > 0
+    );
   });
 }
 
@@ -685,17 +690,15 @@ async function notifyManagersAboutUnassignedTask(
     select: { id: true },
   });
 
-  await Promise.all(
-    managers.map((manager) =>
-      tx.notification.create({
-        data: {
-          userId: manager.id,
-          applicationId,
-          type: NotificationType.review_updated,
-          title: 'Có review task chưa được phân công',
-          message: `Chưa có cán bộ phù hợp cho tiêu chí ${criterion}.`,
-        },
-      }),
-    ),
-  );
+  if (managers.length === 0) return;
+
+  await tx.notification.createMany({
+    data: managers.map((manager) => ({
+      userId: manager.id,
+      applicationId,
+      type: NotificationType.review_updated,
+      title: 'Có review task chưa được phân công',
+      message: `Chưa có cán bộ phù hợp cho tiêu chí ${criterion}.`,
+    })),
+  });
 }

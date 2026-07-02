@@ -65,6 +65,19 @@ export const openApiDocument = {
           password: { type: 'string', example: 'Password@123' },
         },
       },
+      RegisterRequest: {
+        type: 'object',
+        required: ['fullName', 'email', 'password', 'studentCode'],
+        properties: {
+          fullName: { type: 'string', example: 'Nguyen Van A' },
+          email: { type: 'string', example: 'student.new@dut.udn.vn' },
+          password: { type: 'string', example: 'Password@123' },
+          studentCode: { type: 'string', example: '21IT999' },
+          className: { type: 'string', example: '21TCLC_DT1' },
+          faculty: { type: 'string', example: 'Cong nghe thong tin' },
+          phone: { type: 'string', example: '0901234567' },
+        },
+      },
       RefreshRequest: {
         type: 'object',
         required: ['refreshToken'],
@@ -315,6 +328,25 @@ export const openApiDocument = {
           '200': jsonResponse('Safe user, access token, and refresh token'),
           '401': jsonResponse('Invalid credentials'),
           '403': jsonResponse('Inactive user'),
+        },
+      },
+    },
+    '/api/auth/register': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Register a student account',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: { $ref: '#/components/schemas/RegisterRequest' },
+            },
+          },
+        },
+        responses: {
+          '201': jsonResponse('Safe user, access token, and refresh token'),
+          '400': jsonResponse('Validation failed'),
+          '409': jsonResponse('Email or student code already exists'),
         },
       },
     },
