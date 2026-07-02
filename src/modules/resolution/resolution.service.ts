@@ -286,7 +286,8 @@ export class ResolutionService {
   ) {
     const resolutionCase = await this.getCase(caseId);
     const dbStatus = mapStatusInput(input.status);
-    const isClosed = input.status === 'closed' || input.status === 'resolved' || input.status === 'rejected';
+    const isClosed =
+      input.status === 'closed' || input.status === 'resolved' || input.status === 'rejected';
     const committeeDecision = JSON.stringify({
       ...(parseCommitteeDecision(resolutionCase.committeeDecision) ?? {}),
       workflowStatus: input.status,
@@ -301,7 +302,9 @@ export class ResolutionService {
         data: {
           status: dbStatus,
           committeeDecision,
-          ...(isClosed ? { closedBy: user.id, closedAt: new Date() } : { closedBy: null, closedAt: null }),
+          ...(isClosed
+            ? { closedBy: user.id, closedAt: new Date() }
+            : { closedBy: null, closedAt: null }),
         },
         include: resolutionInclude,
       });
@@ -369,15 +372,23 @@ export class ResolutionService {
     return resolutionCase;
   }
 
-  private async assertCanViewCase(user: AuthenticatedUser, resolutionCase: ResolutionCaseWithInclude) {
+  private async assertCanViewCase(
+    user: AuthenticatedUser,
+    resolutionCase: ResolutionCaseWithInclude,
+  ) {
     if (canManageResolution(user)) return;
     if (user.role !== Role.officer) {
-      throw new AppError(403, ErrorCodes.FORBIDDEN, 'You do not have access to this resolution case');
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'You do not have access to this resolution case',
+      );
     }
     if (resolutionCase.createdBy === user.id) return;
     const relatedTask = await findRelatedReviewTask(resolutionCase);
     if (relatedTask?.assignedOfficerId === user.id) return;
-    if (await canOfficerHandleResolutionCriterion(user.id, resolutionCase, relatedTask?.criterion)) return;
+    if (await canOfficerHandleResolutionCriterion(user.id, resolutionCase, relatedTask?.criterion))
+      return;
     throw new AppError(403, ErrorCodes.FORBIDDEN, 'You do not have access to this resolution case');
   }
 }
@@ -407,7 +418,9 @@ async function buildListWhere(
   return filters.length ? { AND: filters } : {};
 }
 
-function statusWhere(status: ListResolutionCasesQuery['status']): Prisma.ResolutionCaseWhereInput | null {
+function statusWhere(
+  status: ListResolutionCasesQuery['status'],
+): Prisma.ResolutionCaseWhereInput | null {
   if (!status) return null;
   if (status === 'analyzing' || status === 'committee_review' || status === 'in_review') {
     return { status: ResolutionStatus.in_review };
@@ -421,7 +434,9 @@ function statusWhere(status: ListResolutionCasesQuery['status']): Prisma.Resolut
   return { status: mapStatusInput(status) };
 }
 
-async function accessWhere(user: AuthenticatedUser): Promise<Prisma.ResolutionCaseWhereInput | null> {
+async function accessWhere(
+  user: AuthenticatedUser,
+): Promise<Prisma.ResolutionCaseWhereInput | null> {
   if (canManageResolution(user)) return null;
   if (user.role !== Role.officer) {
     return { id: '00000000-0000-0000-0000-000000000000' };
@@ -587,8 +602,8 @@ async function notifyStudentAfterResolution(
 ) {
   const notificationType =
     input.decision === 'supplement_required'
-      ? NotificationType.supplement_requested
-      : NotificationType.resolution_updated;
+      ? NotificationType.supplement_required
+      : NotificationType.review_updated;
   const title =
     input.decision === 'supplement_required'
       ? 'Can bo yeu cau bo sung minh chung'
@@ -643,7 +658,7 @@ async function notifyResolutionWatchers(
           evidenceId: input.evidenceId,
           reviewTaskId: input.reviewTaskId,
           resolutionCaseId: input.resolutionCaseId,
-          type: NotificationType.resolution_updated,
+          type: NotificationType.review_updated,
           title: input.title,
           message: input.message,
           metadata: { decision: input.decision, status: input.status },

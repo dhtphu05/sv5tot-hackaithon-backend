@@ -32,6 +32,8 @@ export const requestSupplementSchema = z.object({
   reason: z.string().min(1).max(2000),
   requestedEvidenceName: z.string().max(255).optional(),
   allowedCriteria: z.array(z.nativeEnum(Criterion)).optional(),
+  evidenceIds: z.array(z.string().uuid()).default([]),
+  requestedFields: z.array(z.string().trim().min(1).max(100)).default([]),
   deadline: z.string().datetime().optional(),
 });
 

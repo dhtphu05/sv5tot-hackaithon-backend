@@ -14,10 +14,7 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
-import {
-  createNotification,
-  NotificationsService,
-} from '../notifications/notifications.service';
+import { createNotification, NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from './review-assignment.service';
 import { getApplicationReviewProgress } from './review-progress.service';
 import { ReviewRepository } from './review.repository';
@@ -221,8 +218,10 @@ export class ReviewService {
         let defaultEvidenceStatus = 'under_review';
         if (input.decision === ReviewDecision.accepted) defaultEvidenceStatus = 'accepted';
         if (input.decision === ReviewDecision.rejected) defaultEvidenceStatus = 'rejected';
-        if (input.decision === ReviewDecision.supplement_required) defaultEvidenceStatus = 'needs_supplement';
-        if (input.decision === ReviewDecision.resolution_needed) defaultEvidenceStatus = 'resolution_needed';
+        if (input.decision === ReviewDecision.supplement_required)
+          defaultEvidenceStatus = 'needs_supplement';
+        if (input.decision === ReviewDecision.resolution_needed)
+          defaultEvidenceStatus = 'resolution_needed';
 
         await tx.evidence.updateMany({
           where: { id: { in: evidenceIds } },
@@ -252,7 +251,7 @@ export class ReviewService {
             applicationId,
             reviewTaskId: task.id,
             metadata: { criterion: task.criterion, evidenceIds },
-            type: NotificationType.supplement_requested,
+            type: NotificationType.supplement_required,
             title: 'Cần bổ sung minh chứng',
             message: input.officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
           },
@@ -289,7 +288,7 @@ export class ReviewService {
             reviewTaskId: task.id,
             resolutionCaseId,
             metadata: { criterion: task.criterion, evidenceIds },
-            type: NotificationType.resolution_updated,
+            type: NotificationType.review_updated,
             title: 'Hồ sơ được chuyển hội đồng xem xét',
             message: input.officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
           },
@@ -311,7 +310,9 @@ export class ReviewService {
           where: { applicationId },
         });
         const allAccepted = allTasks.every((t) =>
-          t.id === task.id ? status === ReviewTaskStatus.accepted : t.status === ReviewTaskStatus.accepted,
+          t.id === task.id
+            ? status === ReviewTaskStatus.accepted
+            : t.status === ReviewTaskStatus.accepted,
         );
         if (allAccepted && allTasks.length > 0) {
           await tx.application.update({
@@ -334,8 +335,10 @@ export class ReviewService {
 
       let auditActionName = 'REVIEW_DECISION_ACCEPTED';
       if (input.decision === ReviewDecision.rejected) auditActionName = 'REVIEW_DECISION_REJECTED';
-      if (input.decision === ReviewDecision.supplement_required) auditActionName = 'REVIEW_SUPPLEMENT_REQUESTED';
-      if (input.decision === ReviewDecision.resolution_needed) auditActionName = 'REVIEW_ESCALATED_TO_RESOLUTION';
+      if (input.decision === ReviewDecision.supplement_required)
+        auditActionName = 'REVIEW_SUPPLEMENT_REQUESTED';
+      if (input.decision === ReviewDecision.resolution_needed)
+        auditActionName = 'REVIEW_ESCALATED_TO_RESOLUTION';
 
       await createApplicationAudit(tx, {
         actorId: user.id,
@@ -428,7 +431,16 @@ export class ReviewService {
       note: input.reason,
     });
 
-    return result;
+    return {
+      ...result,
+      notificationCreated: true,
+      supplementRequest: {
+        reason: input.reason,
+        deadline: input.deadline ?? null,
+        evidenceIds: input.evidenceIds ?? [],
+        requestedFields: input.requestedFields ?? [],
+      },
+    };
   }
 
   async escalateResolution(
@@ -595,7 +607,7 @@ export class ReviewService {
             collectiveProfileId: profileId,
             reviewTaskId: task.id,
             metadata: { criterion: task.criterion },
-            type: NotificationType.supplement_requested,
+            type: NotificationType.supplement_required,
             title: 'Cần bổ sung hồ sơ tập thể',
             message: input.officerNote ?? 'Hồ sơ tập thể cần bổ sung.',
           },
@@ -648,9 +660,18 @@ export class ReviewService {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
 
-    const allowedStatuses = ['submitted', 'under_review', 'supplement_required', 'resolution_needed'];
+    const allowedStatuses = [
+      'submitted',
+      'under_review',
+      'supplement_required',
+      'resolution_needed',
+    ];
     if (application.status === 'draft') {
-      throw new AppError(400, ErrorCodes.INVALID_APPLICATION_STATUS, 'Cannot ensure tasks for draft application');
+      throw new AppError(
+        400,
+        ErrorCodes.INVALID_APPLICATION_STATUS,
+        'Cannot ensure tasks for draft application',
+      );
     }
     if (!allowedStatuses.includes(application.status)) {
       throw new AppError(
@@ -683,9 +704,7 @@ export class ReviewService {
     });
     const existingCriteria = new Set(existingTasks.map((t) => t.criterion));
 
-    const criteriaToCreate = Array.from(criteriaToEnsure).filter(
-      (c) => !existingCriteria.has(c),
-    );
+    const criteriaToCreate = Array.from(criteriaToEnsure).filter((c) => !existingCriteria.has(c));
 
     const createdTasks: any[] = [];
 
@@ -860,7 +879,7 @@ async function notifyManagers(
           userId: manager.id,
           applicationId,
           resolutionCaseId,
-          type: NotificationType.resolution_updated,
+          type: NotificationType.review_updated,
           title,
           message,
           metadata,
