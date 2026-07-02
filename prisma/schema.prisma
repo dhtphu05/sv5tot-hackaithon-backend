@@ -536,6 +536,10 @@ model ReviewTask {
   status              ReviewTaskStatus     @default(waiting)
   decision            ReviewDecision?
   officerNote         String?
+  officerSuggestedLevel Level?
+  levelAssessmentJson Json?
+  decisionReason      String?
+  supplementRequestJson Json?
   dueDate             DateTime?
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt

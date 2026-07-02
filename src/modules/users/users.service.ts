@@ -14,7 +14,10 @@ export class UsersService {
       throw new AppError(404, ErrorCodes.NOT_FOUND, 'User not found');
     }
 
-    return pickSafeUser(user);
+    return {
+      ...pickSafeUser(user),
+      officerSpecializations: user.officerSpecializations ?? [],
+    };
   }
 
   async updateMe(userId: string, input: UpdateMeInput) {

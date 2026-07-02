@@ -10,6 +10,11 @@ export async function listResolutionCases(req: Request, res: Response): Promise<
   sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
 }
 
+export async function listMyEscalatedCases(req: Request, res: Response): Promise<void> {
+  const data = await service.listMyEscalatedCases(req.user!, req.query as never);
+  sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
+}
+
 export async function getResolutionCase(req: Request, res: Response): Promise<void> {
   const data = await service.getCaseDetail(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });
