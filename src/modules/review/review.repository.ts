@@ -50,6 +50,7 @@ export class ReviewRepository {
       ...(query.status ? { status: query.status } : {}),
       ...(query.criterion ? { criterion: query.criterion } : {}),
       ...(query.applicationId ? { applicationId: query.applicationId } : {}),
+      ...(query.assignedOfficerId ? { assignedOfficerId: query.assignedOfficerId } : {}),
       ...(query.q
         ? {
             OR: [

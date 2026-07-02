@@ -9,8 +9,10 @@ import {
   checkParticipant,
   confirmIndex,
   createEvent,
+  deleteEvent,
   getEvent,
   importEventToApplication,
+  importParticipants,
   listEvents,
   listParticipants,
   startRosterIndexing,
@@ -18,9 +20,11 @@ import {
   uploadRosterFile,
 } from './event-registry.controller';
 import {
-  applicationIdBodySchema,
+  checkParticipantSchema,
   confirmIndexSchema,
   createEventSchema,
+  importParticipantsJsonSchema,
+  importToApplicationSchema,
   listEventsQuerySchema,
   participantsQuerySchema,
   startRosterIndexingSchema,
@@ -70,6 +74,12 @@ eventRegistryRouter.patch(
   validate({ body: updateEventSchema }),
   asyncHandler(updateEvent),
 );
+eventRegistryRouter.delete(
+  '/:id',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.admin),
+  asyncHandler(deleteEvent),
+);
 eventRegistryRouter.post(
   '/:id/roster-files',
   requireAuth,
@@ -101,14 +111,34 @@ eventRegistryRouter.post(
 eventRegistryRouter.post(
   '/:id/check-participant',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
-  validate({ body: applicationIdBodySchema }),
+  requireRole(
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.admin,
+  ),
+  validate({ body: checkParticipantSchema }),
   asyncHandler(checkParticipant),
+);
+eventRegistryRouter.post(
+  '/:id/participants/import',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.admin),
+  validate({ body: importParticipantsJsonSchema }),
+  asyncHandler(importParticipants),
 );
 eventRegistryRouter.post(
   '/:id/import-to-application',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
-  validate({ body: applicationIdBodySchema }),
+  requireRole(
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.admin,
+  ),
+  validate({ body: importToApplicationSchema }),
   asyncHandler(importEventToApplication),
 );

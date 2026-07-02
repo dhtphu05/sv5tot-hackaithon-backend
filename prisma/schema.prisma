@@ -128,8 +128,12 @@ enum NotificationType {
   system
   deadline
   supplement_required
+  supplement_requested
   precheck_completed
   review_updated
+  resolution_updated
+  application_updated
+  export_ready
   result_available
 }
 
