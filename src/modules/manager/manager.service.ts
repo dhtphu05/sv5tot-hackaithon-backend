@@ -1530,6 +1530,7 @@ function pickStudent(student: {
   studentCode: string | null;
   className: string | null;
   faculty: string | null;
+  avatarUrl?: string | null;
 }) {
   return {
     id: student.id,
@@ -1537,6 +1538,7 @@ function pickStudent(student: {
     studentCode: student.studentCode,
     className: student.className,
     faculty: student.faculty,
+    avatarUrl: student.avatarUrl ?? null,
   };
 }
 
