@@ -3,6 +3,7 @@ import {
   ApplicationStatus,
   Criterion,
   EvidenceStatus,
+  FinalStatus,
   Level,
   NotificationType,
   ReviewDecision,
@@ -404,7 +405,7 @@ export class ReviewService {
     const applicationId = task.applicationId;
     const application = task.application;
 
-    const updated = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const status = mapDecisionToStatus(input.decision);
       const saved = await tx.reviewTask.update({
         where: { id: task.id },
@@ -526,6 +527,12 @@ export class ReviewService {
         );
       }
 
+      const applicationOutcome = await syncApplicationReviewOutcome(
+        tx,
+        applicationId,
+        application.targetLevel,
+      );
+
       // Audit application status changes
       await createApplicationAudit(tx, {
         actorId: user.id,
@@ -534,7 +541,18 @@ export class ReviewService {
         targetType: 'application',
         targetId: applicationId,
         applicationId,
-        afterStateJson: { status: application.status },
+        beforeStateJson: {
+          status: application.status,
+          finalStatus: application.finalStatus,
+          finalLevel: application.finalLevel,
+        },
+        afterStateJson: applicationOutcome
+          ? {
+              status: applicationOutcome.status,
+              finalStatus: applicationOutcome.finalStatus,
+              finalLevel: applicationOutcome.finalLevel,
+            }
+          : { status: application.status },
       });
 
       let auditActionName = 'REVIEW_DECISION_ACCEPTED';
@@ -578,11 +596,11 @@ export class ReviewService {
         );
       }
 
-      return saved;
+      return { task: saved, applicationOutcome };
     });
 
     return {
-      task: updated,
+      task: result.task,
       application: {
         id: applicationId,
         status:
@@ -590,7 +608,9 @@ export class ReviewService {
             ? ApplicationStatus.supplement_required
             : input.decision === ReviewDecision.resolution_needed
               ? ApplicationStatus.resolution_needed
-              : application.status,
+              : (result.applicationOutcome?.status ?? application.status),
+        finalStatus: result.applicationOutcome?.finalStatus ?? application.finalStatus,
+        finalLevel: result.applicationOutcome?.finalLevel ?? application.finalLevel,
       },
       collectiveProfile: null,
       reviewProgress: await getApplicationReviewProgress(applicationId),
@@ -1059,6 +1079,112 @@ function mapDecisionToStatus(decision: ReviewDecision): ReviewTaskStatus {
   if (decision === ReviewDecision.rejected) return ReviewTaskStatus.rejected;
   if (decision === ReviewDecision.supplement_required) return ReviewTaskStatus.supplement_required;
   return ReviewTaskStatus.resolution_needed;
+}
+
+async function syncApplicationReviewOutcome(
+  tx: Prisma.TransactionClient,
+  applicationId: string,
+  targetLevel: Level,
+) {
+  const tasks = await tx.reviewTask.findMany({
+    where: { applicationId },
+    select: { status: true, officerSuggestedLevel: true },
+  });
+
+  if (tasks.length === 0) {
+    return null;
+  }
+
+  const now = new Date();
+  const baseData: Prisma.ApplicationUpdateInput = {
+    finalizedAt: null,
+    finalizedBy: { disconnect: true },
+    finalStatus: FinalStatus.pending,
+    finalLevel: null,
+    finalNote: null,
+  };
+
+  if (tasks.some((task) => task.status === ReviewTaskStatus.supplement_required)) {
+    return tx.application.update({
+      where: { id: applicationId },
+      data: { ...baseData, status: ApplicationStatus.supplement_required },
+      select: { status: true, finalStatus: true, finalLevel: true },
+    });
+  }
+
+  if (tasks.some((task) => task.status === ReviewTaskStatus.resolution_needed)) {
+    return tx.application.update({
+      where: { id: applicationId },
+      data: { ...baseData, status: ApplicationStatus.resolution_needed },
+      select: { status: true, finalStatus: true, finalLevel: true },
+    });
+  }
+
+  if (
+    tasks.some(
+      (task) =>
+        task.status === ReviewTaskStatus.waiting || task.status === ReviewTaskStatus.reviewing,
+    )
+  ) {
+    return tx.application.update({
+      where: { id: applicationId },
+      data: { ...baseData, status: ApplicationStatus.under_review },
+      select: { status: true, finalStatus: true, finalLevel: true },
+    });
+  }
+
+  if (tasks.every((task) => task.status === ReviewTaskStatus.accepted)) {
+    const finalLevel = getLowestSuggestedLevel(tasks) ?? targetLevel;
+    return tx.application.update({
+      where: { id: applicationId },
+      data: {
+        status: ApplicationStatus.completed,
+        finalStatus: FinalStatus.passed,
+        finalLevel,
+        finalizedAt: now,
+        finalNote: 'Auto-completed after all review criteria were accepted.',
+      },
+      select: { status: true, finalStatus: true, finalLevel: true },
+    });
+  }
+
+  if (
+    tasks.every(
+      (task) =>
+        task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected,
+    )
+  ) {
+    return tx.application.update({
+      where: { id: applicationId },
+      data: {
+        status: ApplicationStatus.rejected,
+        finalStatus: FinalStatus.failed,
+        finalLevel: null,
+        finalizedAt: now,
+        finalNote: 'Auto-closed after at least one review criterion was rejected.',
+      },
+      select: { status: true, finalStatus: true, finalLevel: true },
+    });
+  }
+
+  return null;
+}
+
+function getLowestSuggestedLevel(
+  tasks: Array<{ officerSuggestedLevel: Level | null }>,
+): Level | null {
+  const rank: Record<Level, number> = {
+    [Level.school]: 0,
+    [Level.university]: 1,
+    [Level.city]: 2,
+    [Level.central]: 3,
+  };
+  const suggested = tasks
+    .map((task) => task.officerSuggestedLevel)
+    .filter((level): level is Level => Boolean(level))
+    .sort((a, b) => rank[a] - rank[b]);
+
+  return suggested[0] ?? null;
 }
 
 function decisionAuditAction(decision: ReviewDecision): string {
