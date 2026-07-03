@@ -25,6 +25,11 @@ export async function listManagerResults(req: Request, res: Response): Promise<v
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function getManagerResultDetail(req: Request, res: Response): Promise<void> {
+  const data = await service.getResultDetail(req.user!, String(req.params.applicationId));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function assignManagerReviewTask(req: Request, res: Response): Promise<void> {
   const data = await service.reassignTask(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });

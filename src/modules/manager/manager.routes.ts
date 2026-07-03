@@ -20,6 +20,7 @@ import {
   getApplicationAggregation,
   getApplicationSummary,
   getManagerDashboardSummary,
+  getManagerResultDetail,
   getManagerWorkloads,
   listManagerResults,
   listManagerApplications,
@@ -88,6 +89,12 @@ managerRouter.get(
   requireRole(Role.manager, Role.committee, Role.admin),
   validate({ query: listManagerResultsQuerySchema }),
   asyncHandler(listManagerResults),
+);
+managerRouter.get(
+  '/results/:applicationId',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  asyncHandler(getManagerResultDetail),
 );
 managerRouter.post(
   '/review-tasks/:id/assign',

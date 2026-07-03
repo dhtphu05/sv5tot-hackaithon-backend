@@ -46,10 +46,20 @@ const applicationDetailInclude = {
   reviewTasks: {
     include: {
       assignedOfficer: true,
-      evidences: { include: { evidence: true } },
+      evidences: {
+        include: {
+          evidence: {
+            include: {
+              evidenceFiles: { include: { file: true } },
+              evidenceCard: true,
+            },
+          },
+        },
+      },
     },
     orderBy: [{ criterion: 'asc' }, { updatedAt: 'desc' }],
   },
+  finalizedBy: true,
   resolutionCases: { orderBy: { createdAt: 'desc' } },
   precheckResults: { orderBy: { createdAt: 'desc' }, take: 1 },
   cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
@@ -263,30 +273,124 @@ export class ManagerService {
 
   async listResults(query: ListManagerResultsQuery) {
     const where = buildResultsWhere(query);
+    const allCandidates = await prisma.application.findMany({
+      where,
+      select: {
+        id: true,
+        targetLevel: true,
+        finalStatus: true,
+        readinessScore: true,
+        finalizedAt: true,
+        updatedAt: true,
+        submittedAt: true,
+        createdAt: true,
+      },
+    });
+    const sortedCandidates = sortResultCandidates(allCandidates, query);
+    const total = sortedCandidates.length;
     const skip = (query.page - 1) * query.pageSize;
-    const [applications, total] = await prisma.$transaction([
-      prisma.application.findMany({
-        where,
-        include: {
-          student: true,
-          finalizedBy: true,
-          reviewTasks: { select: { status: true } },
-          cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
-        },
-        orderBy: [{ finalizedAt: 'desc' }, { updatedAt: 'desc' }, { submittedAt: 'desc' }],
-        skip,
-        take: query.pageSize,
-      }),
-      prisma.application.count({ where }),
-    ]);
+    const pageIds = sortedCandidates.slice(skip, skip + query.pageSize).map((item) => item.id);
+    const applications = pageIds.length
+      ? await prisma.application.findMany({
+          where: { id: { in: pageIds } },
+          include: {
+            student: true,
+            finalizedBy: true,
+            reviewTasks: { select: { status: true } },
+            cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
+          },
+        })
+      : [];
+    const orderedApplications = pageIds
+      .map((id) => applications.find((application) => application.id === id))
+      .filter(Boolean) as typeof applications;
 
     return {
-      items: applications.map(toResultItem),
+      items: orderedApplications.map(toResultItem),
       pagination: {
         page: query.page,
         pageSize: query.pageSize,
         total,
+        totalPages: Math.ceil(total / query.pageSize),
       },
+      sort: {
+        sortBy: query.sortBy,
+        sortOrder: query.sortOrder,
+      },
+    };
+  }
+
+  async getResultDetail(user: AuthenticatedUser, applicationId: string) {
+    const application = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: applicationDetailInclude,
+    });
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    const auditTimeline = await prisma.auditLog.findMany({
+      where: { applicationId },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+    const aggregation = buildResultAggregation(application);
+
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: 'MANAGER_RESULT_DETAIL_VIEWED',
+      targetType: 'application',
+      targetId: application.id,
+      applicationId: application.id,
+      afterStateJson: { status: application.status, finalStatus: application.finalStatus },
+    });
+
+    return {
+      application: {
+        id: application.id,
+        schoolYear: application.schoolYear,
+        applicationType: application.applicationType,
+        targetLevel: application.targetLevel,
+        status: application.status,
+        readinessScore: application.readinessScore,
+        submittedAt: application.submittedAt?.toISOString() ?? null,
+        finalStatus: application.finalStatus,
+        finalLevel: application.finalLevel,
+        finalNote: application.finalNote,
+        finalizedAt: application.finalizedAt?.toISOString() ?? null,
+        updatedAt: application.updatedAt.toISOString(),
+        lastActivityAt: getLastActivityAt(application).toISOString(),
+        finalizedBy: application.finalizedBy
+          ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
+          : null,
+      },
+      student: pickStudent(application.student),
+      metrics: application.metrics.map((metric) => ({
+        id: metric.id,
+        metricType: metric.metricType,
+        value: metric.value,
+        scale: metric.scale,
+        verificationStatus: metric.verificationStatus,
+      })),
+      reviewTasks: application.reviewTasks.map(toResultReviewTask),
+      applicationEvidences: application.evidences.map(toResultEvidence),
+      criterionSummary: buildCriterionSummary(application),
+      latestPrecheck: application.precheckResults[0] ?? null,
+      latestCascade: application.cascadeReviews[0] ?? null,
+      resolutionCases: application.resolutionCases.map((item) => ({
+        id: item.id,
+        status: item.status,
+        reason: item.reason,
+        committeeDecision: item.committeeDecision,
+        evidenceId: item.evidenceId,
+        createdBy: { id: item.createdBy, fullName: item.createdBy },
+        closedBy: item.closedBy ? { id: item.closedBy, fullName: item.closedBy } : null,
+        createdAt: item.createdAt.toISOString(),
+        updatedAt: (item.closedAt ?? item.createdAt).toISOString(),
+      })),
+      auditTimeline: auditTimeline.map(toAuditTimelineItem),
+      aggregation,
     };
   }
 
@@ -918,7 +1022,7 @@ function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWh
   if (query.finalLevel) and.push({ finalLevel: query.finalLevel });
   if (query.finalStatus) {
     and.push(
-      query.finalStatus === FinalStatus.pending
+      query.finalStatus === FinalStatus.pending || query.finalStatus === 'unfinalized'
         ? { OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }] }
         : { finalStatus: query.finalStatus },
     );
@@ -938,6 +1042,53 @@ function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWh
   return and.length ? { AND: and } : {};
 }
 
+function sortResultCandidates<T extends {
+  targetLevel: Level;
+  finalStatus: FinalStatus;
+  readinessScore: number;
+  finalizedAt: Date | null;
+  updatedAt: Date;
+  submittedAt: Date | null;
+  createdAt: Date;
+}>(items: T[], query: ListManagerResultsQuery) {
+  const direction = query.sortBy === 'oldest' ? 'asc' : query.sortOrder;
+  const factor = direction === 'asc' ? 1 : -1;
+  const levelRank: Record<Level, number> = {
+    school: 1,
+    university: 2,
+    city: 3,
+    central: 4,
+  };
+
+  return [...items].sort((a, b) => {
+    if (query.sortBy === 'readiness_desc') {
+      return b.readinessScore - a.readinessScore || compareDates(getLastActivityAt(b), getLastActivityAt(a));
+    }
+    if (query.sortBy === 'unfinalized_first') {
+      const aPending = a.finalStatus === FinalStatus.pending || !a.finalizedAt ? 0 : 1;
+      const bPending = b.finalStatus === FinalStatus.pending || !b.finalizedAt ? 0 : 1;
+      return aPending - bPending || compareDates(getLastActivityAt(b), getLastActivityAt(a));
+    }
+    if (query.sortBy === 'target_level_desc') {
+      return levelRank[b.targetLevel] - levelRank[a.targetLevel] || compareDates(getLastActivityAt(b), getLastActivityAt(a));
+    }
+    return factor * compareDates(getLastActivityAt(a), getLastActivityAt(b));
+  });
+}
+
+function compareDates(a: Date, b: Date) {
+  return a.getTime() - b.getTime();
+}
+
+function getLastActivityAt(application: {
+  finalizedAt?: Date | null;
+  updatedAt: Date;
+  submittedAt?: Date | null;
+  createdAt?: Date;
+}) {
+  return application.finalizedAt ?? application.updatedAt ?? application.submittedAt ?? application.createdAt ?? new Date(0);
+}
+
 function toResultItem(application: {
   id: string;
   studentId: string;
@@ -950,6 +1101,8 @@ function toResultItem(application: {
   readinessScore: number;
   submittedAt: Date | null;
   finalizedAt?: Date | null;
+  updatedAt: Date;
+  createdAt: Date;
   finalizedBy?: { id: string; fullName: string } | null;
   student: {
     id: string;
@@ -978,10 +1131,153 @@ function toResultItem(application: {
     readinessScore: application.readinessScore,
     submittedAt: application.submittedAt?.toISOString() ?? null,
     finalizedAt: application.finalizedAt?.toISOString() ?? null,
+    updatedAt: application.updatedAt.toISOString(),
+    lastActivityAt: getLastActivityAt(application).toISOString(),
     finalizedBy: application.finalizedBy
       ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
       : null,
     reviewTaskSummary: buildTaskSummary(application.reviewTasks),
+    taskProgress: {
+      accepted: buildTaskSummary(application.reviewTasks).accepted,
+      total: application.reviewTasks.length,
+    },
+  };
+}
+
+type ResultEvidenceSource =
+  | ApplicationDetail['evidences'][number]
+  | ApplicationDetail['reviewTasks'][number]['evidences'][number]['evidence'];
+
+function toResultReviewTask(task: ApplicationDetail['reviewTasks'][number]) {
+  return {
+    id: task.id,
+    criterion: task.criterion,
+    status: task.status,
+    decision: task.decision,
+    officerNote: task.officerNote,
+    officerSuggestedLevel: task.officerSuggestedLevel,
+    levelAssessmentJson: task.levelAssessmentJson,
+    decisionReason: task.decisionReason,
+    assignedOfficer: task.assignedOfficer
+      ? { id: task.assignedOfficer.id, fullName: task.assignedOfficer.fullName }
+      : null,
+    evidences: task.evidences.map((link) => toResultEvidence(link.evidence)),
+  };
+}
+
+function toResultEvidence(evidence: ResultEvidenceSource) {
+  return {
+    id: evidence.id,
+    evidenceName: evidence.evidenceName,
+    criterion: evidence.criterion,
+    sourceType: evidence.sourceType,
+    status: evidence.status,
+    indexingStatus: evidence.indexingStatus,
+    confidence: evidence.confidence,
+    files: evidence.evidenceFiles.map((link) => ({
+      id: link.file.id,
+      originalName: link.file.originalName,
+      mimeType: link.file.mimeType,
+      fileSize: link.file.fileSize,
+      createdAt: link.file.createdAt.toISOString(),
+    })),
+    evidenceCard: evidence.evidenceCard
+      ? {
+          id: evidence.evidenceCard.id,
+          aiSummary: evidence.evidenceCard.aiSummary,
+          confidence: evidence.evidenceCard.confidence,
+          ocrText: evidence.evidenceCard.ocrText,
+          extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
+          warningsJson: evidence.evidenceCard.warningsJson,
+          matchedEventId: evidence.evidenceCard.matchedEventId,
+          matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
+        }
+      : null,
+  };
+}
+
+function buildCriterionSummary(application: ApplicationDetail) {
+  return Object.fromEntries(
+    Object.values(Criterion).map((criterion) => {
+      const task = application.reviewTasks.find((item) => item.criterion === criterion);
+      const evidences = application.evidences.filter((item) => item.criterion === criterion);
+      const acceptedEvidenceCount = evidences.filter((item) => item.status === 'accepted').length;
+      const warningCount = evidences.filter((item) => item.evidenceCard?.warningsJson).length;
+      return [
+        criterion,
+        {
+          status: task?.status ?? 'waiting',
+          decision: task?.decision ?? null,
+          officerSuggestedLevel: task?.officerSuggestedLevel ?? null,
+          evidenceCount: evidences.length,
+          acceptedEvidenceCount,
+          warningCount,
+          summary: buildCriterionSummaryText(task?.status, evidences.length, warningCount),
+        },
+      ];
+    }),
+  );
+}
+
+function buildCriterionSummaryText(
+  status: ReviewTaskStatus | undefined,
+  evidenceCount: number,
+  warningCount: number,
+) {
+  if (!status) return evidenceCount ? 'Có minh chứng, chưa có task xét duyệt.' : 'Chưa có task xét duyệt hoặc minh chứng.';
+  if (status === ReviewTaskStatus.accepted) return 'Tiêu chí đã được cán bộ chấp nhận.';
+  if (status === ReviewTaskStatus.rejected) return 'Tiêu chí bị từ chối, cần xem lý do quyết định.';
+  if (status === ReviewTaskStatus.supplement_required) return 'Tiêu chí đang yêu cầu sinh viên bổ sung.';
+  if (status === ReviewTaskStatus.resolution_needed) return 'Tiêu chí cần hội đồng xử lý.';
+  if (warningCount > 0) return 'Có cảnh báo AI cần kiểm tra.';
+  return 'Tiêu chí đang chờ cán bộ xét duyệt.';
+}
+
+function buildResultAggregation(application: ApplicationDetail) {
+  const aggregation = buildAggregation(application);
+  const blockingIssues = [
+    ...aggregation.blockingReasons.map((message) => ({
+      type: 'review_progress',
+      message,
+      criterion: null,
+    })),
+    ...aggregation.pendingCriteria.map((criterion) => ({
+      type: 'pending_criterion',
+      message: 'Tiêu chí chưa hoàn tất xét duyệt.',
+      criterion,
+    })),
+  ];
+  return {
+    suggestedFinalStatus: aggregation.suggestedFinalStatus,
+    suggestedFinalLevel: aggregation.suggestedFinalLevel,
+    reason: aggregation.canFinalize
+      ? 'Hồ sơ đủ điều kiện để Hội đồng/Admin chốt kết quả.'
+      : aggregation.blockingReasons.join(' ') || 'Hồ sơ cần kiểm tra thêm trước khi chốt.',
+    canFinalize: aggregation.canFinalize,
+    blockingIssues,
+  };
+}
+
+function toAuditTimelineItem(item: {
+  id: string;
+  actorId: string | null;
+  actorRole: Role | null;
+  action: string;
+  targetType: string;
+  targetId: string;
+  note: string | null;
+  createdAt: Date;
+}) {
+  return {
+    id: item.id,
+    actorId: item.actorId,
+    actorName: item.actorId,
+    actorRole: item.actorRole,
+    action: item.action,
+    targetType: item.targetType,
+    targetId: item.targetId,
+    note: item.note,
+    createdAt: item.createdAt.toISOString(),
   };
 }
 
