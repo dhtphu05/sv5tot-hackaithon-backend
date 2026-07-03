@@ -3,13 +3,14 @@ import {
   ApplicationStatus,
   ApplicationType,
   Criterion,
+  EvidenceStatus,
   FinalStatus,
   Level,
   NotificationType,
+  Prisma,
   Role,
   ReviewTaskStatus,
   type Application,
-  type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
@@ -311,6 +312,10 @@ export class ApplicationsService {
 
     const existingTasks = application.reviewTasks;
     const isSupplementResubmit = application.status === ApplicationStatus.supplement_required;
+    const supplementTasks = existingTasks.filter(
+      (task) => task.status === ReviewTaskStatus.supplement_required,
+    );
+    const supplementCriteria = Array.from(new Set(supplementTasks.map((task) => task.criterion)));
     const result = await prisma.$transaction(async (tx) => {
       const submittedAt = new Date();
       const newVersion = application.currentDraftVersion + 1;
@@ -324,13 +329,51 @@ export class ApplicationsService {
         },
       });
 
-      if (isSupplementResubmit && existingTasks.length > 0) {
+      if (isSupplementResubmit && supplementTasks.length > 0) {
+        const taskEvidenceLinks = supplementTasks.flatMap((task) =>
+          application.evidences
+            .filter((evidence) => evidence.criterion === task.criterion)
+            .map((evidence) => ({
+              reviewTaskId: task.id,
+              evidenceId: evidence.id,
+            })),
+        );
+        if (taskEvidenceLinks.length > 0) {
+          await tx.reviewTaskEvidence.createMany({
+            data: taskEvidenceLinks,
+            skipDuplicates: true,
+          });
+        }
+
         await tx.reviewTask.updateMany({
           where: {
             applicationId: application.id,
             status: ReviewTaskStatus.supplement_required,
           },
-          data: { status: ReviewTaskStatus.waiting, decision: null },
+          data: {
+            status: ReviewTaskStatus.waiting,
+            decision: null,
+            officerNote: null,
+            officerSuggestedLevel: null,
+            levelAssessmentJson: Prisma.JsonNull,
+            decisionReason: null,
+            supplementRequestJson: Prisma.JsonNull,
+          },
+        });
+        await tx.evidence.updateMany({
+          where: {
+            applicationId: application.id,
+            criterion: { in: supplementCriteria },
+            status: {
+              in: [
+                EvidenceStatus.draft,
+                EvidenceStatus.pending_indexing,
+                EvidenceStatus.indexed,
+                EvidenceStatus.needs_supplement,
+              ],
+            },
+          },
+          data: { status: EvidenceStatus.under_review },
         });
       }
 
@@ -579,6 +622,17 @@ export class ApplicationsService {
       updatedAt: application.updatedAt,
       metrics: application.metrics,
       summary: buildApplicationSummary(application),
+      reviewTasks: application.reviewTasks.map((task) => ({
+        id: task.id,
+        criterion: task.criterion,
+        status: task.status,
+        decision: task.decision,
+        officerNote: task.officerNote,
+        decisionReason: task.decisionReason,
+        supplementRequestJson: task.supplementRequestJson,
+        dueDate: task.dueDate,
+        updatedAt: task.updatedAt,
+      })),
       latestDraftSnapshot: latestDraftSnapshot
         ? {
             id: latestDraftSnapshot.id,

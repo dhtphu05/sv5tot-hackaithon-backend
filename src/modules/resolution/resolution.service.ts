@@ -27,7 +27,7 @@ import type {
 
 const resolutionInclude = {
   application: { include: { student: true } },
-  evidence: { include: { evidenceCard: true } },
+  evidence: { include: { evidenceCard: true, evidenceFiles: { include: { file: true } } } },
 } satisfies Prisma.ResolutionCaseInclude;
 
 type ResolutionCaseWithInclude = Prisma.ResolutionCaseGetPayload<{
@@ -146,16 +146,37 @@ export class ResolutionService {
         orderBy: { createdAt: 'desc' },
       }),
     ]);
+    const relatedEvidences = await findRelatedEvidences(resolutionCase, relatedTask);
+    const primaryEvidence = resolutionCase.evidence ? toResolutionEvidence(resolutionCase.evidence) : null;
 
     return {
       resolutionCase: toResolutionListItem(resolutionCase),
+      case: {
+        id: resolutionCase.id,
+        applicationId: resolutionCase.applicationId,
+        reviewTaskId: relatedTask?.id ?? null,
+        evidenceId: resolutionCase.evidenceId,
+        criterion: resolutionCase.evidence?.criterion ?? relatedTask?.criterion ?? null,
+        reason: resolutionCase.reason,
+        status: resolutionCase.status,
+        committeeDecision: resolutionCase.committeeDecision,
+        createdBy: { id: resolutionCase.createdBy, fullName: resolutionCase.createdBy },
+        closedBy: resolutionCase.closedBy ? { id: resolutionCase.closedBy, fullName: resolutionCase.closedBy } : null,
+        createdAt: resolutionCase.createdAt,
+        updatedAt: resolutionCase.closedAt ?? resolutionCase.createdAt,
+      },
       application: resolutionCase.application,
       student: resolutionCase.application.student,
       evidence: resolutionCase.evidence,
       evidenceCard: resolutionCase.evidence?.evidenceCard ?? null,
       relatedReviewTask: relatedTask,
+      reviewTask: relatedTask,
+      primaryEvidence,
+      relatedEvidences: relatedEvidences.map(toResolutionEvidence),
       precheck,
       cascade,
+      latestPrecheck: precheck,
+      latestCascade: cascade,
       knowledgeBaseMatches: kbMatches,
       auditTimeline,
     };
@@ -532,6 +553,96 @@ async function findRelatedReviewTask(resolutionCase: {
     },
     include: { assignedOfficer: true },
   });
+}
+
+async function findRelatedEvidences(
+  resolutionCase: ResolutionCaseWithInclude,
+  relatedTask: Awaited<ReturnType<typeof findRelatedReviewTask>>,
+) {
+  const criterion = resolutionCase.evidence?.criterion ?? relatedTask?.criterion;
+  const [taskLinks, criterionEvidences] = await Promise.all([
+    relatedTask
+      ? prisma.reviewTaskEvidence.findMany({
+          where: { reviewTaskId: relatedTask.id },
+          include: {
+            evidence: {
+              include: { evidenceCard: true, evidenceFiles: { include: { file: true } } },
+            },
+          },
+        })
+      : [],
+    criterion
+      ? prisma.evidence.findMany({
+          where: { applicationId: resolutionCase.applicationId, criterion },
+          include: { evidenceCard: true, evidenceFiles: { include: { file: true } } },
+          orderBy: { updatedAt: 'desc' },
+        })
+      : [],
+  ]);
+
+  const byId = new Map<string, (typeof criterionEvidences)[number]>();
+  if (resolutionCase.evidence) byId.set(resolutionCase.evidence.id, resolutionCase.evidence);
+  taskLinks.forEach((link) => byId.set(link.evidence.id, link.evidence));
+  criterionEvidences.forEach((evidence) => byId.set(evidence.id, evidence));
+  return Array.from(byId.values());
+}
+
+function toResolutionEvidence(evidence: {
+  id: string;
+  evidenceName: string;
+  criterion: Criterion;
+  sourceType: string;
+  status: string;
+  indexingStatus: string;
+  confidence: number | null;
+  evidenceFiles: Array<{
+    file: {
+      id: string;
+      originalName: string;
+      mimeType: string;
+      fileSize: number;
+      createdAt: Date;
+    };
+  }>;
+  evidenceCard: {
+    id: string;
+    aiSummary: string | null;
+    confidence: number | null;
+    ocrText: string | null;
+    extractedFieldsJson: Prisma.JsonValue | null;
+    warningsJson: Prisma.JsonValue | null;
+    matchedEventId: string | null;
+    matchedKnowledgeItemIds: Prisma.JsonValue | null;
+  } | null;
+}) {
+  return {
+    id: evidence.id,
+    evidenceName: evidence.evidenceName,
+    criterion: evidence.criterion,
+    sourceType: evidence.sourceType,
+    status: evidence.status,
+    indexingStatus: evidence.indexingStatus,
+    confidence: evidence.confidence,
+    files: evidence.evidenceFiles.map((link) => ({
+      id: link.file.id,
+      originalName: link.file.originalName,
+      mimeType: link.file.mimeType,
+      fileSize: link.file.fileSize,
+      createdAt: link.file.createdAt.toISOString(),
+    })),
+    evidenceCard: evidence.evidenceCard
+      ? {
+          id: evidence.evidenceCard.id,
+          aiSummary: evidence.evidenceCard.aiSummary,
+          confidence: evidence.evidenceCard.confidence,
+          ocrText: evidence.evidenceCard.ocrText,
+          extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
+          warningsJson: evidence.evidenceCard.warningsJson,
+          matchedEventId: evidence.evidenceCard.matchedEventId,
+          matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
+        }
+      : null,
+  };
 }
 
 async function applyEvidenceDecisions(

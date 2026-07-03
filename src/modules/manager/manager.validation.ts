@@ -19,14 +19,26 @@ export const listManagerResultsQuerySchema = z.object({
     .string()
     .regex(/^\d{4}-\d{4}$/)
     .optional(),
-  finalStatus: z.nativeEnum(FinalStatus).optional(),
+  finalStatus: z.union([z.nativeEnum(FinalStatus), z.literal('unfinalized')]).optional(),
   finalLevel: z.nativeEnum(Level).optional(),
   targetLevel: z.nativeEnum(Level).optional(),
   faculty: z.string().trim().min(1).optional(),
   className: z.string().trim().min(1).optional(),
   search: z.string().trim().min(1).optional(),
   page: z.coerce.number().int().positive().default(1),
-  pageSize: z.coerce.number().int().positive().max(100).default(20),
+  pageSize: z.coerce.number().int().positive().max(100).default(10),
+  sortBy: z
+    .enum([
+      'lastActivityAt',
+      'updatedAt',
+      'newest',
+      'oldest',
+      'readiness_desc',
+      'unfinalized_first',
+      'target_level_desc',
+    ])
+    .default('lastActivityAt'),
+  sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
 
 export const assignReviewTaskSchema = z
