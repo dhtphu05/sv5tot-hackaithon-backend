@@ -1,5 +1,5 @@
 // Owns export job requests for applications and review results.
-import { FileStorageType, ReviewTaskStatus, Role, type Prisma } from '@prisma/client';
+import { FileStorageType, Level, ReviewTaskStatus, Role, type Prisma } from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { uploadConfig } from '../../config/upload';
@@ -151,6 +151,7 @@ export class ExportsService {
       where,
       include: {
         student: true,
+        finalizedBy: true,
         reviewTasks: true,
         cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
         auditLogs: {
@@ -178,6 +179,12 @@ export class ExportsService {
       cascadeSuggestedLevel: latestCascade?.suggestedLevel ?? null,
       finalLevel: application.finalLevel,
       finalStatus: application.finalStatus,
+      downrankReason: buildExportDecisionReason(
+        application.targetLevel,
+        latestCascade?.suggestedLevel ?? null,
+        application.finalLevel,
+        application.finalStatus,
+      ),
       applicationStatus: application.status,
       readinessScore: application.readinessScore,
       submittedAt: application.submittedAt,
@@ -189,6 +196,7 @@ export class ExportsService {
       ),
       cascadeReviewCreatedAt: latestCascade?.createdAt ?? null,
       cascadeSnapshot: latestCascade?.levelResultsJson ?? null,
+      finalizedByName: application.finalizedBy?.fullName ?? null,
       finalNote:
         application.auditLogs.find((log) => log.action === auditActions.FINAL_RESULT_CONFIRMED)
           ?.note ?? null,
@@ -290,6 +298,19 @@ function buildApplicationWhere(input: ExportApplicationsQuery): Prisma.Applicati
   };
 }
 
+function buildExportDecisionReason(
+  targetLevel: Level,
+  suggestedLevel: Level | null,
+  finalLevel: Level | null,
+  finalStatus: string,
+) {
+  if (finalStatus === 'failed') return 'Khong dat cap nao.';
+  const decidedLevel = finalLevel ?? suggestedLevel;
+  if (!decidedLevel) return 'Chua co cap dat.';
+  if (decidedLevel === targetLevel) return 'Dat dung cap aim.';
+  return `Ha tu ${targetLevel} xuong ${decidedLevel}.`;
+}
+
 const applicationCsvHeaders = [
   'applicationId',
   'schoolYear',
@@ -341,6 +362,7 @@ function toCsv<T extends Record<string, unknown>>(
     'cascadeSuggestedLevel',
     'finalLevel',
     'finalStatus',
+    'downrankReason',
     'applicationStatus',
     'readinessScore',
     'submittedAt',
@@ -348,6 +370,7 @@ function toCsv<T extends Record<string, unknown>>(
     'criteriaTaskStatuses',
     'cascadeReviewCreatedAt',
     'cascadeSnapshot',
+    'finalizedByName',
     'finalNote',
   ],
 ): string {

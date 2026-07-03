@@ -123,6 +123,7 @@ export class ManagerService {
       recentFinalizedApplications,
       totalApplications,
       unfinalizedCount,
+      dashboardCandidates,
     ] = await prisma.$transaction([
       prisma.application.groupBy({
         by: ['status'],
@@ -195,6 +196,21 @@ export class ManagerService {
           OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }],
         },
       }),
+      prisma.application.findMany({
+        select: {
+          id: true,
+          targetLevel: true,
+          finalStatus: true,
+          readinessScore: true,
+          finalizedAt: true,
+          updatedAt: true,
+          submittedAt: true,
+          createdAt: true,
+          reviewTasks: { select: { status: true } },
+          resolutionCases: { select: { status: true } },
+          cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1, select: { suggestedLevel: true } },
+        },
+      }),
     ]);
 
     const applicationOverview = {
@@ -254,6 +270,7 @@ export class ManagerService {
       finalLevelBreakdown,
       reviewTaskSummary,
       resolutionSummary,
+      decisionSummary: buildDecisionSummary(dashboardCandidates),
       workloadByOfficer,
       recentApplications: recentApplications.map(toResultItem),
       recentFinalizedApplications: recentFinalizedApplications.map(toResultItem),
@@ -287,9 +304,13 @@ export class ManagerService {
         updatedAt: true,
         submittedAt: true,
         createdAt: true,
+        reviewTasks: { select: { status: true } },
+        resolutionCases: { select: { status: true } },
+        cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1, select: { suggestedLevel: true } },
       },
     });
-    const sortedCandidates = sortResultCandidates(allCandidates, query);
+    const filteredCandidates = filterResultCandidates(allCandidates, query);
+    const sortedCandidates = sortResultCandidates(filteredCandidates, query);
     const total = sortedCandidates.length;
     const skip = (query.page - 1) * query.pageSize;
     const pageIds = sortedCandidates.slice(skip, skip + query.pageSize).map((item) => item.id);
@@ -299,7 +320,16 @@ export class ManagerService {
           include: {
             student: true,
             finalizedBy: true,
-            reviewTasks: { select: { status: true } },
+            reviewTasks: {
+              select: {
+                criterion: true,
+                status: true,
+                officerSuggestedLevel: true,
+                officerNote: true,
+                decisionReason: true,
+                evidences: { select: { evidenceId: true } },
+              },
+            },
             resolutionCases: { select: { status: true } },
             cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
           },
@@ -1122,6 +1152,52 @@ function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWh
   return and.length ? { AND: and } : {};
 }
 
+function filterResultCandidates<T extends {
+  targetLevel: Level;
+  reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  resolutionCases: Array<{ status: ResolutionStatus }>;
+  cascadeReviews: Array<{ suggestedLevel: Level | null }>;
+}>(items: T[], query: ListManagerResultsQuery) {
+  if (!query.resultView) return items;
+
+  return items.filter((item) => {
+    const progress = buildReviewProgress(item.reviewTasks.map((task) => task.status));
+    const hasOpenResolution = item.resolutionCases.some(
+      (resolution) =>
+        resolution.status === ResolutionStatus.open ||
+        resolution.status === ResolutionStatus.in_review,
+    );
+    const suggestedLevel = item.cascadeReviews[0]?.suggestedLevel ?? null;
+
+    if (query.resultView === 'ready') return progress.canAggregate && !hasOpenResolution;
+    if (query.resultView === 'downgraded') return Boolean(suggestedLevel && suggestedLevel !== item.targetLevel);
+    if (query.resultView === 'not_eligible') return suggestedLevel === null;
+    if (query.resultView === 'resolution') return hasOpenResolution || progress.resolutionNeeded > 0;
+    if (query.resultView === 'supplement') return progress.supplementRequired > 0;
+    if (query.resultView === 'unfinished') return !progress.canAggregate;
+    return true;
+  });
+}
+
+function buildDecisionSummary<T extends {
+  targetLevel: Level;
+  reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  resolutionCases: Array<{ status: ResolutionStatus }>;
+  cascadeReviews: Array<{ suggestedLevel: Level | null }>;
+}>(items: T[]) {
+  const count = (resultView: NonNullable<ListManagerResultsQuery['resultView']>) =>
+    filterResultCandidates(items, { resultView } as ListManagerResultsQuery).length;
+
+  return {
+    ready: count('ready'),
+    downgraded: count('downgraded'),
+    notEligible: count('not_eligible'),
+    resolution: count('resolution'),
+    supplement: count('supplement'),
+    unfinished: count('unfinished'),
+  };
+}
+
 function sortResultCandidates<T extends {
   targetLevel: Level;
   finalStatus: FinalStatus;
@@ -1191,17 +1267,43 @@ function toResultItem(application: {
     className: string | null;
     faculty: string | null;
   };
-  reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  reviewTasks: Array<{
+    criterion?: Criterion;
+    status: ReviewTaskStatus;
+    officerSuggestedLevel?: Level | null;
+    officerNote?: string | null;
+    decisionReason?: string | null;
+    evidences?: Array<{ evidenceId: string }>;
+  }>;
   resolutionCases?: Array<{ status: ResolutionStatus }>;
   cascadeReviews: Array<{ suggestedLevel: Level | null }>;
 }) {
   const reviewTaskSummary = buildTaskSummary(application.reviewTasks);
   const reviewProgress = buildReviewProgress(application.reviewTasks.map((task) => task.status));
+  const criterionStatuses = Object.fromEntries(
+    application.reviewTasks
+      .filter((task): task is { criterion: Criterion; status: ReviewTaskStatus; officerSuggestedLevel?: Level | null } =>
+        Boolean(task.criterion),
+      )
+      .map((task) => [
+        task.criterion,
+        {
+          status: task.status,
+          officerSuggestedLevel: task.officerSuggestedLevel ?? null,
+        },
+      ]),
+  );
   const openResolutionCases =
     application.resolutionCases?.filter(
       (item) => item.status === ResolutionStatus.open || item.status === ResolutionStatus.in_review,
     ).length ?? 0;
   const blockingReasons = buildBlockingReasons(reviewProgress, openResolutionCases);
+  const suggestedLevel = application.cascadeReviews[0]?.suggestedLevel ?? null;
+  const topBlockerReason = buildTopBlockerReason(application.reviewTasks, {
+    targetLevel: application.targetLevel,
+    suggestedLevel,
+    openResolutionCases,
+  });
 
   return {
     applicationId: application.id,
@@ -1212,7 +1314,7 @@ function toResultItem(application: {
     faculty: application.student.faculty,
     schoolYear: application.schoolYear,
     targetLevel: application.targetLevel,
-    suggestedLevel: application.cascadeReviews[0]?.suggestedLevel ?? null,
+    suggestedLevel,
     finalStatus: application.finalStatus,
     finalLevel: application.finalLevel,
     finalNote: application.finalNote ?? null,
@@ -1226,12 +1328,14 @@ function toResultItem(application: {
       ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
       : null,
     reviewTaskSummary,
+    criterionStatuses,
     taskProgress: {
       accepted: reviewTaskSummary.accepted,
       total: application.reviewTasks.length,
     },
     canFinalize: reviewProgress.canAggregate && openResolutionCases === 0,
     blockingReasons,
+    topBlockerReason,
   };
 }
 
@@ -1458,6 +1562,66 @@ function buildBlockingReasons(reviewProgress: ReturnType<typeof buildReviewProgr
     ...(reviewProgress.resolutionNeeded > 0 ? ['Còn task cần xử lý Resolution Hub.'] : []),
     ...(openCases > 0 ? ['Còn resolution case chưa xử lý.'] : []),
   ];
+}
+
+function buildTopBlockerReason(
+  tasks: Array<{
+    criterion?: Criterion;
+    status: ReviewTaskStatus;
+    officerSuggestedLevel?: Level | null;
+    officerNote?: string | null;
+    decisionReason?: string | null;
+    evidences?: Array<{ evidenceId: string }>;
+  }>,
+  context: {
+    targetLevel: Level;
+    suggestedLevel: Level | null;
+    openResolutionCases: number;
+  },
+) {
+  const priority = [
+    ReviewTaskStatus.rejected,
+    ReviewTaskStatus.supplement_required,
+    ReviewTaskStatus.resolution_needed,
+    ReviewTaskStatus.reviewing,
+    ReviewTaskStatus.waiting,
+  ];
+  const task = priority
+    .flatMap((status) => tasks.filter((item) => item.status === status))
+    .find(Boolean);
+
+  if (task) {
+    const prefix = task.criterion ? `${criterionDecisionLabel(task.criterion)}: ` : '';
+    const note = task.decisionReason?.trim() || task.officerNote?.trim();
+    if (note) return `${prefix}${note}`;
+    if (task.status === ReviewTaskStatus.rejected) return `${prefix}Khong dat tieu chi.`;
+    if (task.status === ReviewTaskStatus.supplement_required) {
+      return `${prefix}Can bo sung minh chung hoac thong tin.`;
+    }
+    if (task.status === ReviewTaskStatus.resolution_needed) return `${prefix}Dang cho hoi dong hoi y.`;
+    if (task.status === ReviewTaskStatus.reviewing) return `${prefix}Can bo dang xet task nay.`;
+    return `${prefix}Task chua duoc xet.`;
+  }
+
+  if (context.openResolutionCases > 0) return 'Con resolution case chua xu ly.';
+  if (!context.suggestedLevel) return 'Cascade moi nhat de xuat khong dat cap nao.';
+  if (context.suggestedLevel !== context.targetLevel) {
+    return `De xuat ha tu ${context.targetLevel} xuong ${context.suggestedLevel}.`;
+  }
+  return 'Khong co blocker chinh.';
+}
+
+function criterionDecisionLabel(criterion: Criterion) {
+  const labels: Partial<Record<Criterion, string>> = {
+    ethics: 'Dao duc',
+    academic: 'Hoc tap',
+    physical: 'The luc',
+    volunteer: 'Tinh nguyen',
+    integration: 'Hoi nhap',
+    priority: 'Uu tien',
+    collective: 'Tap the',
+  };
+  return labels[criterion] ?? criterion;
 }
 
 function isSpecializedForTask(

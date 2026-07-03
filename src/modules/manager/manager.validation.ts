@@ -25,6 +25,9 @@ export const listManagerResultsQuerySchema = z.object({
   faculty: z.string().trim().min(1).optional(),
   className: z.string().trim().min(1).optional(),
   search: z.string().trim().min(1).optional(),
+  resultView: z
+    .enum(['ready', 'downgraded', 'not_eligible', 'resolution', 'supplement', 'unfinished'])
+    .optional(),
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().positive().max(100).default(10),
   sortBy: z
