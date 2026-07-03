@@ -618,6 +618,11 @@ export class ApplicationsService {
       submittedAt: application.submittedAt,
       finalLevel: application.finalLevel,
       finalStatus: application.finalStatus,
+      finalNote: application.finalNote,
+      finalizedAt: application.finalizedAt,
+      finalizedBy: application.finalizedBy
+        ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
+        : null,
       createdAt: application.createdAt,
       updatedAt: application.updatedAt,
       metrics: application.metrics,

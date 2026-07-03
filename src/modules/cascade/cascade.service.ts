@@ -8,7 +8,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { loadCriteriaRules, toJsonValue } from '../rules/criteria.loader';
-import { getDownwardLevels, getUpgradeLevels } from '../rules/criteria.constants';
+import { getActiveDownwardLevels, getUpgradeLevels } from '../rules/criteria.constants';
 import { runPrecheck, type PrecheckEngineResult } from '../rules/precheck.engine';
 import type { RuleContext } from '../rules/rules.types';
 import { assertPrecheckAccess, buildRuleContext } from '../precheck/precheck.service';
@@ -22,10 +22,7 @@ export class CascadeService {
     const application = await this.getApplication(applicationId);
     assertPrecheckAccess(application, user, false);
 
-    const levelResults: PrecheckEngineResult[] = [];
-    for (const level of getDownwardLevels(application.targetLevel)) {
-      levelResults.push(await this.runLevel(application, level));
-    }
+    const cascade = await computeActiveCascadeSnapshot(application);
 
     const upgradeHints: PrecheckEngineResult[] = [];
     if (input.includeUpgradeHints) {
@@ -34,22 +31,17 @@ export class CascadeService {
       }
     }
 
-    const suggestedLevel =
-      levelResults.find(
-        (result) =>
-          result.readinessScore >= 60 &&
-          !result.missingItems.some((item) => item.severity === 'blocking'),
-      )?.level ?? null;
-
-    const targetResult = levelResults[0];
     const result = {
       applicationId: application.id,
       targetLevel: application.targetLevel,
-      suggestedLevel,
+      suggestedLevel: cascade.suggestedLevel,
       humanConfirmationRequired: true,
-      levelResults,
+      levelResults: cascade.levelResults,
+      blockers: cascade.blockers,
+      stoppedAtLevel: cascade.stoppedAtLevel,
       upgradeHints,
-      nextBestAction: targetResult.nextBestAction,
+      nextAction: cascade.nextAction,
+      nextBestAction: cascade.nextAction,
     };
 
     const saved = await prisma.$transaction(async (tx) => {
@@ -57,12 +49,15 @@ export class CascadeService {
         data: {
           applicationId: application.id,
           targetLevel: application.targetLevel,
-          suggestedLevel,
+          suggestedLevel: cascade.suggestedLevel,
           humanConfirmationRequired: true,
           levelResultsJson: toJsonValue({
-            levelResults,
+            levelResults: cascade.levelResults,
+            blockers: cascade.blockers,
+            stoppedAtLevel: cascade.stoppedAtLevel,
             upgradeHints,
-            nextBestAction: targetResult.nextBestAction,
+            nextAction: cascade.nextAction,
+            nextBestAction: cascade.nextAction,
             note: 'Kết quả là gợi ý tiền kiểm, không phải quyết định xét duyệt cuối cùng.',
           }),
         },
@@ -77,11 +72,12 @@ export class CascadeService {
         applicationId: application.id,
         afterStateJson: {
           targetLevel: application.targetLevel,
-          suggestedLevel,
-          levelCount: levelResults.length,
+          suggestedLevel: cascade.suggestedLevel,
+          stoppedAtLevel: cascade.stoppedAtLevel,
+          levelCount: cascade.levelResults.length,
           upgradeHintCount: upgradeHints.length,
         },
-        note: `Cascade target=${application.targetLevel}, suggested=${suggestedLevel ?? 'none'}`,
+        note: `Cascade target=${application.targetLevel}, suggested=${cascade.suggestedLevel ?? 'none'}`,
       });
 
       return created;
@@ -125,6 +121,87 @@ export class CascadeService {
     }
     return application;
   }
+}
+
+type ActiveCascadeApplication = Parameters<typeof buildRuleContext>[0] & {
+  targetLevel: Level;
+  schoolYear: string;
+};
+
+export type ActiveCascadeSnapshot = {
+  targetLevel: Level;
+  suggestedLevel: Level | null;
+  levelResults: PrecheckEngineResult[];
+  blockers: Array<{
+    level: Level;
+    messages: string[];
+  }>;
+  stoppedAtLevel: Level | null;
+  nextAction: string;
+  recomputedAt: string;
+};
+
+export async function computeActiveCascadeSnapshot(
+  application: ActiveCascadeApplication,
+): Promise<ActiveCascadeSnapshot> {
+  const levels = getActiveDownwardLevels(application.targetLevel);
+  if (!levels.length) {
+    throw new AppError(
+      422,
+      ErrorCodes.CENTRAL_OUT_OF_ACTIVE_FLOW,
+      'Target level is outside the active city/university/school flow',
+      { targetLevel: application.targetLevel },
+    );
+  }
+
+  const levelResults: PrecheckEngineResult[] = [];
+  const blockers: ActiveCascadeSnapshot['blockers'] = [];
+  let suggestedLevel: Level | null = null;
+  let stoppedAtLevel: Level | null = null;
+
+  for (const level of levels) {
+    const criteria = await loadCriteriaRules({ schoolYear: application.schoolYear, level });
+    const context: RuleContext = {
+      ...buildRuleContext(application, criteria.rules),
+      targetLevel: level,
+      criteriaVersion: criteria.criteriaVersionId
+        ? { id: criteria.criteriaVersionId, versionName: criteria.versionName }
+        : null,
+      criteriaWarnings: criteria.warnings,
+    };
+    const result = runPrecheck(context);
+    levelResults.push(result);
+
+    const blockingMessages = result.missingItems
+      .filter((item) => item.severity === 'blocking')
+      .map((item) => item.message);
+    blockers.push({ level, messages: blockingMessages });
+
+    if (result.readinessScore >= 60 && blockingMessages.length === 0) {
+      suggestedLevel = level;
+      stoppedAtLevel = level;
+      break;
+    }
+  }
+
+  if (!stoppedAtLevel && levelResults.length > 0) {
+    stoppedAtLevel = levelResults[levelResults.length - 1].level;
+  }
+
+  const lastResult = levelResults[levelResults.length - 1];
+  const nextAction = suggestedLevel
+    ? `Ready to finalize at level ${suggestedLevel}.`
+    : (lastResult?.nextBestAction ?? 'No active level is currently eligible.');
+
+  return {
+    targetLevel: application.targetLevel,
+    suggestedLevel,
+    levelResults,
+    blockers,
+    stoppedAtLevel,
+    nextAction,
+    recomputedAt: new Date().toISOString(),
+  };
 }
 
 export function canRunCascade(role: Role): boolean {

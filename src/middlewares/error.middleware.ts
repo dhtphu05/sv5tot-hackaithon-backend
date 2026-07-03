@@ -7,8 +7,30 @@ import { AppError } from '../shared/errors/app-error';
 import { ErrorCodes } from '../shared/errors/error-codes';
 import { sendError } from '../shared/responses/api-response';
 
+function isJsonParseError(error: unknown): error is SyntaxError & { status: number; type: string } {
+  return (
+    error instanceof SyntaxError &&
+    typeof (error as { status?: unknown }).status === 'number' &&
+    (error as { status?: unknown }).status === 400 &&
+    (error as { type?: unknown }).type === 'entity.parse.failed'
+  );
+}
+
 export const errorMiddleware: ErrorRequestHandler = (error, req, res, _next) => {
   const requestId = req.requestId;
+
+  if (isJsonParseError(error)) {
+    sendError(
+      res,
+      {
+        code: ErrorCodes.VALIDATION_ERROR,
+        message: 'Invalid JSON payload',
+      },
+      { requestId },
+      400,
+    );
+    return;
+  }
 
   if (error instanceof ZodError) {
     sendError(
