@@ -527,11 +527,7 @@ export class ReviewService {
         );
       }
 
-      const applicationOutcome = await syncApplicationReviewOutcome(
-        tx,
-        applicationId,
-        application.targetLevel,
-      );
+      const applicationOutcome = await syncApplicationReviewOutcome(tx, applicationId);
 
       // Audit application status changes
       await createApplicationAudit(tx, {
@@ -1084,7 +1080,6 @@ function mapDecisionToStatus(decision: ReviewDecision): ReviewTaskStatus {
 async function syncApplicationReviewOutcome(
   tx: Prisma.TransactionClient,
   applicationId: string,
-  targetLevel: Level,
 ) {
   const tasks = await tx.reviewTask.findMany({
     where: { applicationId },
@@ -1134,16 +1129,9 @@ async function syncApplicationReviewOutcome(
   }
 
   if (tasks.every((task) => task.status === ReviewTaskStatus.accepted)) {
-    const finalLevel = getLowestSuggestedLevel(tasks) ?? targetLevel;
     return tx.application.update({
       where: { id: applicationId },
-      data: {
-        status: ApplicationStatus.completed,
-        finalStatus: FinalStatus.passed,
-        finalLevel,
-        finalizedAt: now,
-        finalNote: 'Auto-completed after all review criteria were accepted.',
-      },
+      data: { ...baseData, status: ApplicationStatus.under_review },
       select: { status: true, finalStatus: true, finalLevel: true },
     });
   }
@@ -1168,23 +1156,6 @@ async function syncApplicationReviewOutcome(
   }
 
   return null;
-}
-
-function getLowestSuggestedLevel(
-  tasks: Array<{ officerSuggestedLevel: Level | null }>,
-): Level | null {
-  const rank: Record<Level, number> = {
-    [Level.school]: 0,
-    [Level.university]: 1,
-    [Level.city]: 2,
-    [Level.central]: 3,
-  };
-  const suggested = tasks
-    .map((task) => task.officerSuggestedLevel)
-    .filter((level): level is Level => Boolean(level))
-    .sort((a, b) => rank[a] - rank[b]);
-
-  return suggested[0] ?? null;
 }
 
 function decisionAuditAction(decision: ReviewDecision): string {

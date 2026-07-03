@@ -3,6 +3,7 @@ import {
   ApplicationStatus,
   ApplicationType,
   Criterion,
+  EvidenceStatus,
   FinalStatus,
   Level,
   NotificationType,
@@ -311,6 +312,10 @@ export class ApplicationsService {
 
     const existingTasks = application.reviewTasks;
     const isSupplementResubmit = application.status === ApplicationStatus.supplement_required;
+    const supplementTasks = existingTasks.filter(
+      (task) => task.status === ReviewTaskStatus.supplement_required,
+    );
+    const supplementCriteria = Array.from(new Set(supplementTasks.map((task) => task.criterion)));
     const result = await prisma.$transaction(async (tx) => {
       const submittedAt = new Date();
       const newVersion = application.currentDraftVersion + 1;
@@ -324,7 +329,22 @@ export class ApplicationsService {
         },
       });
 
-      if (isSupplementResubmit && existingTasks.length > 0) {
+      if (isSupplementResubmit && supplementTasks.length > 0) {
+        const taskEvidenceLinks = supplementTasks.flatMap((task) =>
+          application.evidences
+            .filter((evidence) => evidence.criterion === task.criterion)
+            .map((evidence) => ({
+              reviewTaskId: task.id,
+              evidenceId: evidence.id,
+            })),
+        );
+        if (taskEvidenceLinks.length > 0) {
+          await tx.reviewTaskEvidence.createMany({
+            data: taskEvidenceLinks,
+            skipDuplicates: true,
+          });
+        }
+
         await tx.reviewTask.updateMany({
           where: {
             applicationId: application.id,
@@ -343,9 +363,17 @@ export class ApplicationsService {
         await tx.evidence.updateMany({
           where: {
             applicationId: application.id,
-            status: 'needs_supplement',
+            criterion: { in: supplementCriteria },
+            status: {
+              in: [
+                EvidenceStatus.draft,
+                EvidenceStatus.pending_indexing,
+                EvidenceStatus.indexed,
+                EvidenceStatus.needs_supplement,
+              ],
+            },
           },
-          data: { status: 'under_review' },
+          data: { status: EvidenceStatus.under_review },
         });
       }
 
