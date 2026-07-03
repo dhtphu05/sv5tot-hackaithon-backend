@@ -5,6 +5,20 @@ import type { TimelineQuery } from './applications.validation';
 const applicationInclude = {
   metrics: { orderBy: { createdAt: 'asc' } },
   evidences: { select: { criterion: true } },
+  reviewTasks: {
+    orderBy: { criterion: 'asc' },
+    select: {
+      id: true,
+      criterion: true,
+      status: true,
+      decision: true,
+      officerNote: true,
+      decisionReason: true,
+      supplementRequestJson: true,
+      dueDate: true,
+      updatedAt: true,
+    },
+  },
   draftSnapshots: { orderBy: { version: 'desc' }, take: 1 },
   precheckResults: { orderBy: { createdAt: 'desc' }, take: 1 },
   cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },

@@ -6,10 +6,10 @@ import {
   FinalStatus,
   Level,
   NotificationType,
+  Prisma,
   Role,
   ReviewTaskStatus,
   type Application,
-  type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
@@ -330,7 +330,22 @@ export class ApplicationsService {
             applicationId: application.id,
             status: ReviewTaskStatus.supplement_required,
           },
-          data: { status: ReviewTaskStatus.waiting, decision: null },
+          data: {
+            status: ReviewTaskStatus.waiting,
+            decision: null,
+            officerNote: null,
+            officerSuggestedLevel: null,
+            levelAssessmentJson: Prisma.JsonNull,
+            decisionReason: null,
+            supplementRequestJson: Prisma.JsonNull,
+          },
+        });
+        await tx.evidence.updateMany({
+          where: {
+            applicationId: application.id,
+            status: 'needs_supplement',
+          },
+          data: { status: 'under_review' },
         });
       }
 
@@ -579,6 +594,17 @@ export class ApplicationsService {
       updatedAt: application.updatedAt,
       metrics: application.metrics,
       summary: buildApplicationSummary(application),
+      reviewTasks: application.reviewTasks.map((task) => ({
+        id: task.id,
+        criterion: task.criterion,
+        status: task.status,
+        decision: task.decision,
+        officerNote: task.officerNote,
+        decisionReason: task.decisionReason,
+        supplementRequestJson: task.supplementRequestJson,
+        dueDate: task.dueDate,
+        updatedAt: task.updatedAt,
+      })),
       latestDraftSnapshot: latestDraftSnapshot
         ? {
             id: latestDraftSnapshot.id,
