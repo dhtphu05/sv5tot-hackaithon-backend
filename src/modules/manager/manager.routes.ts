@@ -19,6 +19,7 @@ import {
   finalizeApplication,
   getApplicationAggregation,
   getApplicationSummary,
+  getCommitteeInbox,
   getManagerDashboardSummary,
   getManagerResultDetail,
   getManagerWorkloads,
@@ -29,6 +30,7 @@ import {
 import {
   aggregateApplicationSchema,
   assignReviewTaskSchema,
+  committeeInboxQuerySchema,
   finalizeApplicationSchema,
   listManagerApplicationsQuerySchema,
   listManagerResultsQuerySchema,
@@ -84,6 +86,13 @@ managerRouter.get(
   asyncHandler(getManagerDashboardSummary),
 );
 managerRouter.get(
+  '/committee-inbox',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.admin),
+  validate({ query: committeeInboxQuerySchema }),
+  asyncHandler(getCommitteeInbox),
+);
+managerRouter.get(
   '/results',
   requireAuth,
   requireRole(Role.manager, Role.committee, Role.admin),
@@ -132,14 +141,14 @@ managerRouter.post(
 managerRouter.post(
   '/applications/:id/finalize',
   requireAuth,
-  requireRole(Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.admin),
   validate({ body: finalizeApplicationSchema }),
   asyncHandler(finalizeApplication),
 );
 managerRouter.post(
   '/applications/:id/reopen-final',
   requireAuth,
-  requireRole(Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.admin),
   validate({ body: reopenFinalSchema }),
   asyncHandler(reopenFinalApplication),
 );

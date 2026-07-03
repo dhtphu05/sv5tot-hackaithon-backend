@@ -24,6 +24,7 @@ import { healthRouter } from './modules/health/health.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { knowledgeBaseRouter } from './modules/knowledge-base/knowledge-base.routes';
 import { managerRouter } from './modules/manager/manager.routes';
+import { committeeRouter } from './modules/committee/committee.routes';
 import { metricsRouter } from './modules/metrics/metrics.routes';
 import { notificationsRouter } from './modules/notifications/notifications.routes';
 import { precheckRouter } from './modules/precheck/precheck.routes';
@@ -67,6 +68,7 @@ export function createApp() {
   app.use('/api', cascadeRouter);
   app.use('/api/review', reviewRouter);
   app.use('/api/manager', managerRouter);
+  app.use('/api/committee', committeeRouter);
   app.use('/api/collective', collectiveRouter);
   app.use('/api/resolution', resolutionRouter);
   app.use('/api/notifications', notificationsRouter);

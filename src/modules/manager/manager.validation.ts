@@ -26,7 +26,7 @@ export const listManagerResultsQuerySchema = z.object({
   className: z.string().trim().min(1).optional(),
   search: z.string().trim().min(1).optional(),
   resultView: z
-    .enum(['ready', 'downgraded', 'not_eligible', 'resolution', 'supplement', 'unfinished'])
+    .enum(['ready', 'downgraded', 'not_eligible', 'resolution', 'supplement', 'overdue', 'recently_finalized', 'unfinished'])
     .optional(),
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().positive().max(100).default(10),
@@ -42,6 +42,27 @@ export const listManagerResultsQuerySchema = z.object({
     ])
     .default('lastActivityAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
+});
+
+export const committeeInboxQuerySchema = z.object({
+  bucket: z
+    .enum([
+      'all',
+      'ready_to_finalize',
+      'downgraded',
+      'no_eligible_level',
+      'needs_resolution',
+      'supplement_required',
+      'overdue',
+      'recently_finalized',
+    ])
+    .default('all'),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+  search: z.string().trim().min(1).optional(),
+  targetLevel: z.enum([Level.school, Level.university, Level.city]).optional(),
+  suggestedLevel: z.union([z.enum([Level.school, Level.university, Level.city]), z.literal('none')]).optional(),
+  status: z.nativeEnum(ApplicationStatus).optional(),
 });
 
 export const assignReviewTaskSchema = z
@@ -97,6 +118,7 @@ export const reopenFinalSchema = z.object({
 
 export type ListManagerApplicationsQuery = z.infer<typeof listManagerApplicationsQuerySchema>;
 export type ListManagerResultsQuery = z.infer<typeof listManagerResultsQuerySchema>;
+export type CommitteeInboxQuery = z.infer<typeof committeeInboxQuerySchema>;
 export type AssignReviewTaskInput = z.infer<typeof assignReviewTaskSchema>;
 export type AggregateApplicationInput = z.infer<typeof aggregateApplicationSchema>;
 export type FinalizeApplicationInput = z.infer<typeof finalizeApplicationSchema>;
