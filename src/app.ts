@@ -39,9 +39,9 @@ export function createApp() {
   app.disable('x-powered-by');
   app.use(helmet());
   app.use(cors(corsOptions));
+  app.use(requestIdMiddleware);
   app.use(express.json({ limit: securityConfig.jsonBodyLimit }));
   app.use(express.urlencoded({ extended: true, limit: securityConfig.urlEncodedLimit }));
-  app.use(requestIdMiddleware);
   app.use(
     pinoHttp({
       logger,

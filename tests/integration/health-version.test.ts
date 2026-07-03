@@ -47,4 +47,22 @@ describe('foundation routes', () => {
     });
     expect(response.body.meta.requestId).toEqual(expect.any(String));
   });
+
+  it('returns a validation error for malformed JSON bodies', async () => {
+    const response = await request(app)
+      .post('/api/auth/login')
+      .set('Content-Type', 'application/json')
+      .send('{email')
+      .expect(400);
+
+    expect(response.body).toMatchObject({
+      success: false,
+      data: null,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid JSON payload',
+      },
+    });
+    expect(response.body.meta.requestId).toEqual(expect.any(String));
+  });
 });

@@ -16,6 +16,8 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
+import { toJsonValue } from '../rules/criteria.loader';
 import { buildReviewProgress } from '../review/review-progress.service';
 import type {
   AggregateApplicationInput,
@@ -30,6 +32,7 @@ const applicationSummaryInclude = {
   student: true,
   evidences: { select: { id: true } },
   reviewTasks: { select: { status: true } },
+  resolutionCases: { select: { status: true } },
 } satisfies Prisma.ApplicationInclude;
 
 const applicationDetailInclude = {
@@ -297,6 +300,7 @@ export class ManagerService {
             student: true,
             finalizedBy: true,
             reviewTasks: { select: { status: true } },
+            resolutionCases: { select: { status: true } },
             cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
           },
         })
@@ -671,6 +675,9 @@ export class ManagerService {
     if (user.role !== Role.committee && user.role !== Role.admin) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only committee or admin can finalize results');
     }
+    if (input.overrideAggregation && user.role !== Role.admin) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only admin can override finalize blockers');
+    }
     if (
       (input.finalStatus === FinalStatus.passed ||
         input.finalStatus === FinalStatus.partially_passed) &&
@@ -696,14 +703,22 @@ export class ManagerService {
       aggregation.application.status === ApplicationStatus.completed ||
       aggregation.application.status === ApplicationStatus.rejected
     ) {
-      if (user.role !== Role.admin) {
-        throw new AppError(
-          409,
-          ErrorCodes.FINAL_RESULT_ALREADY_EXISTS,
-          'Final result already exists',
-        );
-      }
+      throw new AppError(
+        409,
+        ErrorCodes.FINAL_RESULT_ALREADY_EXISTS,
+        'Final result already exists. Reopen the final result before finalizing again.',
+      );
     }
+
+    const applicationForCascade = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: applicationDetailInclude,
+    });
+    if (!applicationForCascade) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
+    assertFinalizeMatchesCascade(input, freshCascade);
 
     const status =
       input.finalStatus === FinalStatus.failed
@@ -712,6 +727,23 @@ export class ManagerService {
 
     return prisma.$transaction(async (tx) => {
       const before = await tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+      const cascadeReview = await tx.cascadeReview.create({
+        data: {
+          applicationId,
+          targetLevel: freshCascade.targetLevel,
+          suggestedLevel: freshCascade.suggestedLevel,
+          humanConfirmationRequired: true,
+          levelResultsJson: toJsonValue({
+            ...freshCascade,
+            latestDisplayedSuggestedLevel: aggregation.latestCascade?.suggestedLevel ?? null,
+            finalizedBy: user.id,
+            finalizePayload: {
+              finalStatus: input.finalStatus,
+              finalLevel: input.finalLevel ?? null,
+            },
+          }),
+        },
+      });
       const updated = await tx.application.update({
         where: { id: applicationId },
         data: {
@@ -744,6 +776,8 @@ export class ManagerService {
           finalizedAt: updated.finalizedAt,
           finalizedById: updated.finalizedById,
           overrideAggregation: input.overrideAggregation,
+          cascadeSnapshot: freshCascade,
+          cascadeReviewId: cascadeReview.id,
         },
         note: input.finalNote,
       });
@@ -757,6 +791,8 @@ export class ManagerService {
         afterStateJson: {
           finalStatus: input.finalStatus,
           finalLevel: updated.finalLevel,
+          cascadeSnapshot: freshCascade,
+          cascadeReviewId: cascadeReview.id,
         },
         note: input.finalNote,
       });
@@ -796,6 +832,8 @@ export class ManagerService {
           finalNote: updated.finalNote,
           finalizedAt: updated.finalizedAt,
           finalizedById: updated.finalizedById,
+          cascadeSnapshot: freshCascade,
+          cascadeReviewId: cascadeReview.id,
         },
       };
     });
@@ -947,6 +985,48 @@ function computeAggregation(application: ApplicationDetail) {
     nextAction: buildNextAction(application.reviewTasks),
     suggestedApplicationStatus,
   };
+}
+
+function assertFinalizeMatchesCascade(
+  input: FinalizeApplicationInput,
+  freshCascade: Awaited<ReturnType<typeof computeActiveCascadeSnapshot>>,
+) {
+  if (!freshCascade.suggestedLevel) {
+    if (input.finalStatus !== FinalStatus.failed) {
+      throw new AppError(
+        409,
+        ErrorCodes.FINAL_STATUS_MISMATCH,
+        'Final status must be failed when no active level is eligible',
+        { freshCascade },
+      );
+    }
+    if (input.finalLevel) {
+      throw new AppError(
+        409,
+        ErrorCodes.FINAL_LEVEL_MISMATCH,
+        'Final level must be null when no active level is eligible',
+        { freshCascade },
+      );
+    }
+    return;
+  }
+
+  if (input.finalStatus !== FinalStatus.passed) {
+    throw new AppError(
+      409,
+      ErrorCodes.FINAL_STATUS_MISMATCH,
+      'Final status must be passed for the recomputed suggested level',
+      { freshCascade, expectedFinalStatus: FinalStatus.passed },
+    );
+  }
+  if (input.finalLevel !== freshCascade.suggestedLevel) {
+    throw new AppError(
+      409,
+      ErrorCodes.FINAL_LEVEL_MISMATCH,
+      'Final level must match the recomputed suggested level',
+      { freshCascade, expectedFinalLevel: freshCascade.suggestedLevel },
+    );
+  }
 }
 
 function suggestApplicationStatus(tasks: Array<{ status: ReviewTaskStatus }>): ApplicationStatus {
@@ -1112,8 +1192,17 @@ function toResultItem(application: {
     faculty: string | null;
   };
   reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  resolutionCases?: Array<{ status: ResolutionStatus }>;
   cascadeReviews: Array<{ suggestedLevel: Level | null }>;
 }) {
+  const reviewTaskSummary = buildTaskSummary(application.reviewTasks);
+  const reviewProgress = buildReviewProgress(application.reviewTasks.map((task) => task.status));
+  const openResolutionCases =
+    application.resolutionCases?.filter(
+      (item) => item.status === ResolutionStatus.open || item.status === ResolutionStatus.in_review,
+    ).length ?? 0;
+  const blockingReasons = buildBlockingReasons(reviewProgress, openResolutionCases);
+
   return {
     applicationId: application.id,
     studentId: application.studentId,
@@ -1136,11 +1225,13 @@ function toResultItem(application: {
     finalizedBy: application.finalizedBy
       ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
       : null,
-    reviewTaskSummary: buildTaskSummary(application.reviewTasks),
+    reviewTaskSummary,
     taskProgress: {
-      accepted: buildTaskSummary(application.reviewTasks).accepted,
+      accepted: reviewTaskSummary.accepted,
       total: application.reviewTasks.length,
     },
+    canFinalize: reviewProgress.canAggregate && openResolutionCases === 0,
+    blockingReasons,
   };
 }
 

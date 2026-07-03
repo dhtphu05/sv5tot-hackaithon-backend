@@ -68,13 +68,13 @@ managerRouter.get(
 managerRouter.get(
   '/workload',
   requireAuth,
-  requireRole(Role.manager, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.admin),
   asyncHandler(getManagerWorkloads),
 );
 managerRouter.get(
   '/workloads',
   requireAuth,
-  requireRole(Role.manager, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.admin),
   asyncHandler(getManagerWorkloads),
 );
 managerRouter.get(

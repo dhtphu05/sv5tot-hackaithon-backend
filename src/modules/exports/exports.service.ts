@@ -107,7 +107,12 @@ export class ExportsService {
       afterStateJson: { rowCount: data.length, format: input.format },
     });
 
-    return { format: 'csv', file };
+    return {
+      format: 'csv',
+      fileId: file.id,
+      downloadUrl: `/api/exports/${file.id}/download`,
+      file,
+    };
   }
 
   async getDownloadFile(user: AuthenticatedUser, fileId: string) {
@@ -115,12 +120,13 @@ export class ExportsService {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Export download is restricted');
     }
     const file = await prisma.file.findUnique({ where: { id: fileId } });
-    if (!file || !file.filePath.startsWith('exports/')) {
+    if (!file || !isExportFilePath(file.filePath)) {
       throw new AppError(404, ErrorCodes.EXPORT_FILE_NOT_FOUND, 'Export file not found');
     }
     const absolutePath = path.resolve(uploadConfig.uploadDir, file.filePath);
     const root = path.resolve(uploadConfig.uploadDir);
-    if (!absolutePath.startsWith(root)) {
+    const relativePath = path.relative(root, absolutePath);
+    if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
       throw new AppError(400, ErrorCodes.EXPORT_FILE_NOT_FOUND, 'Invalid export path');
     }
     await fs.access(absolutePath);
@@ -146,6 +152,7 @@ export class ExportsService {
       include: {
         student: true,
         reviewTasks: true,
+        cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
         auditLogs: {
           where: {
             action: {
@@ -159,13 +166,16 @@ export class ExportsService {
       orderBy: { submittedAt: 'desc' },
     });
 
-    return applications.map((application) => ({
+    return applications.map((application) => {
+      const latestCascade = application.cascadeReviews[0] ?? null;
+      return {
       studentCode: application.student.studentCode,
       fullName: application.student.fullName,
       className: application.student.className,
       faculty: application.student.faculty,
       schoolYear: application.schoolYear,
       targetLevel: application.targetLevel,
+      cascadeSuggestedLevel: latestCascade?.suggestedLevel ?? null,
       finalLevel: application.finalLevel,
       finalStatus: application.finalStatus,
       applicationStatus: application.status,
@@ -177,10 +187,13 @@ export class ExportsService {
       criteriaTaskStatuses: Object.fromEntries(
         application.reviewTasks.map((task) => [task.criterion, task.status]),
       ),
+      cascadeReviewCreatedAt: latestCascade?.createdAt ?? null,
+      cascadeSnapshot: latestCascade?.levelResultsJson ?? null,
       finalNote:
         application.auditLogs.find((log) => log.action === auditActions.FINAL_RESULT_CONFIRMED)
           ?.note ?? null,
-    }));
+      };
+    });
   }
 
   private async buildApplicationRows(query: ExportApplicationsQuery) {
@@ -256,6 +269,10 @@ export class ExportsService {
   }
 }
 
+function isExportFilePath(filePath: string) {
+  return filePath.replace(/\\/g, '/').startsWith('exports/');
+}
+
 function buildApplicationWhere(input: ExportApplicationsQuery): Prisma.ApplicationWhereInput {
   return {
     ...(input.schoolYear ? { schoolYear: input.schoolYear } : {}),
@@ -321,6 +338,7 @@ function toCsv<T extends Record<string, unknown>>(
     'faculty',
     'schoolYear',
     'targetLevel',
+    'cascadeSuggestedLevel',
     'finalLevel',
     'finalStatus',
     'applicationStatus',
@@ -328,6 +346,8 @@ function toCsv<T extends Record<string, unknown>>(
     'submittedAt',
     'completedAt',
     'criteriaTaskStatuses',
+    'cascadeReviewCreatedAt',
+    'cascadeSnapshot',
     'finalNote',
   ],
 ): string {

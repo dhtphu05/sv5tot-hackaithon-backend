@@ -22,6 +22,12 @@ export const levelOrderHighToLow = [
   Level.school,
 ] as const;
 
+export const activeLevelOrderHighToLow = [
+  Level.city,
+  Level.university,
+  Level.school,
+] as const;
+
 export const fallbackRulesByLevel: Record<Level, CriteriaRuleConfig[]> = {
   [Level.school]: schoolRules,
   [Level.university]: universityRules,
@@ -32,6 +38,13 @@ export const fallbackRulesByLevel: Record<Level, CriteriaRuleConfig[]> = {
 export function getDownwardLevels(targetLevel: Level): Level[] {
   const start = levelOrderHighToLow.indexOf(targetLevel);
   return levelOrderHighToLow.slice(start);
+}
+
+export function getActiveDownwardLevels(targetLevel: Level): Level[] {
+  const start = activeLevelOrderHighToLow.indexOf(
+    targetLevel as (typeof activeLevelOrderHighToLow)[number],
+  );
+  return start >= 0 ? activeLevelOrderHighToLow.slice(start) : [];
 }
 
 export function getUpgradeLevels(targetLevel: Level): Level[] {
