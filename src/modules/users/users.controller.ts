@@ -14,6 +14,11 @@ export async function updateMe(req: Request, res: Response): Promise<void> {
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function uploadAvatar(req: Request, res: Response): Promise<void> {
+  const data = await usersService.uploadAvatar(req.user?.id ?? '', req.file);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function listUsers(req: Request, res: Response): Promise<void> {
   const data = await usersService.listUsers(req.query as never);
   sendSuccess(res, data.users, {

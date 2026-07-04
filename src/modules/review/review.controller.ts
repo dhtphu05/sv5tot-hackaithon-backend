@@ -30,6 +30,11 @@ export async function getReviewTaskTimeline(req: Request, res: Response): Promis
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function claimReviewTask(req: Request, res: Response): Promise<void> {
+  const data = await service.claimTask(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function ensureReviewTasks(req: Request, res: Response): Promise<void> {
   const data = await service.ensureReviewTasks(req.user!, String(req.params.applicationId), req.body);
   sendSuccess(res, data, { requestId: req.requestId });

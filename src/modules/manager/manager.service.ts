@@ -16,10 +16,13 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
+import { toJsonValue } from '../rules/criteria.loader';
 import { buildReviewProgress } from '../review/review-progress.service';
 import type {
   AggregateApplicationInput,
   AssignReviewTaskInput,
+  CommitteeInboxQuery,
   FinalizeApplicationInput,
   ListManagerApplicationsQuery,
   ListManagerResultsQuery,
@@ -30,6 +33,7 @@ const applicationSummaryInclude = {
   student: true,
   evidences: { select: { id: true } },
   reviewTasks: { select: { status: true } },
+  resolutionCases: { select: { status: true } },
 } satisfies Prisma.ApplicationInclude;
 
 const applicationDetailInclude = {
@@ -120,6 +124,7 @@ export class ManagerService {
       recentFinalizedApplications,
       totalApplications,
       unfinalizedCount,
+      dashboardCandidates,
     ] = await prisma.$transaction([
       prisma.application.groupBy({
         by: ['status'],
@@ -164,7 +169,7 @@ export class ManagerService {
       prisma.application.findMany({
         include: {
           student: true,
-          reviewTasks: { select: { status: true } },
+          reviewTasks: { select: { status: true, dueDate: true, updatedAt: true } },
           cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
         },
         orderBy: [{ updatedAt: 'desc' }, { submittedAt: 'desc' }],
@@ -190,6 +195,21 @@ export class ManagerService {
       prisma.application.count({
         where: {
           OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }],
+        },
+      }),
+      prisma.application.findMany({
+        select: {
+          id: true,
+          targetLevel: true,
+          finalStatus: true,
+          readinessScore: true,
+          finalizedAt: true,
+          updatedAt: true,
+          submittedAt: true,
+          createdAt: true,
+          reviewTasks: { select: { status: true } },
+          resolutionCases: { select: { status: true } },
+          cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1, select: { suggestedLevel: true } },
         },
       }),
     ]);
@@ -251,6 +271,7 @@ export class ManagerService {
       finalLevelBreakdown,
       reviewTaskSummary,
       resolutionSummary,
+      decisionSummary: buildDecisionSummary(dashboardCandidates),
       workloadByOfficer,
       recentApplications: recentApplications.map(toResultItem),
       recentFinalizedApplications: recentFinalizedApplications.map(toResultItem),
@@ -284,9 +305,13 @@ export class ManagerService {
         updatedAt: true,
         submittedAt: true,
         createdAt: true,
+        reviewTasks: { select: { status: true, dueDate: true, updatedAt: true } },
+        resolutionCases: { select: { status: true } },
+        cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1, select: { suggestedLevel: true } },
       },
     });
-    const sortedCandidates = sortResultCandidates(allCandidates, query);
+    const filteredCandidates = filterResultCandidates(allCandidates, query);
+    const sortedCandidates = sortResultCandidates(filteredCandidates, query);
     const total = sortedCandidates.length;
     const skip = (query.page - 1) * query.pageSize;
     const pageIds = sortedCandidates.slice(skip, skip + query.pageSize).map((item) => item.id);
@@ -296,7 +321,19 @@ export class ManagerService {
           include: {
             student: true,
             finalizedBy: true,
-            reviewTasks: { select: { status: true } },
+            reviewTasks: {
+              select: {
+                criterion: true,
+                status: true,
+                officerSuggestedLevel: true,
+                officerNote: true,
+                decisionReason: true,
+                dueDate: true,
+                updatedAt: true,
+                evidences: { select: { evidenceId: true } },
+              },
+            },
+            resolutionCases: { select: { id: true, status: true, reason: true, createdAt: true } },
             cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
           },
         })
@@ -316,6 +353,66 @@ export class ManagerService {
       sort: {
         sortBy: query.sortBy,
         sortOrder: query.sortOrder,
+      },
+    };
+  }
+
+  async getCommitteeInbox(query: CommitteeInboxQuery) {
+    const page = query.page;
+    const limit = query.limit;
+    const now = new Date();
+    const applications = await prisma.application.findMany({
+      where: buildCommitteeInboxWhere(query),
+      include: {
+        student: true,
+        finalizedBy: true,
+        reviewTasks: {
+          select: {
+            criterion: true,
+            status: true,
+            officerSuggestedLevel: true,
+            officerNote: true,
+            decisionReason: true,
+            dueDate: true,
+            updatedAt: true,
+            evidences: { select: { evidenceId: true } },
+          },
+        },
+        resolutionCases: {
+          select: {
+            id: true,
+            status: true,
+            reason: true,
+            createdAt: true,
+            closedAt: true,
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+        cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1, select: { suggestedLevel: true, createdAt: true } },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { submittedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    const allItems = applications
+      .map((application) => toCommitteeInboxItem(application, now))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    const filteredItems = allItems.filter((item) => {
+      if (query.bucket !== 'all' && item.type !== query.bucket) return false;
+      if (query.suggestedLevel === 'none') return item.suggestedLevel === null;
+      if (query.suggestedLevel && item.suggestedLevel !== query.suggestedLevel) return false;
+      return true;
+    });
+    const orderedItems = sortCommitteeInboxItems(filteredItems);
+    const skip = (page - 1) * limit;
+
+    return {
+      summary: buildCommitteeInboxSummary(allItems),
+      items: orderedItems.slice(skip, skip + limit),
+      pagination: {
+        page,
+        limit,
+        total: orderedItems.length,
+        totalPages: Math.ceil(orderedItems.length / limit),
       },
     };
   }
@@ -668,8 +765,11 @@ export class ManagerService {
     applicationId: string,
     input: FinalizeApplicationInput,
   ) {
-    if (user.role !== Role.committee && user.role !== Role.admin) {
-      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only committee or admin can finalize results');
+    if (user.role !== Role.manager && user.role !== Role.committee && user.role !== Role.admin) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager, committee, or admin can finalize results');
+    }
+    if (input.overrideAggregation && user.role !== Role.admin) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only admin can override finalize blockers');
     }
     if (
       (input.finalStatus === FinalStatus.passed ||
@@ -696,13 +796,32 @@ export class ManagerService {
       aggregation.application.status === ApplicationStatus.completed ||
       aggregation.application.status === ApplicationStatus.rejected
     ) {
-      if (user.role !== Role.admin) {
-        throw new AppError(
-          409,
-          ErrorCodes.FINAL_RESULT_ALREADY_EXISTS,
-          'Final result already exists',
-        );
+      throw new AppError(
+        409,
+        ErrorCodes.FINAL_RESULT_ALREADY_EXISTS,
+        'Final result already exists. Reopen the final result before finalizing again.',
+      );
+    }
+
+    const applicationForCascade = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: applicationDetailInclude,
+    });
+    if (!applicationForCascade) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
+    try {
+      assertFinalizeMatchesCascade(input, freshCascade);
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        (error.code === ErrorCodes.FINAL_LEVEL_MISMATCH ||
+          error.code === ErrorCodes.FINAL_STATUS_MISMATCH)
+      ) {
+        await persistFinalizeMismatchSnapshot(user, applicationId, input, aggregation, freshCascade, error);
       }
+      throw error;
     }
 
     const status =
@@ -712,6 +831,23 @@ export class ManagerService {
 
     return prisma.$transaction(async (tx) => {
       const before = await tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+      const cascadeReview = await tx.cascadeReview.create({
+        data: {
+          applicationId,
+          targetLevel: freshCascade.targetLevel,
+          suggestedLevel: freshCascade.suggestedLevel,
+          humanConfirmationRequired: true,
+          levelResultsJson: toJsonValue({
+            ...freshCascade,
+            latestDisplayedSuggestedLevel: aggregation.latestCascade?.suggestedLevel ?? null,
+            finalizedBy: user.id,
+            finalizePayload: {
+              finalStatus: input.finalStatus,
+              finalLevel: input.finalLevel ?? null,
+            },
+          }),
+        },
+      });
       const updated = await tx.application.update({
         where: { id: applicationId },
         data: {
@@ -744,6 +880,8 @@ export class ManagerService {
           finalizedAt: updated.finalizedAt,
           finalizedById: updated.finalizedById,
           overrideAggregation: input.overrideAggregation,
+          cascadeSnapshot: freshCascade,
+          cascadeReviewId: cascadeReview.id,
         },
         note: input.finalNote,
       });
@@ -757,6 +895,8 @@ export class ManagerService {
         afterStateJson: {
           finalStatus: input.finalStatus,
           finalLevel: updated.finalLevel,
+          cascadeSnapshot: freshCascade,
+          cascadeReviewId: cascadeReview.id,
         },
         note: input.finalNote,
       });
@@ -796,6 +936,8 @@ export class ManagerService {
           finalNote: updated.finalNote,
           finalizedAt: updated.finalizedAt,
           finalizedById: updated.finalizedById,
+          cascadeSnapshot: freshCascade,
+          cascadeReviewId: cascadeReview.id,
         },
       };
     });
@@ -949,6 +1091,94 @@ function computeAggregation(application: ApplicationDetail) {
   };
 }
 
+async function persistFinalizeMismatchSnapshot(
+  user: AuthenticatedUser,
+  applicationId: string,
+  input: FinalizeApplicationInput,
+  aggregation: Awaited<ReturnType<ManagerService['getAggregation']>>,
+  freshCascade: Awaited<ReturnType<typeof computeActiveCascadeSnapshot>>,
+  error: AppError,
+) {
+  await prisma.$transaction(async (tx) => {
+    const cascadeReview = await tx.cascadeReview.create({
+      data: {
+        applicationId,
+        targetLevel: freshCascade.targetLevel,
+        suggestedLevel: freshCascade.suggestedLevel,
+        humanConfirmationRequired: true,
+        levelResultsJson: toJsonValue({
+          ...freshCascade,
+          latestDisplayedSuggestedLevel: aggregation.latestCascade?.suggestedLevel ?? null,
+          finalizePayload: {
+            finalStatus: input.finalStatus,
+            finalLevel: input.finalLevel ?? null,
+          },
+          mismatchCode: error.code,
+        }),
+      },
+    });
+
+    await createApplicationAudit(tx, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: 'FINALIZE_CASCADE_MISMATCH',
+      targetType: 'application',
+      targetId: applicationId,
+      applicationId,
+      afterStateJson: {
+        errorCode: error.code,
+        cascadeSnapshot: freshCascade,
+        cascadeReviewId: cascadeReview.id,
+        requestedFinalStatus: input.finalStatus,
+        requestedFinalLevel: input.finalLevel ?? null,
+      },
+      note: 'Finalization rejected because recomputed cascade no longer matched the submitted final result.',
+    });
+  });
+}
+
+function assertFinalizeMatchesCascade(
+  input: FinalizeApplicationInput,
+  freshCascade: Awaited<ReturnType<typeof computeActiveCascadeSnapshot>>,
+) {
+  if (!freshCascade.suggestedLevel) {
+    if (input.finalStatus !== FinalStatus.failed) {
+      throw new AppError(
+        409,
+        ErrorCodes.FINAL_STATUS_MISMATCH,
+        'Final status must be failed when no active level is eligible',
+        { freshCascade },
+      );
+    }
+    if (input.finalLevel) {
+      throw new AppError(
+        409,
+        ErrorCodes.FINAL_LEVEL_MISMATCH,
+        'Final level must be null when no active level is eligible',
+        { freshCascade },
+      );
+    }
+    return;
+  }
+
+  if (input.finalStatus !== FinalStatus.passed) {
+    throw new AppError(
+      409,
+      ErrorCodes.FINAL_STATUS_MISMATCH,
+      'Final status must be passed for the recomputed suggested level',
+      { freshCascade, expectedFinalStatus: FinalStatus.passed },
+    );
+  }
+  if (input.finalLevel !== freshCascade.suggestedLevel) {
+    throw new AppError(
+      409,
+      ErrorCodes.FINAL_LEVEL_MISMATCH,
+      'Final level must match the recomputed suggested level',
+      { freshCascade, expectedFinalLevel: freshCascade.suggestedLevel },
+    );
+  }
+}
+
 function suggestApplicationStatus(tasks: Array<{ status: ReviewTaskStatus }>): ApplicationStatus {
   if (tasks.length === 0) return ApplicationStatus.under_review;
   if (tasks.some((task) => task.status === ReviewTaskStatus.supplement_required)) {
@@ -1015,6 +1245,31 @@ function toApplicationSummaryItem(
   };
 }
 
+const activeCommitteeLevels = [Level.school, Level.university, Level.city];
+const recentFinalizedWindowMs = 7 * 24 * 60 * 60 * 1000;
+const staleWorkWindowMs = 7 * 24 * 60 * 60 * 1000;
+
+type CommitteeInboxType =
+  | 'ready_to_finalize'
+  | 'downgraded'
+  | 'no_eligible_level'
+  | 'needs_resolution'
+  | 'supplement_required'
+  | 'overdue'
+  | 'recently_finalized';
+
+type CommitteeNextAction =
+  | 'open_decision_console'
+  | 'finalize_city'
+  | 'finalize_university'
+  | 'finalize_school'
+  | 'finalize_failed'
+  | 'open_resolution_case'
+  | 'review_downgrade_reason'
+  | 'wait_for_supplement'
+  | 'send_reminder'
+  | 'reopen_final_result';
+
 function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWhereInput {
   const and: Prisma.ApplicationWhereInput[] = [];
   if (query.schoolYear) and.push({ schoolYear: query.schoolYear });
@@ -1040,6 +1295,60 @@ function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWh
     });
   }
   return and.length ? { AND: and } : {};
+}
+
+function filterResultCandidates<T extends {
+  targetLevel: Level;
+  finalStatus: FinalStatus;
+  finalizedAt: Date | null;
+  updatedAt: Date;
+  reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  resolutionCases: Array<{ status: ResolutionStatus }>;
+  cascadeReviews: Array<{ suggestedLevel: Level | null }>;
+}>(items: T[], query: ListManagerResultsQuery) {
+  if (!query.resultView) return items;
+
+  return items.filter((item) => {
+    const progress = buildReviewProgress(item.reviewTasks.map((task) => task.status));
+    const hasOpenResolution = item.resolutionCases.some((resolution) => isOpenResolutionStatus(resolution.status));
+    const suggestedLevel = item.cascadeReviews[0]?.suggestedLevel ?? null;
+    const finalized = isFinalizedApplication(item);
+    const canFinalize = !finalized && progress.canAggregate && !hasOpenResolution;
+
+    if (query.resultView === 'ready') return canFinalize;
+    if (query.resultView === 'downgraded') return canFinalize && isDowngraded(item.targetLevel, suggestedLevel);
+    if (query.resultView === 'not_eligible') return canFinalize && suggestedLevel === null;
+    if (query.resultView === 'resolution') return hasOpenResolution || progress.resolutionNeeded > 0;
+    if (query.resultView === 'supplement') return progress.supplementRequired > 0;
+    if (query.resultView === 'overdue') return isOverdueWork(item, new Date());
+    if (query.resultView === 'recently_finalized') return isRecentlyFinalized(item, new Date());
+    if (query.resultView === 'unfinished') return !progress.canAggregate;
+    return true;
+  });
+}
+
+function buildDecisionSummary<T extends {
+  targetLevel: Level;
+  finalStatus: FinalStatus;
+  finalizedAt: Date | null;
+  updatedAt: Date;
+  reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  resolutionCases: Array<{ status: ResolutionStatus }>;
+  cascadeReviews: Array<{ suggestedLevel: Level | null }>;
+}>(items: T[]) {
+  const count = (resultView: NonNullable<ListManagerResultsQuery['resultView']>) =>
+    filterResultCandidates(items, { resultView } as ListManagerResultsQuery).length;
+
+  return {
+    ready: count('ready'),
+    downgraded: count('downgraded'),
+    notEligible: count('not_eligible'),
+    resolution: count('resolution'),
+    supplement: count('supplement'),
+    overdue: count('overdue'),
+    recentlyFinalized: count('recently_finalized'),
+    unfinished: count('unfinished'),
+  };
 }
 
 function sortResultCandidates<T extends {
@@ -1089,6 +1398,284 @@ function getLastActivityAt(application: {
   return application.finalizedAt ?? application.updatedAt ?? application.submittedAt ?? application.createdAt ?? new Date(0);
 }
 
+function buildCommitteeInboxWhere(query: CommitteeInboxQuery): Prisma.ApplicationWhereInput {
+  const and: Prisma.ApplicationWhereInput[] = [{ targetLevel: { in: activeCommitteeLevels } }];
+  if (query.targetLevel) and.push({ targetLevel: query.targetLevel });
+  if (query.status) and.push({ status: query.status });
+  if (query.search) {
+    and.push({
+      OR: [
+        { student: { fullName: { contains: query.search, mode: 'insensitive' } } },
+        { student: { studentCode: { contains: query.search, mode: 'insensitive' } } },
+        { student: { className: { contains: query.search, mode: 'insensitive' } } },
+        { student: { faculty: { contains: query.search, mode: 'insensitive' } } },
+      ],
+    });
+  }
+  return { AND: and };
+}
+
+function isOpenResolutionStatus(status: ResolutionStatus) {
+  const value = String(status);
+  return (
+    status === ResolutionStatus.open ||
+    status === ResolutionStatus.in_review ||
+    value === 'analyzing' ||
+    value === 'committee_review'
+  );
+}
+
+function isFinalizedApplication(application: { finalStatus: FinalStatus; finalizedAt?: Date | null }) {
+  return (
+    Boolean(application.finalizedAt) ||
+    application.finalStatus === FinalStatus.passed ||
+    application.finalStatus === FinalStatus.failed ||
+    application.finalStatus === FinalStatus.partially_passed
+  );
+}
+
+function isRecentlyFinalized(application: { finalStatus: FinalStatus; finalizedAt?: Date | null; updatedAt: Date }, now: Date) {
+  if (!isFinalizedApplication(application)) return false;
+  const finalizedAt = application.finalizedAt ?? application.updatedAt;
+  return now.getTime() - finalizedAt.getTime() <= recentFinalizedWindowMs;
+}
+
+function isDowngraded(targetLevel: Level, suggestedLevel: Level | null) {
+  if (!suggestedLevel) return false;
+  const rank: Record<Level, number> = { school: 1, university: 2, city: 3, central: 4 };
+  return rank[targetLevel] > rank[suggestedLevel];
+}
+
+function isOverdueWork(
+  application: {
+    finalStatus: FinalStatus;
+    finalizedAt?: Date | null;
+    updatedAt: Date;
+    reviewTasks: Array<{ status: ReviewTaskStatus; dueDate?: Date | null; updatedAt?: Date }>;
+    resolutionCases?: Array<{ status: ResolutionStatus; createdAt?: Date }>;
+  },
+  now: Date,
+) {
+  if (isFinalizedApplication(application)) return false;
+  const hasOverdueTask = application.reviewTasks.some((task) => {
+    if (!task.dueDate) return false;
+    const openTask =
+      task.status === ReviewTaskStatus.waiting ||
+      task.status === ReviewTaskStatus.reviewing ||
+      task.status === ReviewTaskStatus.supplement_required ||
+      task.status === ReviewTaskStatus.resolution_needed;
+    return openTask && task.dueDate.getTime() < now.getTime();
+  });
+  if (hasOverdueTask) return true;
+
+  const hasStaleResolution = application.resolutionCases?.some(
+    (resolution) =>
+      isOpenResolutionStatus(resolution.status) &&
+      resolution.createdAt &&
+      now.getTime() - resolution.createdAt.getTime() > staleWorkWindowMs,
+  );
+  if (hasStaleResolution) return true;
+
+  const progress = buildReviewProgress(application.reviewTasks.map((task) => task.status));
+  return !progress.canAggregate && now.getTime() - application.updatedAt.getTime() > staleWorkWindowMs;
+}
+
+function toCommitteeInboxItem(
+  application: {
+    id: string;
+    studentId: string;
+    schoolYear: string;
+    targetLevel: Level;
+    finalStatus: FinalStatus;
+    finalLevel: Level | null;
+    finalNote?: string | null;
+    status: ApplicationStatus;
+    readinessScore: number;
+    submittedAt: Date | null;
+    finalizedAt?: Date | null;
+    updatedAt: Date;
+    createdAt: Date;
+    student: {
+      id: string;
+      fullName: string;
+      studentCode: string | null;
+      className: string | null;
+      faculty: string | null;
+    };
+    reviewTasks: Array<{
+      criterion?: Criterion;
+      status: ReviewTaskStatus;
+      dueDate?: Date | null;
+      updatedAt?: Date;
+      officerSuggestedLevel?: Level | null;
+      officerNote?: string | null;
+      decisionReason?: string | null;
+      evidences?: Array<{ evidenceId: string }>;
+    }>;
+    resolutionCases: Array<{ id: string; status: ResolutionStatus; reason: string; createdAt: Date; closedAt: Date | null }>;
+    cascadeReviews: Array<{ suggestedLevel: Level | null; createdAt?: Date }>;
+  },
+  now: Date,
+) {
+  const progress = buildReviewProgress(application.reviewTasks.map((task) => task.status));
+  const openResolution = application.resolutionCases.find((resolution) => isOpenResolutionStatus(resolution.status));
+  const suggestedLevel = application.cascadeReviews[0]?.suggestedLevel ?? null;
+  const finalized = isFinalizedApplication(application);
+  const canFinalize = !finalized && progress.canAggregate && !openResolution;
+  const overdue = isOverdueWork(application, now);
+  const type = getCommitteeInboxType({
+    canFinalize,
+    finalized,
+    hasOpenResolution: Boolean(openResolution),
+    isOverdue: overdue,
+    progress,
+    targetLevel: application.targetLevel,
+    suggestedLevel,
+    application,
+    now,
+  });
+  if (!type) return null;
+
+  const blockers = buildCommitteeBlockers(application, progress, openResolution ? 1 : 0);
+  const nextAction = getCommitteeNextAction(type, suggestedLevel);
+  const dueAt = getCommitteeDueAt(application, now);
+
+  return {
+    id: `${type}:${application.id}`,
+    type,
+    applicationId: application.id,
+    resolutionCaseId: openResolution?.id,
+    studentName: application.student.fullName,
+    studentCode: application.student.studentCode,
+    className: application.student.className,
+    faculty: application.student.faculty,
+    targetLevel: application.targetLevel,
+    suggestedLevel,
+    finalLevel: application.finalLevel,
+    finalStatus: application.finalStatus,
+    mainReason: getCommitteeMainReason(type, application.targetLevel, suggestedLevel, openResolution?.reason),
+    blockers,
+    nextAction,
+    priority: getCommitteePriority(type),
+    updatedAt: getLastActivityAt(application).toISOString(),
+    dueAt: dueAt?.toISOString(),
+  };
+}
+
+function getCommitteeInboxType(input: {
+  canFinalize: boolean;
+  finalized: boolean;
+  hasOpenResolution: boolean;
+  isOverdue: boolean;
+  progress: ReturnType<typeof buildReviewProgress>;
+  targetLevel: Level;
+  suggestedLevel: Level | null;
+  application: { finalStatus: FinalStatus; finalizedAt?: Date | null; updatedAt: Date };
+  now: Date;
+}): CommitteeInboxType | null {
+  if (input.hasOpenResolution || input.progress.resolutionNeeded > 0) return 'needs_resolution';
+  if (input.isOverdue) return 'overdue';
+  if (!input.finalized && input.progress.supplementRequired > 0) return 'supplement_required';
+  if (input.canFinalize && isDowngraded(input.targetLevel, input.suggestedLevel)) return 'downgraded';
+  if (input.canFinalize && input.suggestedLevel === null) return 'no_eligible_level';
+  if (input.canFinalize) return 'ready_to_finalize';
+  return isRecentlyFinalized(input.application, input.now) ? 'recently_finalized' : null;
+}
+
+function getCommitteeNextAction(type: CommitteeInboxType, suggestedLevel: Level | null): CommitteeNextAction {
+  if (type === 'needs_resolution') return 'open_resolution_case';
+  if (type === 'overdue') return 'send_reminder';
+  if (type === 'supplement_required') return 'wait_for_supplement';
+  if (type === 'downgraded') return 'review_downgrade_reason';
+  if (type === 'no_eligible_level') return 'finalize_failed';
+  if (type === 'recently_finalized') return 'reopen_final_result';
+  if (suggestedLevel === Level.city) return 'finalize_city';
+  if (suggestedLevel === Level.university) return 'finalize_university';
+  if (suggestedLevel === Level.school) return 'finalize_school';
+  return 'finalize_failed';
+}
+
+function getCommitteePriority(type: CommitteeInboxType) {
+  if (type === 'needs_resolution' || type === 'overdue') return 'high';
+  if (type === 'downgraded' || type === 'no_eligible_level' || type === 'supplement_required') return 'medium';
+  return 'low';
+}
+
+function getCommitteeMainReason(type: CommitteeInboxType, targetLevel: Level, suggestedLevel: Level | null, resolutionReason?: string | null) {
+  if (type === 'needs_resolution') return resolutionReason || 'Có resolution case đang mở cần Hội đồng xử lý.';
+  if (type === 'overdue') return 'Có task/case quá hạn hoặc hồ sơ lâu chưa được cập nhật.';
+  if (type === 'supplement_required') return 'Có tiêu chí đang yêu cầu sinh viên bổ sung minh chứng.';
+  if (type === 'downgraded') {
+    return `Đăng ký ${getLevelLabel(targetLevel)} nhưng đề xuất mới nhất là ${getLevelLabel(suggestedLevel)}.`;
+  }
+  if (type === 'no_eligible_level') return 'Cascade mới nhất không đề xuất cấp đạt nào.';
+  if (type === 'recently_finalized') return 'Hồ sơ đã được chốt gần đây, có thể mở lại để đối soát.';
+  return 'Hồ sơ đã đủ điều kiện nghiệp vụ để Hội đồng chốt kết quả.';
+}
+
+function buildCommitteeBlockers(
+  application: { reviewTasks: Array<{ criterion?: Criterion; status: ReviewTaskStatus; decisionReason?: string | null }> },
+  progress: ReturnType<typeof buildReviewProgress>,
+  openResolutionCases: number,
+) {
+  const blockers = buildBlockingReasons(progress, openResolutionCases);
+  application.reviewTasks.forEach((task) => {
+    if (task.status === ReviewTaskStatus.supplement_required) {
+      blockers.push(`${task.criterion ?? 'criterion'} cần bổ sung minh chứng.`);
+    }
+    if (task.status === ReviewTaskStatus.rejected && task.decisionReason) {
+      blockers.push(task.decisionReason);
+    }
+  });
+  return [...new Set(blockers)].slice(0, 5);
+}
+
+function getCommitteeDueAt(application: { reviewTasks: Array<{ status: ReviewTaskStatus; dueDate?: Date | null }> }, now: Date) {
+  const dueDates = application.reviewTasks
+    .filter((task) => {
+      const openTask =
+        task.status === ReviewTaskStatus.waiting ||
+        task.status === ReviewTaskStatus.reviewing ||
+        task.status === ReviewTaskStatus.supplement_required ||
+        task.status === ReviewTaskStatus.resolution_needed;
+      return openTask && task.dueDate && task.dueDate.getTime() < now.getTime();
+    })
+    .map((task) => task.dueDate)
+    .filter((date): date is Date => Boolean(date))
+    .sort((a, b) => a.getTime() - b.getTime());
+  return dueDates[0] ?? null;
+}
+
+function buildCommitteeInboxSummary(items: Array<{ type: CommitteeInboxType }>) {
+  const count = (type: CommitteeInboxType) => items.filter((item) => item.type === type).length;
+  return {
+    readyToFinalize: count('ready_to_finalize'),
+    downgraded: count('downgraded'),
+    noEligibleLevel: count('no_eligible_level'),
+    needsResolution: count('needs_resolution'),
+    supplementRequired: count('supplement_required'),
+    overdue: count('overdue'),
+    recentlyFinalized: count('recently_finalized'),
+  };
+}
+
+function sortCommitteeInboxItems<T extends { type: CommitteeInboxType; updatedAt: string; priority: string }>(items: T[]) {
+  const priorityRank: Record<CommitteeInboxType, number> = {
+    needs_resolution: 1,
+    overdue: 2,
+    supplement_required: 3,
+    downgraded: 4,
+    no_eligible_level: 5,
+    ready_to_finalize: 6,
+    recently_finalized: 7,
+  };
+  return [...items].sort(
+    (a, b) =>
+      priorityRank[a.type] - priorityRank[b.type] ||
+      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  );
+}
+
 function toResultItem(application: {
   id: string;
   studentId: string;
@@ -1111,9 +1698,44 @@ function toResultItem(application: {
     className: string | null;
     faculty: string | null;
   };
-  reviewTasks: Array<{ status: ReviewTaskStatus }>;
+  reviewTasks: Array<{
+    criterion?: Criterion;
+    status: ReviewTaskStatus;
+    officerSuggestedLevel?: Level | null;
+    officerNote?: string | null;
+    decisionReason?: string | null;
+    evidences?: Array<{ evidenceId: string }>;
+  }>;
+  resolutionCases?: Array<{ status: ResolutionStatus }>;
   cascadeReviews: Array<{ suggestedLevel: Level | null }>;
 }) {
+  const reviewTaskSummary = buildTaskSummary(application.reviewTasks);
+  const reviewProgress = buildReviewProgress(application.reviewTasks.map((task) => task.status));
+  const criterionStatuses = Object.fromEntries(
+    application.reviewTasks
+      .filter((task): task is { criterion: Criterion; status: ReviewTaskStatus; officerSuggestedLevel?: Level | null } =>
+        Boolean(task.criterion),
+      )
+      .map((task) => [
+        task.criterion,
+        {
+          status: task.status,
+          officerSuggestedLevel: task.officerSuggestedLevel ?? null,
+        },
+      ]),
+  );
+  const openResolutionCases =
+    application.resolutionCases?.filter(
+      (item) => item.status === ResolutionStatus.open || item.status === ResolutionStatus.in_review,
+    ).length ?? 0;
+  const blockingReasons = buildBlockingReasons(reviewProgress, openResolutionCases);
+  const suggestedLevel = application.cascadeReviews[0]?.suggestedLevel ?? null;
+  const topBlockerReason = buildTopBlockerReason(application.reviewTasks, {
+    targetLevel: application.targetLevel,
+    suggestedLevel,
+    openResolutionCases,
+  });
+
   return {
     applicationId: application.id,
     studentId: application.studentId,
@@ -1123,7 +1745,7 @@ function toResultItem(application: {
     faculty: application.student.faculty,
     schoolYear: application.schoolYear,
     targetLevel: application.targetLevel,
-    suggestedLevel: application.cascadeReviews[0]?.suggestedLevel ?? null,
+    suggestedLevel,
     finalStatus: application.finalStatus,
     finalLevel: application.finalLevel,
     finalNote: application.finalNote ?? null,
@@ -1136,11 +1758,15 @@ function toResultItem(application: {
     finalizedBy: application.finalizedBy
       ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
       : null,
-    reviewTaskSummary: buildTaskSummary(application.reviewTasks),
+    reviewTaskSummary,
+    criterionStatuses,
     taskProgress: {
-      accepted: buildTaskSummary(application.reviewTasks).accepted,
+      accepted: reviewTaskSummary.accepted,
       total: application.reviewTasks.length,
     },
+    canFinalize: reviewProgress.canAggregate && openResolutionCases === 0,
+    blockingReasons,
+    topBlockerReason,
   };
 }
 
@@ -1335,6 +1961,7 @@ function pickStudent(student: {
   studentCode: string | null;
   className: string | null;
   faculty: string | null;
+  avatarUrl?: string | null;
 }) {
   return {
     id: student.id,
@@ -1342,6 +1969,7 @@ function pickStudent(student: {
     studentCode: student.studentCode,
     className: student.className,
     faculty: student.faculty,
+    avatarUrl: student.avatarUrl ?? null,
   };
 }
 
@@ -1369,6 +1997,66 @@ function buildBlockingReasons(reviewProgress: ReturnType<typeof buildReviewProgr
   ];
 }
 
+function buildTopBlockerReason(
+  tasks: Array<{
+    criterion?: Criterion;
+    status: ReviewTaskStatus;
+    officerSuggestedLevel?: Level | null;
+    officerNote?: string | null;
+    decisionReason?: string | null;
+    evidences?: Array<{ evidenceId: string }>;
+  }>,
+  context: {
+    targetLevel: Level;
+    suggestedLevel: Level | null;
+    openResolutionCases: number;
+  },
+) {
+  const priority = [
+    ReviewTaskStatus.rejected,
+    ReviewTaskStatus.supplement_required,
+    ReviewTaskStatus.resolution_needed,
+    ReviewTaskStatus.reviewing,
+    ReviewTaskStatus.waiting,
+  ];
+  const task = priority
+    .flatMap((status) => tasks.filter((item) => item.status === status))
+    .find(Boolean);
+
+  if (task) {
+    const prefix = task.criterion ? `${criterionDecisionLabel(task.criterion)}: ` : '';
+    const note = task.decisionReason?.trim() || task.officerNote?.trim();
+    if (note) return `${prefix}${note}`;
+    if (task.status === ReviewTaskStatus.rejected) return `${prefix}Khong dat tieu chi.`;
+    if (task.status === ReviewTaskStatus.supplement_required) {
+      return `${prefix}Can bo sung minh chung hoac thong tin.`;
+    }
+    if (task.status === ReviewTaskStatus.resolution_needed) return `${prefix}Dang cho hoi dong hoi y.`;
+    if (task.status === ReviewTaskStatus.reviewing) return `${prefix}Can bo dang xet task nay.`;
+    return `${prefix}Task chua duoc xet.`;
+  }
+
+  if (context.openResolutionCases > 0) return 'Con resolution case chua xu ly.';
+  if (!context.suggestedLevel) return 'Cascade moi nhat de xuat khong dat cap nao.';
+  if (context.suggestedLevel !== context.targetLevel) {
+    return `De xuat ha tu ${context.targetLevel} xuong ${context.suggestedLevel}.`;
+  }
+  return 'Khong co blocker chinh.';
+}
+
+function criterionDecisionLabel(criterion: Criterion) {
+  const labels: Partial<Record<Criterion, string>> = {
+    ethics: 'Dao duc',
+    academic: 'Hoc tap',
+    physical: 'The luc',
+    volunteer: 'Tinh nguyen',
+    integration: 'Hoi nhap',
+    priority: 'Uu tien',
+    collective: 'Tap the',
+  };
+  return labels[criterion] ?? criterion;
+}
+
 function isSpecializedForTask(
   specializations: Array<{ criterion: Criterion; facultyScope: string | null }>,
   criterion: Criterion,
@@ -1391,14 +2079,23 @@ function isTaskOverdue(task: { status: ReviewTaskStatus; dueDate: Date | null })
 
 function buildFinalNotificationMessage(
   status: FinalStatus,
-  level: string | null,
+  level: Level | null,
   note: string,
 ): string {
+  const levelLabel = getLevelLabel(level);
   if (status === FinalStatus.passed) {
-    return `Hồ sơ Sinh viên 5 tốt của bạn đã có kết quả: đạt cấp ${level}. Vui lòng xem chi tiết trong hệ thống.`;
+    return `Hồ sơ Sinh viên 5 tốt của bạn đã có kết quả cuối cùng: đạt ${levelLabel}. Vui lòng xem chi tiết trong hệ thống.`;
   }
   if (status === FinalStatus.failed) {
     return `Hồ sơ Sinh viên 5 tốt của bạn đã có kết quả: chưa đạt. ${note}`;
   }
-  return `Hồ sơ của bạn chưa đủ điều kiện cấp mục tiêu, nhưng được xác nhận ở cấp ${level}.`;
+  return `Hồ sơ của bạn chưa đủ điều kiện cấp mục tiêu, nhưng được xác nhận ở ${levelLabel}.`;
+}
+
+function getLevelLabel(level: Level | null) {
+  if (level === Level.school) return 'Cấp Trường';
+  if (level === Level.university) return 'Cấp ĐHĐN';
+  if (level === Level.city) return 'Cấp Thành phố';
+  if (level === Level.central) return 'Cấp Trung ương';
+  return 'không đạt cấp nào';
 }

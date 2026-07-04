@@ -64,6 +64,53 @@ const editableStatuses = new Set<CollectiveStatus>([
   CollectiveStatus.supplement_required,
 ]);
 
+const collectiveFinalizeBlockingStatuses = new Set<ReviewTaskStatus>([
+  ReviewTaskStatus.waiting,
+  ReviewTaskStatus.reviewing,
+  ReviewTaskStatus.supplement_required,
+  ReviewTaskStatus.resolution_needed,
+]);
+
+function isCollectiveFinalizeBlocker(status: ReviewTaskStatus): boolean {
+  return collectiveFinalizeBlockingStatuses.has(status);
+}
+
+function buildCollectiveFinalizeReadiness(statuses: ReviewTaskStatus[]) {
+  if (statuses.length === 0) {
+    return {
+      canFinalize: false,
+      blockingReasons: ['Chua co task xet duyet tap the.'],
+    };
+  }
+
+  const counts = statuses.reduce(
+    (acc, status) => {
+      if (isCollectiveFinalizeBlocker(status)) {
+        acc[status] = (acc[status] ?? 0) + 1;
+      }
+      return acc;
+    },
+    {} as Partial<Record<ReviewTaskStatus, number>>,
+  );
+  const blockingReasons = Object.entries(counts).map(([status, count]) =>
+    collectiveBlockingReason(status as ReviewTaskStatus, count),
+  );
+
+  return {
+    canFinalize: blockingReasons.length === 0,
+    blockingReasons,
+  };
+}
+
+function collectiveBlockingReason(status: ReviewTaskStatus, count: number): string {
+  const suffix = count > 1 ? `${count} task` : '1 task';
+  if (status === ReviewTaskStatus.waiting) return `Con ${suffix} dang cho phan cong/xet duyet.`;
+  if (status === ReviewTaskStatus.reviewing) return `Con ${suffix} dang duoc xet duyet.`;
+  if (status === ReviewTaskStatus.supplement_required) return `Con ${suffix} yeu cau bo sung minh chung.`;
+  if (status === ReviewTaskStatus.resolution_needed) return `Con ${suffix} can hoi dong xu ly.`;
+  return `Con ${suffix} chua hoan tat.`;
+}
+
 export class CollectiveService {
   constructor(
     private readonly storageService = new LocalStorageService(),
@@ -793,6 +840,7 @@ export class CollectiveService {
         include: {
           representative: true,
           members: true,
+          reviewTasks: { select: { status: true } },
           _count: { select: { members: true, evidences: true, reviewTasks: true } },
         },
         orderBy: { updatedAt: 'desc' },
@@ -802,10 +850,17 @@ export class CollectiveService {
       prisma.collectiveProfile.count({ where }),
     ]);
     return {
-      items: items.map((item) => ({
-        ...item,
-        memberSummary: buildCollectiveMemberSummary(item.members),
-      })),
+      items: items.map((item) => {
+        const readiness = buildCollectiveFinalizeReadiness(
+          item.reviewTasks.map((task) => task.status),
+        );
+        return {
+          ...item,
+          memberSummary: buildCollectiveMemberSummary(item.members),
+          canFinalize: readiness.canFinalize,
+          blockingReasons: readiness.blockingReasons,
+        };
+      }),
       pagination: {
         page: query.page,
         limit: query.limit,
@@ -837,14 +892,8 @@ export class CollectiveService {
         (item) => item.indexingStatus === IndexingStatus.needs_manual_review,
       ).length,
     };
-    const blockingStatuses: ReviewTaskStatus[] = [
-      ReviewTaskStatus.waiting,
-      ReviewTaskStatus.reviewing,
-      ReviewTaskStatus.supplement_required,
-      ReviewTaskStatus.resolution_needed,
-    ];
-    const blockingTasks = profile.reviewTasks.filter((task) =>
-      blockingStatuses.includes(task.status),
+    const readiness = buildCollectiveFinalizeReadiness(
+      profile.reviewTasks.map((task) => task.status),
     );
     return {
       profile,
@@ -852,16 +901,21 @@ export class CollectiveService {
       evidenceSummary,
       latestPrecheck: profile.precheckResults[0] ?? null,
       reviewTasks: profile.reviewTasks,
-      canFinalize: blockingTasks.length === 0,
-      blockers: blockingTasks.map((task) => ({
+      canFinalize: readiness.canFinalize,
+      blockingReasons: readiness.blockingReasons,
+      blockers: profile.reviewTasks.filter((task) => isCollectiveFinalizeBlocker(task.status)).map((task) => ({
         reviewTaskId: task.id,
         status: task.status,
+        message: collectiveBlockingReason(task.status, 1),
       })),
     };
   }
 
   async finalize(user: AuthenticatedUser, profileId: string, input: FinalizeCollectiveInput) {
     const aggregation = await this.aggregation(profileId);
+    if (input.overrideAggregation && user.role !== Role.admin) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only admin can override finalize blockers');
+    }
     if (!aggregation.canFinalize && !input.overrideAggregation) {
       throw new AppError(
         409,

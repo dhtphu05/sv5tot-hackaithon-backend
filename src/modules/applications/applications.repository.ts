@@ -22,6 +22,7 @@ const applicationInclude = {
   draftSnapshots: { orderBy: { version: 'desc' }, take: 1 },
   precheckResults: { orderBy: { createdAt: 'desc' }, take: 1 },
   cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
+  finalizedBy: { select: { id: true, fullName: true } },
   _count: { select: { evidences: true } },
 } satisfies Prisma.ApplicationInclude;
 

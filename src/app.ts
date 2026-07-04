@@ -8,6 +8,7 @@ import { securityConfig } from './config/security';
 import { setupSwagger } from './docs/swagger';
 import { errorMiddleware } from './middlewares/error.middleware';
 import { notFoundMiddleware } from './middlewares/not-found.middleware';
+import { performanceLogMiddleware } from './middlewares/performance-log.middleware';
 import { rateLimitMiddleware } from './middlewares/rate-limit.middleware';
 import { requestIdMiddleware } from './middlewares/request-id.middleware';
 import { aiRouter } from './modules/ai/ai.routes';
@@ -25,6 +26,7 @@ import { healthRouter } from './modules/health/health.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { knowledgeBaseRouter } from './modules/knowledge-base/knowledge-base.routes';
 import { managerRouter } from './modules/manager/manager.routes';
+import { committeeRouter } from './modules/committee/committee.routes';
 import { metricsRouter } from './modules/metrics/metrics.routes';
 import { notificationsRouter } from './modules/notifications/notifications.routes';
 import { precheckRouter } from './modules/precheck/precheck.routes';
@@ -41,15 +43,16 @@ export function createApp() {
   app.disable('x-powered-by');
   app.use(helmet());
   app.use(cors(corsOptions));
+  app.use(requestIdMiddleware);
   app.use(express.json({ limit: securityConfig.jsonBodyLimit }));
   app.use(express.urlencoded({ extended: true, limit: securityConfig.urlEncodedLimit }));
-  app.use(requestIdMiddleware);
   app.use(
     pinoHttp({
       logger,
       genReqId: (req) => req.requestId ?? 'unknown',
     }),
   );
+  app.use(performanceLogMiddleware);
   app.use(rateLimitMiddleware);
 
   setupSwagger(app);
@@ -70,6 +73,7 @@ export function createApp() {
   app.use('/api', cascadeRouter);
   app.use('/api/review', reviewRouter);
   app.use('/api/manager', managerRouter);
+  app.use('/api/committee', committeeRouter);
   app.use('/api/collective', collectiveRouter);
   app.use('/api/resolution', resolutionRouter);
   app.use('/api/notifications', notificationsRouter);

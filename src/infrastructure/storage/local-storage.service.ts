@@ -24,7 +24,8 @@ export class LocalStorageService implements StorageService {
     const safeFileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${sanitizeFileName(
       input.originalName,
     )}`;
-    const targetDirectory = path.resolve(this.uploadDir, directory);
+    const storageDirectory = normalizeStoragePath(directory);
+    const targetDirectory = path.resolve(this.uploadDir, ...storageDirectory.split('/'));
     const targetPath = path.join(targetDirectory, safeFileName);
     const root = path.resolve(this.uploadDir);
 
@@ -35,7 +36,7 @@ export class LocalStorageService implements StorageService {
     await fs.mkdir(targetDirectory, { recursive: true });
     await fs.writeFile(targetPath, input.buffer);
 
-    const key = path.join(directory, safeFileName);
+    const key = normalizeStoragePath(path.posix.join(storageDirectory, safeFileName));
     return {
       key,
       filePath: key,
@@ -59,6 +60,10 @@ export class LocalStorageService implements StorageService {
   getPublicUrl(_filePath: string): string | null {
     return null;
   }
+}
+
+function normalizeStoragePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/').replace(/^\/+/, '');
 }
 
 export function sanitizeFileName(fileName: string): string {

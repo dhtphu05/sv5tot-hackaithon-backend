@@ -13,6 +13,7 @@ import {
   getReviewTaskDetail,
   getReviewTaskTimeline,
   listReviewTasks,
+  claimReviewTask,
   requestReviewTaskSupplement,
 } from './review.controller';
 import {
@@ -64,6 +65,12 @@ reviewRouter.get(
   requireAuth,
   requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   asyncHandler(getReviewTaskTimeline),
+);
+reviewRouter.post(
+  '/tasks/:id/claim',
+  requireAuth,
+  requireRole(Role.officer),
+  asyncHandler(claimReviewTask),
 );
 reviewRouter.post(
   '/tasks/:id/decision',

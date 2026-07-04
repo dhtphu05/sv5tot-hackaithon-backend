@@ -24,6 +24,14 @@ function durationToSeconds(value: string): number {
 }
 
 export class TokenService {
+  getAccessTokenExpiresInSeconds(): number {
+    return durationToSeconds(env.JWT_ACCESS_EXPIRES_IN);
+  }
+
+  getAccessTokenExpiresAt(): Date {
+    return new Date(Date.now() + this.getAccessTokenExpiresInSeconds() * 1000);
+  }
+
   createAccessToken(userId: string): string {
     return jwt.sign(
       { sub: userId, type: 'access' } satisfies AccessTokenPayload,
