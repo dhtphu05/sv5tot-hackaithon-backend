@@ -31,4 +31,11 @@ export class JobsRepository {
   findById(id: string) {
     return this.db.indexingJob.findUnique({ where: { id } });
   }
+
+  findNextQueuedJob() {
+    return this.db.indexingJob.findFirst({
+      where: { status: JobStatus.queued },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
 }

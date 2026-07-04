@@ -1,12 +1,15 @@
 import { Role } from '@prisma/client';
+import type { NextFunction, Request, Response } from 'express';
 import { Router } from 'express';
+import { env } from '../../config/env';
 import { requireAuth } from '../../middlewares/auth.middleware';
 import { requireRole } from '../../middlewares/require-role.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
-import { getJob, runJob } from './jobs.controller';
+import { getJob, runJob, runWorkerTick } from './jobs.controller';
 
 export const jobsRouter = Router();
 
+jobsRouter.post('/worker/tick', requireWorkerAccess, asyncHandler(runWorkerTick));
 jobsRouter.get(
   '/:id',
   requireAuth,
@@ -19,3 +22,19 @@ jobsRouter.post(
   requireRole(Role.manager, Role.admin),
   asyncHandler(runJob),
 );
+
+function requireWorkerAccess(req: Request, res: Response, next: NextFunction): void {
+  const token = req.header('x-internal-worker-token');
+  if (env.INTERNAL_WORKER_TOKEN && token === env.INTERNAL_WORKER_TOKEN) {
+    next();
+    return;
+  }
+
+  void requireAuth(req, res, (authError?: unknown) => {
+    if (authError) {
+      next(authError);
+      return;
+    }
+    requireRole(Role.manager, Role.admin)(req, res, next);
+  });
+}

@@ -5,6 +5,8 @@ import {
   EvidenceStatus,
   FileStorageType,
   IndexingStatus,
+  JobStatus,
+  JobType,
   ReviewTaskStatus,
   Role,
 } from '@prisma/client';
@@ -21,6 +23,7 @@ import {
   assertApplicationOwner,
   createApplicationAudit,
 } from '../applications/application.helpers';
+import { AuditService } from '../audit/audit.service';
 import { JobsService } from '../jobs/jobs.service';
 import { EvidencesRepository } from './evidences.repository';
 import type {
@@ -37,6 +40,7 @@ export class EvidencesService {
     private readonly evidencesRepository = new EvidencesRepository(),
     private readonly storageService = new StorageService(),
     private readonly jobsService = new JobsService(),
+    private readonly auditService = new AuditService(),
   ) {}
 
   async list(user: AuthenticatedUser, applicationId: string, query: ListEvidencesQuery) {
@@ -57,40 +61,23 @@ export class EvidencesService {
 
   async create(user: AuthenticatedUser, applicationId: string, input: CreateEvidenceInput) {
     const application = await this.getRequiredApplication(applicationId);
-    assertApplicationOwner(application, user);
+    if (user.role === Role.student || user.role === Role.class_representative) {
+      assertApplicationOwner(application, user);
+    } else if (
+      user.role !== Role.officer &&
+      user.role !== Role.manager &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Role cannot create application evidence');
+    }
     assertApplicationEditable(application);
 
-    // Business rule: sourceType = collective_import: chỉ role class_representative/manager/admin được tạo
-    if (input.sourceType === EvidenceSourceType.collective_import) {
-      if (
-        user.role !== Role.class_representative &&
-        user.role !== Role.manager &&
-        user.role !== Role.admin
-      ) {
-        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only class representatives or managers can create collective imports');
-      }
+    if (input.sourceType !== EvidenceSourceType.manual_upload) {
+      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'sourceType must be manual_upload for uploaded evidence');
     }
 
-    // Business rule: sourceType = event_import: phải có metadata.eventId hoặc eventId
-    if (input.sourceType === EvidenceSourceType.event_import) {
-      const eventId = input.eventId ?? input.metadata?.eventId;
-      if (!eventId) {
-        throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'eventId or metadata.eventId is required for event_import');
-      }
-    }
-
-    // Determine initial status based on sourceType
-    let status: EvidenceStatus = EvidenceStatus.draft;
-    let indexingStatus: IndexingStatus = IndexingStatus.not_started;
-
-    if (
-      input.sourceType === EvidenceSourceType.metric_input ||
-      input.sourceType === EvidenceSourceType.event_import ||
-      input.sourceType === EvidenceSourceType.collective_import
-    ) {
-      status = EvidenceStatus.under_review;
-      indexingStatus = IndexingStatus.indexed;
-    }
+    const status: EvidenceStatus = EvidenceStatus.draft;
+    const indexingStatus: IndexingStatus = IndexingStatus.not_started;
 
     const eventId = input.eventId ?? input.metadata?.eventId ?? null;
 
@@ -377,14 +364,32 @@ export class EvidencesService {
         },
       });
 
-      // Status rule sau upload
       let status = evidence.status;
       let indexingStatus = evidence.indexingStatus;
 
       if (evidence.sourceType === EvidenceSourceType.manual_upload) {
-        status = EvidenceStatus.under_review;
-        indexingStatus = IndexingStatus.indexed;
+        status = EvidenceStatus.pending_indexing;
+        indexingStatus = IndexingStatus.pending_indexing;
       }
+
+      const existingJob = await tx.indexingJob.findFirst({
+        where: {
+          targetId: evidence.id,
+          jobType: JobType.evidence_ocr,
+          status: { in: [JobStatus.queued, JobStatus.processing] },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      const job =
+        existingJob ??
+        (await tx.indexingJob.create({
+          data: {
+            targetId: evidence.id,
+            jobType: JobType.evidence_ocr,
+            status: JobStatus.queued,
+            attempts: 0,
+          },
+        }));
 
       const updatedEvidence = await tx.evidence.update({
         where: { id: evidence.id },
@@ -412,38 +417,45 @@ export class EvidencesService {
         targetType: 'file',
         targetId: fileRecord.id,
         applicationId: evidence.applicationId,
-        afterStateJson: { filePath: fileRecord.filePath, mimeType: fileRecord.mimeType },
+          afterStateJson: { filePath: fileRecord.filePath, mimeType: fileRecord.mimeType },
       });
 
-      await createApplicationAudit(tx, {
+      await this.auditService.log({
         actorId: user.id,
         actorRole: user.role,
-        action: 'EVIDENCE_FILE_UPLOADED',
-        targetType: 'evidence',
-        targetId: evidence.id,
+        action: auditActions.FILE_UPLOADED,
+        entityType: 'file',
+        entityId: fileRecord.id,
         applicationId: evidence.applicationId,
-        afterStateJson: { fileId: fileRecord.id, fileRole, displayName: originalName },
-        note: body?.note || 'Uploaded file.',
+        evidenceId: evidence.id,
+        after: { fileId: fileRecord.id, fileRole, displayName: originalName },
+        metadata: { note: body?.note ?? null },
+        tx,
       });
 
-      if (evidence.sourceType === EvidenceSourceType.manual_upload) {
-        await createApplicationAudit(tx, {
-          actorId: user.id,
-          actorRole: user.role,
-          action: 'EVIDENCE_READY_FOR_MANUAL_REVIEW',
-          targetType: 'evidence',
-          targetId: evidence.id,
-          applicationId: evidence.applicationId,
-          afterStateJson: { status, indexingStatus },
-        });
-      }
+      await this.auditService.log({
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.OCR_JOB_CREATED,
+        entityType: 'indexing_job',
+        entityId: job.id,
+        applicationId: evidence.applicationId,
+        evidenceId: evidence.id,
+        after: {
+          jobId: job.id,
+          jobType: job.jobType,
+          status: job.status,
+          reused: !!existingJob,
+        },
+        tx,
+      });
 
       return {
         evidence: this.toEvidenceDto(updatedEvidence, user),
         file: {
           id: fileRecord.id,
           evidenceId: evidence.id,
-          fileName: fileRecord.originalName,
+          originalName: fileRecord.originalName,
           mimeType: fileRecord.mimeType,
           size: fileRecord.fileSize,
           storageType: fileRecord.storageType,
@@ -451,9 +463,9 @@ export class EvidencesService {
           publicUrl: fileRecord.publicUrl,
           uploadedAt: fileRecord.createdAt.toISOString(),
         },
-        job: null,
-        jobId: null,
-        mode: 'non_ai',
+        job,
+        jobId: job.id,
+        mode: 'ocr_queued',
       };
     });
 
@@ -464,12 +476,21 @@ export class EvidencesService {
     const evidence = await this.getRequiredEvidence(evidenceId);
     this.assertCanViewEvidence(user, evidence);
 
+    const { job, reused } = await this.jobsService.enqueueIndexingJob(evidence.id, JobType.evidence_ocr);
+    await prisma.evidence.update({
+      where: { id: evidence.id },
+      data: {
+        status: EvidenceStatus.pending_indexing,
+        indexingStatus: IndexingStatus.pending_indexing,
+      },
+    });
+
     return {
       evidence: this.toEvidenceDto(evidence, user),
-      job: null,
-      jobId: null,
-      mode: 'non_ai_disabled',
-      message: 'Indexing/OCR is disabled in this sprint; evidence is ready for manual review.',
+      job,
+      jobId: job.id,
+      mode: reused ? 'ocr_job_reused' : 'ocr_queued',
+      message: 'Evidence OCR job is queued.',
     };
   }
 
@@ -505,13 +526,21 @@ export class EvidencesService {
       card: {
         id: evidence.evidenceCard.id,
         ocrText: evidence.evidenceCard.ocrText,
+        ocrLinesJson: evidence.evidenceCard.ocrLinesJson,
+        ocrParagraphsJson: evidence.evidenceCard.ocrParagraphsJson,
+        ocrTablesJson: evidence.evidenceCard.ocrTablesJson,
         extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
+        normalizedFieldsJson: evidence.evidenceCard.normalizedFieldsJson,
         warningsJson: evidence.evidenceCard.warningsJson,
         matchedEventId: evidence.evidenceCard.matchedEventId,
+        matchedParticipantId: evidence.evidenceCard.matchedParticipantId,
         matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
         confidence: evidence.evidenceCard.confidence,
+        sourceEndpoint: evidence.evidenceCard.sourceEndpoint,
+        smartreaderJobId: evidence.evidenceCard.smartreaderJobId,
         aiSummary: evidence.evidenceCard.aiSummary,
         rawAiResponse: isPrivileged ? evidence.evidenceCard.rawAiResponse : undefined,
+        rawResponseJson: isPrivileged ? evidence.evidenceCard.rawResponseJson : undefined,
         createdAt: evidence.evidenceCard.createdAt,
         updatedAt: evidence.evidenceCard.updatedAt,
       },

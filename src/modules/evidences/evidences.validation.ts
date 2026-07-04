@@ -9,14 +9,22 @@ export const listEvidencesQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-export const createEvidenceSchema = z.object({
-  evidenceName: z.string().trim().min(3).max(255),
+export const createEvidenceSchema = z.preprocess((value) => {
+  if (!value || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  return {
+    ...record,
+    evidenceName: record.evidenceName ?? record.evidence_name,
+    sourceType: record.sourceType ?? record.source_type ?? EvidenceSourceType.manual_upload,
+  };
+}, z.object({
+  evidenceName: z.string().trim().min(1).max(255),
   criterion: z.nativeEnum(Criterion),
   sourceType: z.nativeEnum(EvidenceSourceType).default(EvidenceSourceType.manual_upload),
   description: z.string().trim().optional(),
   metadata: z.record(z.any()).optional(),
   eventId: z.string().uuid().optional(),
-});
+}));
 
 export const updateEvidenceSchema = z.object({
   evidenceName: z.string().trim().min(3).max(255).optional(),

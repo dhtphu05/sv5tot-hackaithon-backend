@@ -5,7 +5,16 @@ dotenv.config();
 
 const nodeEnvSchema = z.enum(['development', 'test', 'production']).default('development');
 
-const envSchema = z.object({
+const booleanFromEnv = z
+  .union([z.boolean(), z.string()])
+  .optional()
+  .transform((value) => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') return value.trim().toLowerCase() === 'true';
+    return false;
+  });
+
+const rawEnvSchema = z.object({
   NODE_ENV: nodeEnvSchema,
   PORT: z.coerce.number().int().positive().default(8080),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
@@ -13,11 +22,14 @@ const envSchema = z.object({
     .string()
     .regex(/^\d{4}-\d{4}$/)
     .default('2025-2026'),
-  JWT_ACCESS_SECRET: z.string().min(1, 'JWT_ACCESS_SECRET is required'),
-  JWT_REFRESH_SECRET: z.string().min(1, 'JWT_REFRESH_SECRET is required'),
-  JWT_ACCESS_EXPIRES_IN: z.string().min(1).default('15m'),
+  JWT_SECRET: z.string().optional(),
+  JWT_EXPIRES_IN: z.string().min(1).default('15m'),
+  JWT_ACCESS_SECRET: z.string().optional(),
+  JWT_REFRESH_SECRET: z.string().optional(),
+  JWT_ACCESS_EXPIRES_IN: z.string().optional(),
   JWT_REFRESH_EXPIRES_IN: z.string().min(1).default('7d'),
-  BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
+  BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(15).optional(),
+  BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).optional(),
   SEED_DEFAULT_PASSWORD: z.string().min(8).default('Password@123'),
   CORS_ORIGIN: z
     .string()
@@ -29,7 +41,8 @@ const envSchema = z.object({
         .filter(Boolean),
     )
     .pipe(z.array(z.string().url()).min(1)),
-  UPLOAD_DIR: z.string().min(1).default('./uploads'),
+  LOCAL_UPLOAD_DIR: z.string().min(1).optional(),
+  UPLOAD_DIR: z.string().min(1).optional(),
   MAX_FILE_SIZE_MB: z.coerce.number().int().positive().default(20),
   STORAGE_DRIVER: z.enum(['local', 'r2']).default('local'),
   R2_BUCKET_NAME: z.string().optional(),
@@ -38,8 +51,42 @@ const envSchema = z.object({
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
   VNPT_MODE: z.enum(['mock', 'live']).default('mock'),
-  VNPT_BASE_URL: z.string().optional().default(''),
+  VNPT_ENABLED: booleanFromEnv,
+  VNPT_BASE_URL: z.string().url().default('https://api.idg.vnpt.vn'),
   VNPT_API_KEY: z.string().optional().default(''),
+  VNPT_ACCESS_TOKEN: z.string().optional().default(''),
+  VNPT_TOKEN_ID: z.string().optional().default(''),
+  VNPT_TOKEN_KEY: z.string().optional().default(''),
+  VNPT_MAC_ADDRESS: z.string().min(1).default('EGOV-DIGDOC-WEB-API'),
+  VNPT_CLIENT_SESSION: z.string().min(1).default('00-14-22-01-23-45-1548211589291'),
+  VNPT_DEFAULT_TOKEN: z.string().min(1).default('5tot-backend'),
+  VNPT_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
+  VNPT_RETRY_MAX: z.coerce.number().int().min(0).max(5).default(2),
+  VNPT_UPLOAD_PATH: z.string().min(1).default('/file-service/v1/addFile'),
+  VNPT_OCR_BASIC_PATH: z.string().min(1).default('/rpa-service/aidigdoc/v1/ocr/scan'),
+  VNPT_OCR_ADVANCED_PATH: z.string().min(1).default('/rpa-service/aidigdoc/v1/ocr/scan-table'),
+  VNPT_OCR_ASYNC_START_PATH: z
+    .string()
+    .min(1)
+    .default('/rpa-service/aidigdoc/v1/integration/ocr/scan-table'),
+  VNPT_OCR_ASYNC_RESULT_PATH: z
+    .string()
+    .min(1)
+    .default('/rpa-service/aidigdoc/v1/integration/ocr/scan-table/result'),
+  VNPT_OCR_ASYNC_CANCEL_PATH: z
+    .string()
+    .min(1)
+    .default('/rpa-service/aidigdoc/v1/integration/ocr/scan-table/cancel'),
+  VNPT_ADMIN_DOC_PATH: z
+    .string()
+    .min(1)
+    .default('/rpa-service/aidigdoc/v1/vlm/van-ban-hanh-chinh-vnportal'),
+  VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE: booleanFromEnv,
+  VNPT_SAVE_RAW_RESPONSE: booleanFromEnv,
+  VNPT_LOG_RAW_RESPONSE: booleanFromEnv,
+  SMARTREADER_SMOKE_AUDIT_ENABLED: booleanFromEnv,
+  SMARTREADER_ASYNC_MAX_POLLS: z.coerce.number().int().positive().default(60),
+  INTERNAL_WORKER_TOKEN: z.string().optional().default(''),
   SMARTBOT_MODE: z.enum(['mock', 'live']).default('mock'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 }).refine((data) => {
@@ -58,20 +105,56 @@ const envSchema = z.object({
   path: ['STORAGE_DRIVER'],
 });
 
-const parsedEnv = envSchema.safeParse(process.env);
+const parsedEnv = rawEnvSchema.safeParse(process.env);
 
 if (!parsedEnv.success) {
   const details = parsedEnv.error.flatten().fieldErrors;
   throw new Error(`Invalid environment configuration: ${JSON.stringify(details)}`);
 }
 
+const rawEnv = parsedEnv.data;
+const jwtAccessSecret = rawEnv.JWT_ACCESS_SECRET ?? rawEnv.JWT_SECRET;
+const jwtRefreshSecret = rawEnv.JWT_REFRESH_SECRET ?? rawEnv.JWT_SECRET;
+
+if (!jwtAccessSecret || !jwtRefreshSecret) {
+  throw new Error('Invalid environment configuration: JWT_SECRET or both JWT_ACCESS_SECRET/JWT_REFRESH_SECRET are required');
+}
+
 if (
-  parsedEnv.data.NODE_ENV === 'production' &&
-  (parsedEnv.data.JWT_ACCESS_SECRET === 'change_me' ||
-    parsedEnv.data.JWT_REFRESH_SECRET === 'change_me')
+  rawEnv.VNPT_ENABLED &&
+  (!rawEnv.VNPT_ACCESS_TOKEN || !rawEnv.VNPT_TOKEN_ID || !rawEnv.VNPT_TOKEN_KEY)
+) {
+  throw new Error(
+    'Invalid environment configuration: VNPT_ACCESS_TOKEN, VNPT_TOKEN_ID, and VNPT_TOKEN_KEY are required when VNPT_ENABLED=true',
+  );
+}
+
+if (
+  rawEnv.NODE_ENV === 'production' &&
+  (jwtAccessSecret === 'change_me' || jwtRefreshSecret === 'change_me')
 ) {
   throw new Error('JWT secrets must be changed in production');
 }
 
-export const env = parsedEnv.data;
+export const env = {
+  ...rawEnv,
+  JWT_ACCESS_SECRET: jwtAccessSecret,
+  JWT_REFRESH_SECRET: jwtRefreshSecret,
+  JWT_ACCESS_EXPIRES_IN: rawEnv.JWT_ACCESS_EXPIRES_IN ?? rawEnv.JWT_EXPIRES_IN,
+  BCRYPT_SALT_ROUNDS: rawEnv.BCRYPT_SALT_ROUNDS ?? rawEnv.BCRYPT_ROUNDS ?? 12,
+  UPLOAD_DIR: rawEnv.UPLOAD_DIR ?? rawEnv.LOCAL_UPLOAD_DIR ?? './uploads',
+  LOCAL_UPLOAD_DIR: rawEnv.LOCAL_UPLOAD_DIR ?? rawEnv.UPLOAD_DIR ?? './uploads',
+  VNPT_SAVE_RAW_RESPONSE:
+    process.env.VNPT_SAVE_RAW_RESPONSE === undefined ? true : rawEnv.VNPT_SAVE_RAW_RESPONSE,
+  VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE:
+    process.env.VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE === undefined
+      ? false
+      : rawEnv.VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE,
+  VNPT_LOG_RAW_RESPONSE:
+    process.env.VNPT_LOG_RAW_RESPONSE === undefined ? false : rawEnv.VNPT_LOG_RAW_RESPONSE,
+  SMARTREADER_SMOKE_AUDIT_ENABLED:
+    process.env.SMARTREADER_SMOKE_AUDIT_ENABLED === undefined
+      ? false
+      : rawEnv.SMARTREADER_SMOKE_AUDIT_ENABLED,
+};
 export type Env = typeof env;

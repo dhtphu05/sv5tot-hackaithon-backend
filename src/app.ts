@@ -29,6 +29,7 @@ import { notificationsRouter } from './modules/notifications/notifications.route
 import { precheckRouter } from './modules/precheck/precheck.routes';
 import { resolutionRouter } from './modules/resolution/resolution.routes';
 import { reviewRouter } from './modules/review/review.routes';
+import { smartReaderRouter } from './modules/smartreader/smartreader.routes';
 import { smartUxRouter } from './modules/smartux/smartux.routes';
 import { meRouter, usersRouter } from './modules/users/users.routes';
 import { versionRouter } from './modules/version/version.routes';
@@ -73,6 +74,7 @@ export function createApp() {
   app.use('/api/audit', auditRouter);
   app.use('/api/jobs', jobsRouter);
   app.use('/api', aiRouter);
+  app.use('/api/internal/smartreader', smartReaderRouter);
   app.use('/api/smartux', smartUxRouter);
   app.use('/api/exports', exportsRouter);
 

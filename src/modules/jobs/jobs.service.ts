@@ -43,6 +43,16 @@ export class JobsService {
     return runIndexingJob(job.id);
   }
 
+  async runWorkerTick() {
+    const job = await this.jobsRepository.findNextQueuedJob();
+    if (!job) {
+      return { processed: 0, job: null };
+    }
+
+    const completed = await runIndexingJob(job.id);
+    return { processed: 1, job: completed };
+  }
+
   private async getRequiredJob(jobId: string) {
     const job = await this.jobsRepository.findById(jobId);
     if (!job) {

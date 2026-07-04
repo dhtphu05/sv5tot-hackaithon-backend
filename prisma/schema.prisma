@@ -118,6 +118,24 @@ enum JobType {
   smartreader_extract
 }
 
+enum SmartReaderJobType {
+  evidence_ocr
+  decision_metadata
+  decision_roster_ocr
+  criteria_doc_ocr
+  smoke_test
+}
+
+enum SmartReaderJobStatus {
+  queued
+  uploading
+  processing
+  polling
+  completed
+  failed
+  cancelled
+}
+
 enum FileStorageType {
   local
   s3
@@ -317,6 +335,10 @@ model File {
   mimeType                        String
   fileSize                        Int
   uploadedBy                      String              @db.Uuid
+  vnptHash                        String?
+  vnptFileType                    String?
+  vnptUploadedAt                  DateTime?
+  vnptUploadRawJson               Json?
   createdAt                       DateTime            @default(now())
   owner                           User                @relation("OwnedFiles", fields: [ownerId], references: [id], onDelete: Cascade)
   uploader                        User                @relation("UploadedFiles", fields: [uploadedBy], references: [id], onDelete: Restrict)
@@ -374,13 +396,21 @@ model EvidenceCard {
   id                      String   @id @default(uuid()) @db.Uuid
   evidenceId              String   @unique @db.Uuid
   ocrText                 String?
+  ocrLinesJson            Json?    @map("ocr_lines_json")
+  ocrParagraphsJson       Json?    @map("ocr_paragraphs_json")
+  ocrTablesJson           Json?    @map("ocr_tables_json")
   extractedFieldsJson     Json?
+  normalizedFieldsJson    Json?    @map("normalized_fields_json")
   warningsJson            Json?
   matchedEventId          String?  @db.Uuid
+  matchedParticipantId    String?  @map("matched_participant_id") @db.Uuid
   matchedKnowledgeItemIds Json?
   confidence              Float?
+  sourceEndpoint          String?  @map("source_endpoint")
+  smartreaderJobId        String?  @map("smartreader_job_id") @db.Uuid
   aiSummary               String?
   rawAiResponse           Json?
+  rawResponseJson         Json?    @map("raw_response_json")
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
   evidence                Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
@@ -595,6 +625,45 @@ model IndexingJob {
   @@index([targetId])
 }
 
+model SmartReaderJob {
+  id                      String               @id @default(uuid()) @db.Uuid
+  jobType                 SmartReaderJobType   @map("job_type")
+  provider                String               @default("vnpt_smartreader")
+  fileId                  String?              @map("file_id") @db.Uuid
+  evidenceId              String?              @map("evidence_id") @db.Uuid
+  eventId                 String?              @map("event_id") @db.Uuid
+  decisionImportId        String?              @map("decision_import_id") @db.Uuid
+  vnptHash                String?              @map("vnpt_hash")
+  vnptFileType            String?              @map("vnpt_file_type")
+  endpoint                String?
+  sessionId               String?              @map("session_id")
+  status                  SmartReaderJobStatus @default(queued)
+  progressProcessedPages  Int?                 @map("progress_processed_pages")
+  progressRemainingPages  Int?                 @map("progress_remaining_pages")
+  resultLink              String?              @map("result_link")
+  requestPayloadJson      Json?                @map("request_payload_json")
+  rawResponseJson         Json?                @map("raw_response_json")
+  redactedErrorJson       Json?                @map("redacted_error_json")
+  vnptMessage             String?              @map("vnpt_message")
+  vnptStatus              String?              @map("vnpt_status")
+  vnptStatusCode          Int?                 @map("vnpt_status_code")
+  vnptLogId               String?              @map("vnpt_log_id")
+  attemptCount            Int                  @default(0) @map("attempt_count")
+  lockedAt                DateTime?            @map("locked_at")
+  lockedBy                String?              @map("locked_by")
+  createdAt               DateTime             @default(now()) @map("created_at")
+  updatedAt               DateTime             @updatedAt @map("updated_at")
+  completedAt             DateTime?            @map("completed_at")
+
+  @@index([jobType, status])
+  @@index([fileId])
+  @@index([evidenceId])
+  @@index([eventId])
+  @@index([decisionImportId])
+  @@index([sessionId])
+  @@map("smartreader_jobs")
+}
+
 model AuditLog {
   id                  String             @id @default(uuid()) @db.Uuid
   actorId             String?            @db.Uuid
@@ -604,8 +673,17 @@ model AuditLog {
   targetId            String
   applicationId       String?            @db.Uuid
   collectiveProfileId String?            @db.Uuid
+  evidenceId          String?            @db.Uuid
+  eventId             String?            @db.Uuid
+  decisionImportId    String?            @db.Uuid
   beforeStateJson     Json?
   afterStateJson      Json?
+  beforeJson          Json?              @map("before_json")
+  afterJson           Json?              @map("after_json")
+  metadataJson        Json?
+  requestId           String?
+  ipAddress           String?
+  userAgent           String?
   note                String?
   createdAt           DateTime           @default(now())
   actor               User?              @relation(fields: [actorId], references: [id], onDelete: SetNull)
@@ -615,6 +693,10 @@ model AuditLog {
   @@index([actorId])
   @@index([applicationId])
   @@index([collectiveProfileId])
+  @@index([evidenceId])
+  @@index([eventId])
+  @@index([decisionImportId])
+  @@index([requestId])
   @@index([targetType, targetId])
 }
 

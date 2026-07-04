@@ -40,14 +40,14 @@ evidencesRouter.get(
 evidencesRouter.post(
   '/applications/:applicationId/evidences',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
+  requireRole(Role.student, Role.class_representative, Role.officer, Role.manager, Role.admin),
   validate({ body: createEvidenceSchema }),
   asyncHandler(createApplicationEvidence),
 );
 evidencesRouter.post(
   '/evidences/:id/files',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
+  requireRole(Role.student, Role.class_representative, Role.officer, Role.manager, Role.admin),
   uploadMiddleware.single('file'),
   asyncHandler(uploadEvidenceFile),
 );
