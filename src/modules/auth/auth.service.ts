@@ -54,6 +54,7 @@ export class AuthService {
       user: pickSafeUser(user),
       accessToken,
       refreshToken: refreshToken.token,
+      ...this.getAccessTokenMetadata(),
     };
   }
 
@@ -94,6 +95,7 @@ export class AuthService {
       user: pickSafeUser(freshUser ?? user),
       accessToken,
       refreshToken: refreshToken.token,
+      ...this.getAccessTokenMetadata(),
     };
   }
 
@@ -128,6 +130,7 @@ export class AuthService {
     return {
       accessToken,
       refreshToken: refreshToken.token,
+      ...this.getAccessTokenMetadata(),
     };
   }
 
@@ -144,5 +147,20 @@ export class AuthService {
     if (tokenRecord) {
       await this.authRepository.revokeRefreshToken(tokenRecord.id);
     }
+  }
+
+  private getAccessTokenMetadata() {
+    const tokenService = this.tokenService as TokenService & {
+      getAccessTokenExpiresInSeconds?: () => number;
+      getAccessTokenExpiresAt?: () => Date;
+    };
+    const expiresIn = tokenService.getAccessTokenExpiresInSeconds?.() ?? 30 * 60;
+    const expiresAt =
+      tokenService.getAccessTokenExpiresAt?.() ?? new Date(Date.now() + expiresIn * 1000);
+
+    return {
+      expiresIn,
+      accessTokenExpiresAt: expiresAt.toISOString(),
+    };
   }
 }

@@ -4,9 +4,13 @@ export type LoginResponseDto = {
   user: SafeUser;
   accessToken: string;
   refreshToken: string;
+  expiresIn: number;
+  accessTokenExpiresAt: string;
 };
 
 export type RefreshResponseDto = {
   accessToken: string;
   refreshToken: string;
+  expiresIn: number;
+  accessTokenExpiresAt: string;
 };

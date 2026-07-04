@@ -274,6 +274,8 @@ model Application {
 
   @@unique([studentId, schoolYear, applicationType])
   @@index([status, targetLevel])
+  @@index([targetLevel])
+  @@index([studentId])
   @@index([finalStatus, finalLevel])
   @@index([finalizedById])
   @@index([studentId, schoolYear])
@@ -549,6 +551,9 @@ model ReviewTask {
   evidences           ReviewTaskEvidence[]
 
   @@index([assignedOfficerId, status])
+  @@index([status])
+  @@index([criterion])
+  @@index([applicationId])
   @@index([applicationId, criterion])
   @@index([collectiveProfileId, criterion])
 }
@@ -633,6 +638,7 @@ model Notification {
   collectiveProfile   CollectiveProfile? @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
 
   @@index([userId, readAt])
+  @@index([userId, readAt, createdAt])
   @@index([applicationId])
   @@index([collectiveProfileId])
 }
