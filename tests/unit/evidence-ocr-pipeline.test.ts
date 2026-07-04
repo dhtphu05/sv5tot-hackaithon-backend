@@ -1,7 +1,16 @@
-import { Criterion, EvidenceSourceType, EvidenceStatus, IndexingStatus, Role } from '@prisma/client';
+import {
+  Criterion,
+  EvidenceSourceType,
+  EvidenceStatus,
+  IndexingStatus,
+  Role,
+} from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 import { scoreEvidenceConfidence } from '../../src/modules/evidences/evidence-confidence.scorer';
-import { extractEvidenceFields, normalizeExtractedFields } from '../../src/modules/evidences/evidence-field-extractor';
+import {
+  extractEvidenceFields,
+  normalizeExtractedFields,
+} from '../../src/modules/evidences/evidence-field-extractor';
 import { detectEvidenceMissingFields } from '../../src/modules/evidences/evidence-missing-fields.detector';
 import { normalizeEvidenceOcr } from '../../src/modules/evidences/evidence-ocr-normalizer';
 import { EvidencesService } from '../../src/modules/evidences/evidences.service';
@@ -43,7 +52,15 @@ describe('evidence OCR normalizer', () => {
 
     expect(
       normalizeEvidenceOcr(
-        { text: '', lines: [], paragraphs: [], tables: [], warnings: [], warningMessages: [], raw: {} },
+        {
+          text: '',
+          lines: [],
+          paragraphs: [],
+          tables: [],
+          warnings: [],
+          warningMessages: [],
+          raw: {},
+        },
         'ocrAdvanced:scan-table',
       ).warnings,
     ).toContain('ocr_empty_text');
@@ -130,6 +147,47 @@ describe('evidence OCR field extractor', () => {
     expect(fields.student_code).toBeUndefined();
     expect(fields.event_name).toContain('chiến dịch Mùa hè xanh');
     expect(fields.volunteer_days).toBe(3);
+  });
+
+  it('treats academic transcripts as transcript data, not event evidence', () => {
+    const fields = normalizeExtractedFields(
+      extractEvidenceFields({
+        evidenceName: 'Bảng điểm học tập',
+        ocr: {
+          text: [
+            'ĐẠI HỌC ĐÀ NẴNG',
+            'TRƯỜNG ĐẠI HỌC BÁCH KHOA',
+            'CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM',
+            'BẢNG ĐIỂM NĂM HỌC 2024 - 2025',
+            'Họ và tên: BÙI QUỐC ANH',
+            'Ngày sinh: 20/10/2005',
+            'Số thẻ sinh viên: 123230139',
+            'Lớp: 23PFIEV2',
+            'Ngành: Công nghệ thông tin',
+            'Chương trình đào tạo: Công nghệ phần mềm PFIEV K2023',
+            'Kết quả: Điểm TBCTL: 3.12; điểm rèn luyện: 87',
+            'Đà Nẵng, ngày 03 tháng 09 năm 2025',
+          ].join('\n'),
+          lines: [],
+          paragraphs: [],
+          tables: [],
+        },
+      }),
+    );
+
+    expect(fields).toMatchObject({
+      student_name: 'BÙI QUỐC ANH',
+      student_code: '123230139',
+      class_name: '23PFIEV2',
+      faculty: 'Công nghệ thông tin',
+      document_type: 'transcript',
+      issue_date: '2025-09-03',
+      gpa: 3.12,
+      conduct_score: 87,
+    });
+    expect(fields.event_name).toBeUndefined();
+    expect(fields.organizer).toBeUndefined();
+    expect(fields.organizer_level).toBeUndefined();
   });
 });
 

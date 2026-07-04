@@ -45,32 +45,39 @@ export function extractEvidenceFields(input: {
     /(?:Lớp|Chi\s*đoàn)\s*[:-]?\s*([A-Z0-9._-]{2,20})/i,
     /\b([0-9]{2}[A-ZĐ]{1,6}[0-9]?)\b/u,
   ]);
-  fields.faculty = matchFirst(text, [
-    /(?:Khoa|Viện)\s*[:-]?\s*([^\n,.;]{3,80})/i,
-    /(Khoa\s+[^\n,.;]{3,80})/i,
-  ]);
   fields.document_type = detectDocumentType(normalized);
   fields.certificate_type = fields.document_type;
-  fields.event_name = matchFirst(text, [
-    /(?:về\s*việc|tham\s*gia|hoàn\s*thành|đạt\s*giải)\s+([^\n.;]{6,140})/i,
-    /(?:cuộc\s*thi|chiến\s*dịch|chương\s*trình|hoạt\s*động)\s+([^\n.;]{6,140})/i,
-  ]) ?? input.evidenceName;
-  fields.organizer = matchFirst(text, [
-    /((?:Hội\s*Sinh\s*viên|Đoàn\s*Thanh\s*niên|Đoàn\s*TNCS|Ban\s*tổ\s*chức|Trường|Khoa|CLB)[^\n.;]{0,100})/i,
-  ]);
-  fields.organizer_level = detectOrganizerLevel(fields.organizer);
-  fields.issue_date = matchDate(text, [
-    /ngày\s+([0-9]{1,2})\s+tháng\s+([0-9]{1,2})\s+năm\s+([0-9]{4})/i,
-    /\b([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{4})\b/,
-  ]);
-  fields.activity_date = matchDate(text, [
-    /từ\s+ngày\s+([0-9]{1,2})\s+tháng\s+([0-9]{1,2})\s+năm\s+([0-9]{4})/i,
-    /ngày\s+([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{4})/i,
-  ]);
+  fields.faculty = matchFirst(text, [/(?:Khoa|Viện|Ngành)[ \t]*[:-]?[ \t]*([^\n,.;]{3,80})/i]);
+
+  const isTranscript = fields.document_type === 'transcript';
+  if (isTranscript) {
+    fields.issue_date = matchDate(text, [
+      /(?:Đà\s*Nẵng|Hà\s*Nội|TP\.?\s*HCM|Thành\s*phố\s*Hồ\s*Chí\s*Minh)[^\n]{0,60}ngày\s+([0-9]{1,2})\s+tháng\s+([0-9]{1,2})\s+năm\s+([0-9]{4})/i,
+      /(?:ngày\s*cấp|ngày\s*ký)\s*[:-]?\s*([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{4})/i,
+    ]);
+  } else {
+    fields.event_name =
+      matchFirst(text, [
+        /(?:về\s*việc|tham\s*gia|hoàn\s*thành|đạt\s*giải)\s+([^\n.;]{6,140})/i,
+        /(?:cuộc\s*thi|chiến\s*dịch|chương\s*trình|hoạt\s*động)\s+([^\n.;]{6,140})/i,
+      ]) ?? input.evidenceName;
+    fields.organizer = matchFirst(text, [
+      /((?:Hội\s*Sinh\s*viên|Đoàn\s*Thanh\s*niên|Đoàn\s*TNCS|Ban\s*tổ\s*chức|Trường|Khoa|CLB)[^\n.;]{0,100})/i,
+    ]);
+    fields.organizer_level = detectOrganizerLevel(fields.organizer);
+    fields.issue_date = matchDate(text, [
+      /ngày\s+([0-9]{1,2})\s+tháng\s+([0-9]{1,2})\s+năm\s+([0-9]{4})/i,
+      /\b([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{4})\b/,
+    ]);
+    fields.activity_date = matchDate(text, [
+      /từ\s+ngày\s+([0-9]{1,2})\s+tháng\s+([0-9]{1,2})\s+năm\s+([0-9]{4})/i,
+      /ngày\s+([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{4})/i,
+    ]);
+  }
   fields.award_level = matchFirst(text, [/(giải\s+(?:nhất|nhì|ba|khuyến\s*khích|A|B|C))/i]);
   fields.volunteer_days = normalized.includes('tinh nguyen')
-    ? numberFromMatch(text, /([0-9]{1,3})\s*(?:ngày|buổi)\s*(?:tình\s*nguyện|tham\s*gia)/i) ??
-      (normalized.includes('hien mau') ? 1 : undefined)
+    ? (numberFromMatch(text, /([0-9]{1,3})\s*(?:ngày|buổi)\s*(?:tình\s*nguyện|tham\s*gia)/i) ??
+      (normalized.includes('hien mau') ? 1 : undefined))
     : undefined;
   fields.language_score = matchFirst(text, [
     /\b(IELTS\s*[0-9](?:\.[0-9])?)\b/i,
@@ -78,8 +85,21 @@ export function extractEvidenceFields(input: {
     /\b(TOEFL\s*[0-9]{2,3})\b/i,
     /\b(A2|B1|B2|C1|C2)\b/i,
   ]);
-  fields.gpa = numberFromMatch(text, /\b(?:GPA|điểm\s*trung\s*bình)\s*[:-]?\s*([0-9](?:\.[0-9]{1,2})?)\s*\/\s*(?:4|10)\b/i);
-  fields.conduct_score = numberFromMatch(text, /\b(?:điểm\s*rèn\s*luyện|conduct)\s*[:-]?\s*([0-9]{2,3})\b/i);
+  fields.gpa =
+    numberFromMatch(
+      text,
+      /\b(?:GPA|điểm\s*trung\s*bình)\s*[:-]?\s*([0-9](?:[.,][0-9]{1,2})?)\s*\/\s*(?:4|10)\b/i,
+    ) ??
+    (isTranscript
+      ? numberFromMatch(
+          text,
+          /\b(?:điểm\s*)?(?:TBC|TBCTL|trung\s*bình\s*chung|trung\s*bình\s*tích\s*lũy)[^\n:;]{0,40}[:;]?\s*([0-4](?:[.,][0-9]{1,2})?)\b/i,
+        )
+      : undefined);
+  fields.conduct_score = numberFromMatch(
+    text,
+    /(?:điểm\s*rèn\s*luyện|conduct)\s*[:-]?\s*([0-9]{2,3})\b/i,
+  );
 
   return removeEmpty(fields);
 }
@@ -96,7 +116,9 @@ export function normalizeExtractedFields(fields: EvidenceExtractedFields): Evide
   });
 }
 
-function buildSearchText(ocr: Pick<SmartReaderOcrResult, 'text' | 'lines' | 'paragraphs' | 'tables'>): string {
+function buildSearchText(
+  ocr: Pick<SmartReaderOcrResult, 'text' | 'lines' | 'paragraphs' | 'tables'>,
+): string {
   const tableText = ocr.tables
     .flatMap((table) => table.rows)
     .map((row) => (Array.isArray(row) ? row.join(' ') : JSON.stringify(row)))
@@ -151,7 +173,8 @@ function normalizeVietnameseDate(numbers: number[]): string | undefined {
 function detectDocumentType(normalized: string): string | undefined {
   if (normalized.includes('quyet dinh')) return 'decision';
   if (normalized.includes('giay khen')) return 'award';
-  if (normalized.includes('giay chung nhan') || normalized.includes('chung nhan')) return 'certificate';
+  if (normalized.includes('giay chung nhan') || normalized.includes('chung nhan'))
+    return 'certificate';
   if (normalized.includes('bang diem')) return 'transcript';
   if (/(ielts|toeic|toefl|\ba2\b|\bb1\b|\bb2\b|\bc1\b|\bc2\b)/i.test(normalized)) {
     return 'language_certificate';
@@ -181,6 +204,7 @@ function normalizeText(value: string): string {
   return value
     .toLowerCase()
     .normalize('NFD')
+    .replace(/đ/g, 'd')
     .replace(/[\u0300-\u036f]/g, '');
 }
 
@@ -194,6 +218,8 @@ function escapeRegExp(value: string): string {
 
 function removeEmpty<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
-    Object.entries(value).filter(([, nested]) => nested !== undefined && nested !== null && nested !== ''),
+    Object.entries(value).filter(
+      ([, nested]) => nested !== undefined && nested !== null && nested !== '',
+    ),
   ) as T;
 }
