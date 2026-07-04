@@ -52,6 +52,8 @@ const rawEnvSchema = z.object({
   R2_SECRET_ACCESS_KEY: z.string().optional(),
   VNPT_MODE: z.enum(['mock', 'live']).default('mock'),
   VNPT_ENABLED: booleanFromEnv,
+  VNPT_REQUIRE_REAL_IN_PIPELINE: booleanFromEnv,
+  VNPT_ALLOW_MOCK_RUNTIME: booleanFromEnv,
   VNPT_BASE_URL: z.string().url().default('https://api.idg.vnpt.vn'),
   VNPT_API_KEY: z.string().optional().default(''),
   VNPT_ACCESS_TOKEN: z.string().optional().default(''),
@@ -120,12 +122,27 @@ if (!jwtAccessSecret || !jwtRefreshSecret) {
   throw new Error('Invalid environment configuration: JWT_SECRET or both JWT_ACCESS_SECRET/JWT_REFRESH_SECRET are required');
 }
 
+const vnptEnabled =
+  process.env.VNPT_ENABLED === undefined ? true : rawEnv.VNPT_ENABLED;
+const vnptRequireRealInPipeline =
+  process.env.VNPT_REQUIRE_REAL_IN_PIPELINE === undefined
+    ? true
+    : rawEnv.VNPT_REQUIRE_REAL_IN_PIPELINE;
+const vnptAllowMockRuntime =
+  process.env.VNPT_ALLOW_MOCK_RUNTIME === undefined ? false : rawEnv.VNPT_ALLOW_MOCK_RUNTIME;
+
 if (
-  rawEnv.VNPT_ENABLED &&
+  vnptEnabled &&
   (!rawEnv.VNPT_ACCESS_TOKEN || !rawEnv.VNPT_TOKEN_ID || !rawEnv.VNPT_TOKEN_KEY)
 ) {
   throw new Error(
     'Invalid environment configuration: VNPT_ACCESS_TOKEN, VNPT_TOKEN_ID, and VNPT_TOKEN_KEY are required when VNPT_ENABLED=true',
+  );
+}
+
+if (vnptRequireRealInPipeline && vnptAllowMockRuntime) {
+  throw new Error(
+    'Invalid environment configuration: VNPT_REQUIRE_REAL_IN_PIPELINE=true cannot be combined with VNPT_ALLOW_MOCK_RUNTIME=true',
   );
 }
 
@@ -156,5 +173,8 @@ export const env = {
     process.env.SMARTREADER_SMOKE_AUDIT_ENABLED === undefined
       ? false
       : rawEnv.SMARTREADER_SMOKE_AUDIT_ENABLED,
+  VNPT_ENABLED: vnptEnabled,
+  VNPT_REQUIRE_REAL_IN_PIPELINE: vnptRequireRealInPipeline,
+  VNPT_ALLOW_MOCK_RUNTIME: vnptAllowMockRuntime,
 };
 export type Env = typeof env;

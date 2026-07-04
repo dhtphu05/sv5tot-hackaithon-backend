@@ -15,6 +15,11 @@ export async function runJob(req: Request, res: Response): Promise<void> {
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function retryJob(req: Request, res: Response): Promise<void> {
+  const data = await jobsService.retryJob(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function runWorkerTick(req: Request, res: Response): Promise<void> {
   const data = await jobsService.runWorkerTick();
   sendSuccess(res, data, { requestId: req.requestId });

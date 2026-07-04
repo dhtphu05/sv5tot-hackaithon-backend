@@ -8,6 +8,12 @@ export class SmartReaderError extends AppError {
   }
 }
 
+export class SmartReaderConfigError extends AppError {
+  constructor(message: string, details?: unknown, statusCode = 500) {
+    super(statusCode, ErrorCodes.SMARTREADER_CONFIG_INVALID, message, redactSmartReaderSecrets(details));
+  }
+}
+
 export class SmartReaderResponseError extends AppError {
   constructor(message: string, details?: unknown, statusCode = 502) {
     super(statusCode, ErrorCodes.SMARTREADER_RESPONSE_INVALID, message, redactSmartReaderSecrets(details));

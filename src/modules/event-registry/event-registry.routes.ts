@@ -11,10 +11,12 @@ import {
   createEvent,
   deleteEvent,
   getEvent,
+  importEventAsEvidence,
   importEventToApplication,
   importParticipants,
   listEvents,
   listParticipants,
+  searchEvents,
   startRosterIndexing,
   updateEvent,
   uploadRosterFile,
@@ -23,16 +25,32 @@ import {
   checkParticipantSchema,
   confirmIndexSchema,
   createEventSchema,
+  importAsEvidenceSchema,
   importParticipantsJsonSchema,
   importToApplicationSchema,
   listEventsQuerySchema,
   participantsQuerySchema,
+  searchEventsQuerySchema,
   startRosterIndexingSchema,
   updateEventSchema,
 } from './event-registry.validation';
 
 export const eventRegistryRouter = Router();
 
+eventRegistryRouter.get(
+  '/search',
+  requireAuth,
+  requireRole(
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.admin,
+  ),
+  validate({ query: searchEventsQuerySchema }),
+  asyncHandler(searchEvents),
+);
 eventRegistryRouter.get(
   '/',
   requireAuth,
@@ -128,6 +146,19 @@ eventRegistryRouter.post(
   requireRole(Role.officer, Role.manager, Role.admin),
   validate({ body: importParticipantsJsonSchema }),
   asyncHandler(importParticipants),
+);
+eventRegistryRouter.post(
+  '/:id/import-as-evidence',
+  requireAuth,
+  requireRole(
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.admin,
+  ),
+  validate({ body: importAsEvidenceSchema }),
+  asyncHandler(importEventAsEvidence),
 );
 eventRegistryRouter.post(
   '/:id/import-to-application',

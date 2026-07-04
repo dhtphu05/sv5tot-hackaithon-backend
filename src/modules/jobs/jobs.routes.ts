@@ -5,7 +5,7 @@ import { env } from '../../config/env';
 import { requireAuth } from '../../middlewares/auth.middleware';
 import { requireRole } from '../../middlewares/require-role.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
-import { getJob, runJob, runWorkerTick } from './jobs.controller';
+import { getJob, retryJob, runJob, runWorkerTick } from './jobs.controller';
 
 export const jobsRouter = Router();
 
@@ -21,6 +21,12 @@ jobsRouter.post(
   requireAuth,
   requireRole(Role.manager, Role.admin),
   asyncHandler(runJob),
+);
+jobsRouter.post(
+  '/:id/retry',
+  requireAuth,
+  requireRole(Role.student, Role.class_representative, Role.officer, Role.manager, Role.admin),
+  asyncHandler(retryJob),
 );
 
 function requireWorkerAccess(req: Request, res: Response, next: NextFunction): void {

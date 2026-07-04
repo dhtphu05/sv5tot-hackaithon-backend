@@ -15,6 +15,8 @@ VNPT_CLIENT_SESSION=00-14-22-01-23-45-1548211589291
 VNPT_DEFAULT_TOKEN=5tot-backend
 VNPT_TIMEOUT_MS=120000
 VNPT_RETRY_MAX=2
+VNPT_REQUIRE_REAL_IN_PIPELINE=true
+VNPT_ALLOW_MOCK_RUNTIME=false
 
 VNPT_UPLOAD_PATH=/file-service/v1/addFile
 VNPT_OCR_BASIC_PATH=/rpa-service/aidigdoc/v1/ocr/scan
@@ -31,11 +33,15 @@ SMARTREADER_SMOKE_AUDIT_ENABLED=false
 SMARTREADER_ASYNC_MAX_POLLS=60
 ```
 
-## 2. Mock vs Real
+## 2. Runtime Real vs Test Mock
 
-- `VNPT_ENABLED=false`: backend uses `MockSmartReaderAdapter`.
+- Evidence OCR runtime uses real VNPT only.
 - `VNPT_ENABLED=true`: backend uses the real VNPT SmartReader client and requires `VNPT_ACCESS_TOKEN`, `VNPT_TOKEN_ID`, and `VNPT_TOKEN_KEY`.
+- `VNPT_REQUIRE_REAL_IN_PIPELINE=true`: prevents runtime fallback to mock for Evidence OCR.
+- `VNPT_ALLOW_MOCK_RUNTIME=false`: default runtime policy. Keep it false in local dev, staging, and production.
 - Existing `VNPT_MODE=mock|live` remains accepted for backward compatibility, but new SmartReader code switches on `VNPT_ENABLED`.
+- `MockSmartReaderAdapterForTests` is only for isolated unit tests. To use it in tests, set both `VNPT_REQUIRE_REAL_IN_PIPELINE=false` and `VNPT_ALLOW_MOCK_RUNTIME=true` explicitly.
+- `VNPT_ENABLED=false` no longer means "safe mock runtime" for the shared backend pipeline. With real pipeline required, it raises config/runtime error instead of silently processing evidence with fake OCR.
 
 ## 3. VNPT Headers
 
@@ -102,8 +108,11 @@ VNPT async completion does not depend on `object.status`. The mapper uses:
 
 - Started: `object.session_id` exists.
 - Completed: `object.link` exists. The link is usually a signed JSON export URL and can expire.
+- Completed: `object.result_link` is also accepted as a result URL.
+- Status: top-level `status`, top-level `statusCode`, and `object.status` are parsed when present.
 - Processing: `object.warning` or `object.warnings` contains `request_dang_trong_qua_trinh_xu_ly`, or `object.warning_messages` contains the Vietnamese processing message.
 - Progress: `object.num_of_processed_page` and `object.num_of_remaining_pages`.
+- Page count: `object.num_of_pages` is persisted when present.
 - Unknown OK: response status is OK/200 but the object shape has no known async marker; inspect the saved tmp poll file.
 
 Some VNPT docs mention `scan_table`, while Postman examples use `scan-table`. This backend keeps all async paths configurable by env and does not hardcode either variant outside defaults. If async start/result/cancel returns 404, try switching the relevant env path from `/scan-table` to `/scan_table`, or the reverse.
@@ -207,6 +216,12 @@ Full raw response is only returned with `?debug=true` and admin role.
 
 ## 13. Common Errors
 
+- `VNPT_CONFIG_MISSING`: runtime VNPT is disabled or required credentials are missing. Evidence OCR must not fall back to mock.
+- `VNPT_AUTH_FAILED`: VNPT returned 401/403. Check `VNPT_ACCESS_TOKEN`, `VNPT_TOKEN_ID`, `VNPT_TOKEN_KEY`, and token expiry.
+- `VNPT_UPLOAD_FAILED`: file upload to VNPT failed. Retry job after checking file path/storage and VNPT upload endpoint.
+- `VNPT_OCR_FAILED`: OCR endpoint failed after request/retry handling.
+- `VNPT_TIMEOUT`: request timeout or async polling exceeded max polls/time budget.
+- `OCR_EMPTY_TEXT`: VNPT returned no usable OCR text; route evidence to manual review or upload a clearer file.
 - `401`: access token is wrong or expired.
 - Missing `Token-id` or `Token-key`: VNPT auth fails even when bearer token is valid.
 - Multipart upload fails: check that the field name is `file` and do not set a manual boundary.
@@ -215,6 +230,7 @@ Full raw response is only returned with `?debug=true` and admin role.
 - Endpoint path is wrong: check the env path for `scan_table` vs `scan-table`.
 - OCR response pending: keep polling async result until completed/failed/timeout. The smoke script stops at `VNPT_TIMEOUT_MS` or `--max-polls`.
 - Async result has `object.link`: treat the job as completed and use `resultLink`.
+- Async result has `object.result_link`: treat the job as completed and use `resultLink`.
 - Async result has `object.num_of_processed_page` and `object.num_of_remaining_pages` but no status: treat it as processing and keep polling.
 - Async result has warning/message like request is being processed: treat it as polling, not unknown.
 - Old `status=unknown` smoke output means the mapper did not understand the response shape. Open `tmp/smartreader-smoke/latest-async*.json` and inspect `object` keys before concluding VNPT failed.
@@ -230,7 +246,19 @@ npm run smartreader:smoke -- --file ./fixtures/smartreader/roster-multipage.pdf 
 
 Smoke audit is disabled by default to avoid inserting an audit row on every diagnostic run. Set `SMARTREADER_SMOKE_AUDIT_ENABLED=true` only when you explicitly need start/completed/failed smoke audit records.
 
-## 14. Smoke Test Result Log
+## 14. Evidence OCR Runtime Troubleshooting
+
+- `GET /api/jobs/:id` shows `provider`, SmartReader progress, retryability, and `uxStatus`.
+- `GET /api/evidences/:id/card` shows `evidence`, `card`, `job`, `uxStatus`, and compact `auditSummary`.
+- `GET /api/evidences/:id/audit` returns the evidence OCR timeline for owner/staff views.
+- Raw VNPT response fields are hidden from student responses. They are only returned to privileged roles when stored.
+- `POST /api/jobs/:id/retry` is available only for failed jobs. It queues the same job again and writes `EVIDENCE_INDEXING_RETRIED`.
+- Worker defaults to advanced scan-table. Async scan-table is reserved for large PDFs and stops at `SMARTREADER_ASYNC_MAX_POLLS`; it never polls forever.
+- Decision Import roster OCR uses async scan-table, writes one `SMARTREADER_OCR_POLLING_SUMMARY`, and does not insert an audit record for every poll.
+- If a job fails immediately with config error, check the process env first. The adapter factory intentionally refuses mock fallback when `VNPT_REQUIRE_REAL_IN_PIPELINE=true`.
+- If uploaded evidence is stored in R2/S3, worker downloads it through a signed read URL into a temp file before calling VNPT upload. A missing local file path should not force mock fallback.
+
+## 15. Smoke Test Result Log
 
 Real VNPT smoke was not executed during this implementation because credentials and fixture files are environment-specific. Fill this section after running with local secrets:
 

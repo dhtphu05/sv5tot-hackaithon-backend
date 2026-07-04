@@ -25,6 +25,7 @@ import {
 } from '../applications/application.helpers';
 import { AuditService } from '../audit/audit.service';
 import { JobsService } from '../jobs/jobs.service';
+import { mapEvidenceUxStatus } from './evidence-ux-status.mapper';
 import { EvidencesRepository } from './evidences.repository';
 import type {
   CreateEvidenceInput,
@@ -172,6 +173,33 @@ export class EvidencesService {
     });
 
     return this.getRequiredEvidenceDto(evidence.id, user);
+  }
+
+  async get(user: AuthenticatedUser, evidenceId: string) {
+    const evidence = await this.getRequiredEvidence(evidenceId);
+    this.assertCanViewEvidence(user, evidence);
+    return this.toEvidenceDto(evidence, user);
+  }
+
+  async getAudit(user: AuthenticatedUser, evidenceId: string) {
+    const evidence = await this.getRequiredEvidence(evidenceId);
+    this.assertCanViewEvidence(user, evidence);
+
+    const jobIds = await this.findEvidenceJobIds(evidence.id);
+    const logs = await this.findEvidenceAuditLogs(evidence.id, jobIds);
+
+    return {
+      evidenceId: evidence.id,
+      items: logs.map((log) => ({
+        id: log.id,
+        action: log.action,
+        targetType: log.targetType,
+        targetId: log.targetId,
+        actorRole: log.actorRole,
+        metadataJson: log.metadataJson,
+        createdAt: log.createdAt,
+      })),
+    };
   }
 
   async delete(user: AuthenticatedUser, evidenceId: string) {
@@ -417,7 +445,7 @@ export class EvidencesService {
         targetType: 'file',
         targetId: fileRecord.id,
         applicationId: evidence.applicationId,
-          afterStateJson: { filePath: fileRecord.filePath, mimeType: fileRecord.mimeType },
+        afterStateJson: { filePath: fileRecord.filePath, mimeType: fileRecord.mimeType },
       });
 
       await this.auditService.log({
@@ -485,8 +513,9 @@ export class EvidencesService {
       },
     });
 
+    const updatedEvidence = await this.getRequiredEvidence(evidence.id);
     return {
-      evidence: this.toEvidenceDto(evidence, user),
+      evidence: this.toEvidenceDto(updatedEvidence, user),
       job,
       jobId: job.id,
       mode: reused ? 'ocr_job_reused' : 'ocr_queued',
@@ -498,53 +527,61 @@ export class EvidencesService {
     const evidence = await this.getRequiredEvidence(evidenceId);
     this.assertCanViewEvidence(user, evidence);
 
-    if (!evidence.evidenceCard) {
-      return {
-        card: {
-          id: 'mock-card-' + evidence.id,
-          ocrText: "Minh chứng được xác nhận thủ công.",
-          extractedFieldsJson: {},
-          warningsJson: [],
-          matchedEventId: evidence.eventId,
-          matchedKnowledgeItemIds: [],
-          confidence: 1.0,
-          aiSummary: "Minh chứng xét duyệt thủ công không dùng AI trích xuất.",
-          createdAt: evidence.createdAt,
-          updatedAt: evidence.updatedAt,
-        },
-        indexingStatus: IndexingStatus.indexed,
-      };
-    }
-
     const isPrivileged =
       user.role === Role.officer ||
       user.role === Role.manager ||
       user.role === Role.committee ||
       user.role === Role.admin;
+    const latestJob = await this.findLatestEvidenceJob(evidence.id);
+    const latestSmartReaderJob = await this.findLatestSmartReaderJob(evidence.id);
+    const auditSummary = await this.getEvidenceAuditSummary(evidence.id);
+    const uxStatus = mapEvidenceUxStatus({
+      evidenceStatus: evidence.status,
+      indexingStatus: evidence.indexingStatus,
+      jobStatus: latestJob?.status,
+      smartReaderStatus: latestSmartReaderJob?.status,
+      hasCard: !!evidence.evidenceCard,
+      confidence: evidence.confidence,
+    });
 
     return {
-      card: {
-        id: evidence.evidenceCard.id,
-        ocrText: evidence.evidenceCard.ocrText,
-        ocrLinesJson: evidence.evidenceCard.ocrLinesJson,
-        ocrParagraphsJson: evidence.evidenceCard.ocrParagraphsJson,
-        ocrTablesJson: evidence.evidenceCard.ocrTablesJson,
-        extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
-        normalizedFieldsJson: evidence.evidenceCard.normalizedFieldsJson,
-        warningsJson: evidence.evidenceCard.warningsJson,
-        matchedEventId: evidence.evidenceCard.matchedEventId,
-        matchedParticipantId: evidence.evidenceCard.matchedParticipantId,
-        matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
-        confidence: evidence.evidenceCard.confidence,
-        sourceEndpoint: evidence.evidenceCard.sourceEndpoint,
-        smartreaderJobId: evidence.evidenceCard.smartreaderJobId,
-        aiSummary: evidence.evidenceCard.aiSummary,
-        rawAiResponse: isPrivileged ? evidence.evidenceCard.rawAiResponse : undefined,
-        rawResponseJson: isPrivileged ? evidence.evidenceCard.rawResponseJson : undefined,
-        createdAt: evidence.evidenceCard.createdAt,
-        updatedAt: evidence.evidenceCard.updatedAt,
-      },
+      evidence: this.toEvidenceDto(evidence, user),
+      card: evidence.evidenceCard
+        ? {
+            id: evidence.evidenceCard.id,
+            ocrText: evidence.evidenceCard.ocrText,
+            ocrLinesJson: evidence.evidenceCard.ocrLinesJson,
+            ocrParagraphsJson: evidence.evidenceCard.ocrParagraphsJson,
+            ocrTablesJson: evidence.evidenceCard.ocrTablesJson,
+            extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
+            normalizedFieldsJson: evidence.evidenceCard.normalizedFieldsJson,
+            warningsJson: evidence.evidenceCard.warningsJson,
+            matchedEventId: evidence.evidenceCard.matchedEventId,
+            matchedParticipantId: evidence.evidenceCard.matchedParticipantId,
+            matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
+            confidence: evidence.evidenceCard.confidence,
+            sourceEndpoint: evidence.evidenceCard.sourceEndpoint,
+            smartreaderJobId: evidence.evidenceCard.smartreaderJobId,
+            aiSummary: evidence.evidenceCard.aiSummary,
+            rawAiResponse: isPrivileged ? evidence.evidenceCard.rawAiResponse : undefined,
+            rawResponseJson: isPrivileged ? evidence.evidenceCard.rawResponseJson : undefined,
+            createdAt: evidence.evidenceCard.createdAt,
+            updatedAt: evidence.evidenceCard.updatedAt,
+          }
+        : null,
+      job: latestJob
+        ? {
+            id: latestJob.id,
+            status: latestJob.status,
+            attempts: latestJob.attempts,
+            errorMessage: latestJob.errorMessage,
+            resultJson: latestJob.resultJson,
+            retryable: latestJob.status === JobStatus.failed,
+          }
+        : null,
       indexingStatus: evidence.indexingStatus,
+      uxStatus,
+      auditSummary,
     };
   }
 
@@ -594,6 +631,35 @@ export class EvidencesService {
     this.assertCanViewApplication(user, evidence.application);
   }
 
+  private findLatestEvidenceJob(evidenceId: string) {
+    return this.evidencesRepository.findLatestEvidenceJob?.(evidenceId) ?? Promise.resolve(null);
+  }
+
+  private findLatestSmartReaderJob(evidenceId: string) {
+    return this.evidencesRepository.findLatestSmartReaderJob?.(evidenceId) ?? Promise.resolve(null);
+  }
+
+  private findEvidenceJobIds(evidenceId: string) {
+    return this.evidencesRepository.findEvidenceJobIds?.(evidenceId) ?? Promise.resolve([]);
+  }
+
+  private findEvidenceAuditLogs(evidenceId: string, jobIds: string[]) {
+    return this.evidencesRepository.findEvidenceAuditLogs?.(evidenceId, jobIds) ?? Promise.resolve([]);
+  }
+
+  private async getEvidenceAuditSummary(evidenceId: string) {
+    const logs = await (this.evidencesRepository.findEvidenceAuditSummaryLogs?.(evidenceId) ?? Promise.resolve([]));
+    return {
+      total: logs.length,
+      latestAction: logs[0]?.action ?? null,
+      latestAt: logs[0]?.createdAt ?? null,
+      actions: logs.reduce<Record<string, number>>((acc, log) => {
+        acc[log.action] = (acc[log.action] ?? 0) + 1;
+        return acc;
+      }, {}),
+    };
+  }
+
   private toEvidenceDto(
     evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
     _user: AuthenticatedUser,
@@ -607,6 +673,12 @@ export class EvidencesService {
       status: evidence.status,
       indexingStatus: evidence.indexingStatus,
       confidence: evidence.confidence,
+      uxStatus: mapEvidenceUxStatus({
+        evidenceStatus: evidence.status,
+        indexingStatus: evidence.indexingStatus,
+        hasCard: !!evidence.evidenceCard,
+        confidence: evidence.confidence,
+      }),
       createdAt: evidence.createdAt,
       updatedAt: evidence.updatedAt,
       files: evidence.evidenceFiles.map((link) => ({

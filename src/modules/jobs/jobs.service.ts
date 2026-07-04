@@ -1,12 +1,15 @@
 // Owns indexing and async job visibility plus processor registration.
-import { JobStatus, JobType, Role, type IndexingJob } from '@prisma/client';
+import { DecisionImportStatus, EvidenceStatus, IndexingStatus, JobStatus, JobType, Prisma, Role, type IndexingJob } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { mapEvidenceUxStatus } from '../evidences/evidence-ux-status.mapper';
 import { JobsRepository } from './jobs.repository';
+import { processDecisionMetadataJob } from './processors/decision-metadata.processor';
+import { processDecisionRosterOcrJob } from './processors/decision-roster-ocr.processor';
 import { processEventRosterIndexingJob } from './processors/event-roster-indexing.processor';
 import { processEvidenceOcrJob } from './processors/evidence-ocr.processor';
 
@@ -30,7 +33,7 @@ export class JobsService {
   async getJob(user: AuthenticatedUser, jobId: string) {
     const job = await this.getRequiredJob(jobId);
     await this.assertCanViewJob(user, job);
-    return job;
+    return this.toJobDto(job);
   }
 
   async runJob(user: AuthenticatedUser, jobId: string) {
@@ -41,6 +44,63 @@ export class JobsService {
     }
 
     return runIndexingJob(job.id);
+  }
+
+  async retryJob(user: AuthenticatedUser, jobId: string) {
+    const job = await this.getRequiredJob(jobId);
+    await this.assertCanViewJob(user, job);
+
+    if (job.status !== JobStatus.failed) {
+      throw new AppError(409, ErrorCodes.CONFLICT, 'Only failed jobs can be retried');
+    }
+
+    const evidence = await prisma.evidence.findUnique({
+      where: { id: job.targetId },
+      include: {
+        application: { include: { student: true } },
+        collectiveProfile: { include: { representative: true } },
+      },
+    });
+
+    const retried = await prisma.$transaction(async (tx) => {
+      const updated = await tx.indexingJob.update({
+        where: { id: job.id },
+        data: {
+          status: JobStatus.queued,
+          errorMessage: null,
+          resultJson: Prisma.JsonNull,
+        },
+      });
+
+      if (evidence) {
+        await tx.evidence.update({
+          where: { id: evidence.id },
+          data: {
+            status: EvidenceStatus.pending_indexing,
+            indexingStatus: IndexingStatus.pending_indexing,
+          },
+        });
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: auditActions.EVIDENCE_INDEXING_RETRIED,
+          targetType: 'indexing_job',
+          targetId: updated.id,
+          applicationId: evidence.applicationId ?? undefined,
+          collectiveProfileId: evidence.collectiveProfileId ?? undefined,
+          afterStateJson: {
+            jobId: updated.id,
+            previousStatus: job.status,
+            nextStatus: updated.status,
+            attempts: updated.attempts,
+          },
+        });
+      }
+
+      return updated;
+    });
+
+    return this.toJobDto(retried);
   }
 
   async runWorkerTick() {
@@ -76,11 +136,58 @@ export class JobsService {
       include: { application: true, collectiveProfile: true },
     });
 
+    const decisionImport = await prisma.decisionImport.findUnique({ where: { id: job.targetId } });
+    if (decisionImport) {
+      return;
+    }
+
     const ownerId =
       evidence?.application?.studentId ?? evidence?.collectiveProfile?.representativeId;
     if (!evidence || ownerId !== user.id) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Job belongs to another user');
     }
+  }
+
+  private async toJobDto(job: IndexingJob) {
+    const evidence = await prisma.evidence.findUnique({
+      where: { id: job.targetId },
+      include: { evidenceCard: true },
+    });
+    const smartReaderJob = await prisma.smartReaderJob.findFirst({
+      where: { evidenceId: job.targetId },
+      orderBy: { createdAt: 'desc' },
+    });
+    const uxStatus = evidence
+      ? mapEvidenceUxStatus({
+          evidenceStatus: evidence.status,
+          indexingStatus: evidence.indexingStatus,
+          jobStatus: job.status,
+          smartReaderStatus: smartReaderJob?.status,
+          hasCard: !!evidence.evidenceCard,
+          confidence: evidence.confidence,
+        })
+      : null;
+
+    return {
+      id: job.id,
+      jobType: job.jobType,
+      targetId: job.targetId,
+      status: job.status,
+      attempts: job.attempts,
+      errorMessage: job.errorMessage,
+      resultJson: job.resultJson,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+      provider: smartReaderJob?.provider ?? (job.jobType === JobType.evidence_ocr ? 'vnpt_smartreader' : null),
+      smartreaderJobId: smartReaderJob?.id ?? null,
+      progress: {
+        processedPages: smartReaderJob?.progressProcessedPages ?? null,
+        remainingPages: smartReaderJob?.progressRemainingPages ?? null,
+        status: smartReaderJob?.status ?? null,
+      },
+      retryable: job.status === JobStatus.failed,
+      uxStatus,
+    };
   }
 }
 
@@ -116,6 +223,20 @@ export async function runIndexingJob(jobId: string) {
     await createApplicationAudit(prisma, {
       actorId: actor?.id,
       actorRole: actor?.role,
+      action: auditActions.OCR_JOB_PROCESSING,
+      targetType: 'indexing_job',
+      targetId: processingJob.id,
+      applicationId: evidence.applicationId ?? undefined,
+      collectiveProfileId: evidence.collectiveProfileId ?? undefined,
+      afterStateJson: {
+        jobId: processingJob.id,
+        jobType: processingJob.jobType,
+        attempts: processingJob.attempts,
+      },
+    });
+    await createApplicationAudit(prisma, {
+      actorId: actor?.id,
+      actorRole: actor?.role,
       action: auditActions.EVIDENCE_INDEXING_STARTED,
       targetType: 'evidence',
       targetId: evidence.id,
@@ -130,7 +251,11 @@ export async function runIndexingJob(jobId: string) {
         ? await processEvidenceOcrJob(processingJob)
         : processingJob.jobType === JobType.event_roster_indexing
           ? await processEventRosterIndexingJob(processingJob)
-          : { message: 'Unsupported job type' };
+          : processingJob.jobType === JobType.decision_metadata
+            ? await processDecisionMetadataJob(processingJob)
+            : processingJob.jobType === JobType.decision_roster_ocr
+              ? await processDecisionRosterOcrJob(processingJob)
+              : { message: 'Unsupported job type' };
 
     const completed = await prisma.indexingJob.update({
       where: { id: processingJob.id },
@@ -154,22 +279,41 @@ export async function runIndexingJob(jobId: string) {
       });
     }
 
+    if (processingJob.jobType === JobType.decision_metadata || processingJob.jobType === JobType.decision_roster_ocr) {
+      await prisma.decisionImport.update({
+        where: { id: processingJob.targetId },
+        data: {
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          lastUserMessage: null,
+        },
+      }).catch(() => undefined);
+    }
+
     return completed;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown job failure';
+    const code = error instanceof AppError ? error.code : ErrorCodes.JOB_FAILED;
+    const retryable = error instanceof AppError
+      ? Boolean((error.details as { retryable?: boolean } | undefined)?.retryable)
+      : true;
     const failed = await prisma.indexingJob.update({
       where: { id: processingJob.id },
       data: {
         status: JobStatus.failed,
         errorMessage: message,
+        resultJson: { code, retryable, message },
       },
     });
 
     if (evidence) {
       const actor = evidence.application?.student ?? evidence.collectiveProfile?.representative;
+      const manualReview = code === ErrorCodes.OCR_EMPTY_TEXT;
       await prisma.evidence.update({
         where: { id: evidence.id },
-        data: { indexingStatus: 'failed' },
+        data: manualReview
+          ? { indexingStatus: IndexingStatus.needs_manual_review, status: EvidenceStatus.needs_supplement }
+          : { indexingStatus: IndexingStatus.failed },
       });
       await createApplicationAudit(prisma, {
         actorId: actor?.id,
@@ -179,7 +323,37 @@ export async function runIndexingJob(jobId: string) {
         targetId: evidence.id,
         applicationId: evidence.applicationId ?? undefined,
         collectiveProfileId: evidence.collectiveProfileId ?? undefined,
-        afterStateJson: { error: message },
+        afterStateJson: { code, retryable, error: message },
+      });
+    }
+
+    if (processingJob.jobType === JobType.decision_metadata || processingJob.jobType === JobType.decision_roster_ocr) {
+      const decisionFailureData =
+        processingJob.jobType === JobType.decision_metadata
+          ? {
+              status: DecisionImportStatus.ocr_processing,
+              lastErrorCode: code,
+              lastErrorMessage: message,
+              lastUserMessage:
+                'Không trích xuất được metadata văn bản hành chính từ VNPT; vẫn tiếp tục OCR danh sách.',
+              processingStep: 'metadata_failed_roster_pending',
+            }
+          : {
+              status: DecisionImportStatus.failed,
+              lastErrorCode: code,
+              lastErrorMessage: message,
+              lastUserMessage: message,
+              processingStep: 'failed',
+            };
+      await prisma.decisionImport.update({
+        where: { id: processingJob.targetId },
+        data: decisionFailureData,
+      }).catch(() => undefined);
+      await createApplicationAudit(prisma, {
+        action: auditActions.SMARTREADER_OCR_FAILED,
+        targetType: 'decision_import',
+        targetId: processingJob.targetId,
+        afterStateJson: { code, retryable, error: message, jobId: processingJob.id },
       });
     }
 

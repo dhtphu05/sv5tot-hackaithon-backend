@@ -1,7 +1,10 @@
 // Owns OCR job processing for evidence files.
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   EvidenceStatus,
+  FileStorageType,
   IndexingStatus,
   JobStatus,
   SmartReaderJobStatus,
@@ -13,17 +16,26 @@ import {
 import { env } from '../../../config/env';
 import { prisma } from '../../../infrastructure/database/prisma';
 import { auditActions } from '../../../shared/constants/application';
+import { AppError } from '../../../shared/errors/app-error';
+import { ErrorCodes, type ErrorCode } from '../../../shared/errors/error-codes';
 import { AuditService } from '../../audit/audit.service';
 import {
   getSmartReaderAdapter,
   mapOcrResponse,
   redactSmartReaderSecrets,
+  SmartReaderConfigError,
+  SmartReaderError,
   type SmartReaderOcrResult,
 } from '../../smartreader';
-import { extractEvidenceFields, normalizeExtractedFields } from '../../evidences/evidence-field-extractor';
 import { scoreEvidenceConfidence } from '../../evidences/evidence-confidence.scorer';
+import { extractEvidenceFields } from '../../evidences/evidence-field-extractor';
+import { normalizeEvidenceFields } from '../../evidences/evidence-field-normalizer';
+import { normalizeEvidenceOcr } from '../../evidences/evidence-ocr-normalizer';
+import { matchEvidenceRegistry } from '../../evidences/evidence-registry-matcher';
+import { StorageService } from '../../storage/storage.service';
 
 const auditService = new AuditService();
+const storageService = new StorageService();
 
 type EvidenceOcrOutput = {
   ocr: SmartReaderOcrResult;
@@ -90,9 +102,14 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       metadata: { fileId: uploadedFile.id, endpoint: selectOcrEndpoint(uploadedFile) },
     });
 
-    const output = isPdf(uploadedFile)
+    const output = shouldUseAsyncOcr(uploadedFile)
       ? await runAsyncOcr(uploadedFile, smartreaderJob.id)
       : await runAdvancedOcr(uploadedFile, smartreaderJob.id);
+    const normalizedOcr = normalizeEvidenceOcr(output.ocr, output.sourceEndpoint);
+
+    if (!normalizedOcr.ocrText.trim()) {
+      throw new AppError(422, ErrorCodes.OCR_EMPTY_TEXT, 'VNPT SmartReader returned no OCR text for evidence');
+    }
 
     await prisma.evidence.update({
       where: { id: evidence.id },
@@ -101,18 +118,32 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
 
     const extractedFields = extractEvidenceFields({
       evidenceName: evidence.evidenceName,
-      ocr: output.ocr,
+      ocr: {
+        text: normalizedOcr.ocrText,
+        lines: normalizedOcr.ocrLinesJson,
+        paragraphs: normalizedOcr.ocrParagraphsJson,
+        tables: normalizedOcr.ocrTablesJson,
+      },
     });
-    const normalizedFields = normalizeExtractedFields(extractedFields);
-    const matched = await matchEventAndParticipant(evidence.criterion, normalizedFields);
+    const normalizedFields = normalizeEvidenceFields(extractedFields);
+
+    await prisma.evidence.update({
+      where: { id: evidence.id },
+      data: { indexingStatus: IndexingStatus.checking_registry },
+    });
+
+    const matched = await matchEvidenceRegistry(evidence.criterion, normalizedFields);
     const scoring = scoreEvidenceConfidence({
       ocrSucceeded: true,
       fields: normalizedFields,
       evidenceName: evidence.evidenceName,
       matchedEventId: matched.eventId,
-      warnings: [...output.ocr.warnings, ...output.ocr.warningMessages],
+      warnings: [...normalizedOcr.warnings, ...normalizedOcr.warningMessages, ...matched.warnings],
     });
-    const warningEntries = buildWarnings(scoring.warningCodes, output.ocr);
+    const warningEntries = buildWarnings(scoring.warningCodes, {
+      warnings: normalizedOcr.warnings,
+      warningMessages: normalizedOcr.warningMessages,
+    });
     const nextIndexingStatus = scoring.needsManualReview
       ? IndexingStatus.needs_manual_review
       : IndexingStatus.indexed;
@@ -127,10 +158,10 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       await tx.evidenceCard.upsert({
         where: { evidenceId: evidence.id },
         update: {
-          ocrText: output.ocr.text,
-          ocrLinesJson: output.ocr.lines as Prisma.InputJsonValue,
-          ocrParagraphsJson: output.ocr.paragraphs as Prisma.InputJsonValue,
-          ocrTablesJson: output.ocr.tables as Prisma.InputJsonValue,
+          ocrText: normalizedOcr.ocrText,
+          ocrLinesJson: normalizedOcr.ocrLinesJson as Prisma.InputJsonValue,
+          ocrParagraphsJson: normalizedOcr.ocrParagraphsJson as Prisma.InputJsonValue,
+          ocrTablesJson: normalizedOcr.ocrTablesJson as Prisma.InputJsonValue,
           extractedFieldsJson: extractedFields as Prisma.InputJsonValue,
           normalizedFieldsJson: normalizedFields as Prisma.InputJsonValue,
           warningsJson: warningEntries as Prisma.InputJsonValue,
@@ -138,7 +169,7 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
           matchedParticipantId: matched.participantId,
           matchedKnowledgeItemIds: [],
           confidence: scoring.confidence,
-          sourceEndpoint: output.sourceEndpoint,
+          sourceEndpoint: normalizedOcr.sourceEndpoint,
           smartreaderJobId: output.smartreaderJobId,
           aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields, scoring.confidence),
           rawAiResponse: undefined,
@@ -146,10 +177,10 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
         },
         create: {
           evidenceId: evidence.id,
-          ocrText: output.ocr.text,
-          ocrLinesJson: output.ocr.lines as Prisma.InputJsonValue,
-          ocrParagraphsJson: output.ocr.paragraphs as Prisma.InputJsonValue,
-          ocrTablesJson: output.ocr.tables as Prisma.InputJsonValue,
+          ocrText: normalizedOcr.ocrText,
+          ocrLinesJson: normalizedOcr.ocrLinesJson as Prisma.InputJsonValue,
+          ocrParagraphsJson: normalizedOcr.ocrParagraphsJson as Prisma.InputJsonValue,
+          ocrTablesJson: normalizedOcr.ocrTablesJson as Prisma.InputJsonValue,
           extractedFieldsJson: extractedFields as Prisma.InputJsonValue,
           normalizedFieldsJson: normalizedFields as Prisma.InputJsonValue,
           warningsJson: warningEntries as Prisma.InputJsonValue,
@@ -157,7 +188,7 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
           matchedParticipantId: matched.participantId,
           matchedKnowledgeItemIds: [],
           confidence: scoring.confidence,
-          sourceEndpoint: output.sourceEndpoint,
+          sourceEndpoint: normalizedOcr.sourceEndpoint,
           smartreaderJobId: output.smartreaderJobId,
           aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields, scoring.confidence),
           rawAiResponse: undefined,
@@ -185,10 +216,10 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       applicationId: evidence.applicationId,
       evidenceId: evidence.id,
       metadata: {
-        numOfPages: output.ocr.numOfPages,
-        lineCount: output.ocr.lines.length,
-        paragraphCount: output.ocr.paragraphs.length,
-        tableCount: output.ocr.tables.length,
+        numOfPages: normalizedOcr.numOfPages,
+        lineCount: normalizedOcr.ocrLinesJson.length,
+        paragraphCount: normalizedOcr.ocrParagraphsJson.length,
+        tableCount: normalizedOcr.ocrTablesJson.length,
       },
     });
     await auditService.log({
@@ -226,12 +257,16 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       jobStatus: JobStatus.completed,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown OCR failure';
+    const failure = mapSmartReaderFailure(error);
     await prisma.smartReaderJob.update({
       where: { id: smartreaderJob.id },
       data: {
         status: SmartReaderJobStatus.failed,
-        redactedErrorJson: redactSmartReaderSecrets({ message }) as Prisma.InputJsonValue,
+        redactedErrorJson: redactSmartReaderSecrets({
+          code: failure.code,
+          message: failure.technicalMessage,
+          retryable: failure.retryable,
+        }) as Prisma.InputJsonValue,
       },
     });
     await auditService.log({
@@ -242,9 +277,16 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       entityId: smartreaderJob.id,
       applicationId: evidence.applicationId,
       evidenceId: evidence.id,
-      metadata: { error: message },
+      metadata: {
+        code: failure.code,
+        message: failure.userMessage,
+        retryable: failure.retryable,
+      },
     });
-    throw error;
+    throw new AppError(502, failure.code, failure.userMessage, {
+      technicalMessage: failure.technicalMessage,
+      retryable: failure.retryable,
+    });
   }
 }
 
@@ -253,15 +295,48 @@ async function ensureSmartReaderUpload(
   evidence: { id: string; applicationId: string | null },
   smartreaderJobId: string,
 ): Promise<File> {
-  if (file.vnptHash && file.vnptFileType) return file;
+  if (file.vnptHash && file.vnptFileType) {
+    await auditService.log({
+      action: auditActions.SMARTREADER_FILE_REUSED,
+      entityType: 'file',
+      entityId: file.id,
+      applicationId: evidence.applicationId,
+      evidenceId: evidence.id,
+      metadata: { vnptHashPresent: true, fileType: file.vnptFileType },
+    });
+    await prisma.smartReaderJob.update({
+      where: { id: smartreaderJobId },
+      data: {
+        status: SmartReaderJobStatus.processing,
+        vnptHash: file.vnptHash,
+        vnptFileType: file.vnptFileType,
+      },
+    });
+    return file;
+  }
+
+  await auditService.log({
+    action: auditActions.SMARTREADER_FILE_UPLOAD_STARTED,
+    entityType: 'file',
+    entityId: file.id,
+    applicationId: evidence.applicationId,
+    evidenceId: evidence.id,
+    metadata: { mimeType: file.mimeType, size: file.fileSize },
+  });
 
   const adapter = getSmartReaderAdapter();
-  const uploaded = await adapter.uploadFile({
-    filePath: path.resolve(env.UPLOAD_DIR, file.filePath),
-    originalName: file.originalName,
-    title: file.originalName,
-    description: `5TOT evidence OCR ${evidence.id}`,
-  });
+  const uploadSource = await prepareSmartReaderUploadSource(file);
+  let uploaded;
+  try {
+    uploaded = await adapter.uploadFile({
+      filePath: uploadSource.filePath,
+      originalName: file.originalName,
+      title: file.originalName,
+      description: `5TOT evidence OCR ${evidence.id}`,
+    });
+  } finally {
+    await uploadSource.cleanup?.();
+  }
 
   await auditService.log({
     action: auditActions.SMARTREADER_FILE_UPLOADED,
@@ -269,7 +344,7 @@ async function ensureSmartReaderUpload(
     entityId: file.id,
     applicationId: evidence.applicationId,
     evidenceId: evidence.id,
-    metadata: { hash: uploaded.hash, fileType: uploaded.fileType },
+    metadata: { vnptHashPresent: !!uploaded.hash, fileType: uploaded.fileType },
   });
 
   return prisma.file.update({
@@ -293,6 +368,30 @@ async function ensureSmartReaderUpload(
     });
     return updated;
   });
+}
+
+async function prepareSmartReaderUploadSource(file: File): Promise<{
+  filePath: string;
+  cleanup?: () => Promise<void>;
+}> {
+  if (file.storageType === FileStorageType.local) {
+    return { filePath: path.resolve(env.UPLOAD_DIR, file.filePath) };
+  }
+
+  const signedUrl = await storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
+  const response = await fetch(signedUrl);
+  if (!response.ok) {
+    throw new Error(`VNPT upload source download failed with HTTP ${response.status}`);
+  }
+
+  const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), '5tot-smartreader-'));
+  const tempPath = path.join(tempDirectory, path.basename(file.originalName || file.filePath || file.id));
+  await fs.writeFile(tempPath, Buffer.from(await response.arrayBuffer()));
+
+  return {
+    filePath: tempPath,
+    cleanup: () => fs.rm(tempDirectory, { recursive: true, force: true }),
+  };
 }
 
 async function runAdvancedOcr(file: File, smartreaderJobId: string): Promise<EvidenceOcrOutput> {
@@ -351,7 +450,7 @@ async function runAsyncOcr(file: File, smartreaderJobId: string): Promise<Eviden
       },
     });
 
-    if (result.status === 'completed') {
+    if (result.status === 'completed' || result.status === 'completed_with_link') {
       const downloaded = result.resultLink ? await downloadResultLink(result.resultLink) : undefined;
       const ocr = downloaded ?? result;
       await prisma.smartReaderJob.update({
@@ -391,30 +490,10 @@ async function downloadResultLink(resultLink: string): Promise<SmartReaderOcrRes
   }
 }
 
-async function matchEventAndParticipant(
-  criterion: Prisma.EvidenceCreateInput['criterion'],
-  fields: ReturnType<typeof normalizeExtractedFields>,
-): Promise<{ eventId: string | null; participantId: string | null }> {
-  const eventName = fields.event_name;
-  const event = eventName
-    ? await prisma.eventRegistry.findFirst({
-        where: {
-          criterion,
-          eventName: { contains: eventName.slice(0, 80), mode: 'insensitive' },
-        },
-        orderBy: { updatedAt: 'desc' },
-      })
-    : null;
-  const participant =
-    event && fields.student_code
-      ? await prisma.eventParticipant.findFirst({
-          where: { eventId: event.id, studentCode: fields.student_code },
-        })
-      : null;
-  return { eventId: event?.id ?? null, participantId: participant?.id ?? null };
-}
-
-function buildWarnings(codes: string[], ocr: SmartReaderOcrResult): Array<{ code: string; message: string }> {
+function buildWarnings(
+  codes: string[],
+  ocr: Pick<SmartReaderOcrResult, 'warnings' | 'warningMessages'>,
+): Array<{ code: string; message: string }> {
   const providerWarnings = [...ocr.warnings, ...ocr.warningMessages].map((message) => ({
     code: 'SMARTREADER_WARNING',
     message,
@@ -441,7 +520,7 @@ function warningMessage(code: string): string {
 
 function buildEvidenceSummary(
   evidenceName: string,
-  fields: ReturnType<typeof normalizeExtractedFields>,
+  fields: ReturnType<typeof normalizeEvidenceFields>,
   confidence: number,
 ): string {
   const subject = fields.event_name ?? evidenceName;
@@ -449,11 +528,15 @@ function buildEvidenceSummary(
 }
 
 function selectOcrEndpoint(file: File): string {
-  return isPdf(file) ? 'async_scan_table' : 'scan_table';
+  return shouldUseAsyncOcr(file) ? 'async_scan_table' : 'scan_table';
 }
 
 function isPdf(file: File): boolean {
   return file.mimeType === 'application/pdf' || file.vnptFileType?.toLowerCase() === 'pdf';
+}
+
+function shouldUseAsyncOcr(file: File): boolean {
+  return isPdf(file) && file.fileSize >= 5 * 1024 * 1024;
 }
 
 function required(value: string | null | undefined, message: string): string {
@@ -463,4 +546,66 @@ function required(value: string | null | undefined, message: string): string {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type SmartReaderFailure = {
+  code: ErrorCode;
+  userMessage: string;
+  technicalMessage: string;
+  retryable: boolean;
+};
+
+function mapSmartReaderFailure(error: unknown): SmartReaderFailure {
+  const technicalMessage = error instanceof Error ? error.message : 'Unknown VNPT SmartReader failure';
+  if (error instanceof AppError && error.code === ErrorCodes.OCR_EMPTY_TEXT) {
+    return {
+      code: ErrorCodes.OCR_EMPTY_TEXT,
+      userMessage: 'VNPT SmartReader không trả về nội dung OCR cho minh chứng này.',
+      technicalMessage,
+      retryable: false,
+    };
+  }
+
+  if (error instanceof SmartReaderConfigError) {
+    return {
+      code: ErrorCodes.VNPT_CONFIG_MISSING,
+      userMessage: 'Thiếu cấu hình VNPT SmartReader cho pipeline OCR thật.',
+      technicalMessage,
+      retryable: false,
+    };
+  }
+
+  if (error instanceof SmartReaderError && (error.statusCode === 401 || error.statusCode === 403)) {
+    return {
+      code: ErrorCodes.VNPT_AUTH_FAILED,
+      userMessage: 'VNPT SmartReader từ chối xác thực. Vui lòng kiểm tra token/cấu hình.',
+      technicalMessage,
+      retryable: false,
+    };
+  }
+
+  if (/timeout|abort|exceeded max polls/i.test(technicalMessage)) {
+    return {
+      code: ErrorCodes.VNPT_TIMEOUT,
+      userMessage: 'VNPT SmartReader xử lý quá thời gian cho phép.',
+      technicalMessage,
+      retryable: true,
+    };
+  }
+
+  if (/upload/i.test(technicalMessage)) {
+    return {
+      code: ErrorCodes.VNPT_UPLOAD_FAILED,
+      userMessage: 'Không upload được tệp minh chứng lên VNPT SmartReader.',
+      technicalMessage,
+      retryable: true,
+    };
+  }
+
+  return {
+    code: ErrorCodes.VNPT_OCR_FAILED,
+    userMessage: 'VNPT SmartReader OCR minh chứng thất bại.',
+    technicalMessage,
+    retryable: true,
+  };
 }

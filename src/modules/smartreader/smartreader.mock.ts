@@ -8,7 +8,7 @@ import type {
   SmartReaderUploadResult,
 } from './smartreader.types';
 
-export class MockSmartReaderAdapter implements SmartReaderAdapter {
+export class MockSmartReaderAdapterForTests implements SmartReaderAdapter {
   async uploadFile(input: {
     filePath: string;
     originalName?: string;
@@ -104,6 +104,8 @@ export class MockSmartReaderAdapter implements SmartReaderAdapter {
     };
   }
 }
+
+export { MockSmartReaderAdapterForTests as MockSmartReaderAdapter };
 
 function mockOcrResult(mode: string): SmartReaderOcrResult {
   return {

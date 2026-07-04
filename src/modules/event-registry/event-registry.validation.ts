@@ -41,6 +41,15 @@ export const participantsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
+export const searchEventsQuerySchema = z.object({
+  studentCode: z.string().trim().optional(),
+  criterion: z.nativeEnum(Criterion).optional(),
+  q: z.string().trim().optional(),
+  applicationId: z.string().uuid().optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
 export const confirmIndexSchema = z.object({
   eventFileId: z.string().uuid().optional(),
   columnMapping: z.object({
@@ -85,13 +94,22 @@ export const importToApplicationSchema = z.object({
   note: z.string().trim().optional(),
 });
 
+export const importAsEvidenceSchema = z.object({
+  applicationId: z.string().uuid(),
+  participantId: z.string().uuid().optional(),
+  evidenceName: z.string().trim().min(3).max(255).optional(),
+  note: z.string().trim().optional(),
+});
+
 export type ListEventsQuery = z.infer<typeof listEventsQuerySchema>;
 export type CreateEventInput = z.infer<typeof createEventSchema>;
 export type UpdateEventInput = z.infer<typeof updateEventSchema>;
 export type StartRosterIndexingInput = z.infer<typeof startRosterIndexingSchema>;
 export type ParticipantsQuery = z.infer<typeof participantsQuerySchema>;
+export type SearchEventsQuery = z.infer<typeof searchEventsQuerySchema>;
 export type ConfirmIndexInput = z.infer<typeof confirmIndexSchema>;
 export type ApplicationIdBody = z.infer<typeof applicationIdBodySchema>;
 export type ImportParticipantsJsonInput = z.infer<typeof importParticipantsJsonSchema>;
 export type CheckParticipantInput = z.infer<typeof checkParticipantSchema>;
 export type ImportToApplicationInput = z.infer<typeof importToApplicationSchema>;
+export type ImportAsEvidenceInput = z.infer<typeof importAsEvidenceSchema>;

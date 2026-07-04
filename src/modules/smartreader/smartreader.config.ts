@@ -2,6 +2,8 @@ import { env } from '../../config/env';
 
 export const smartReaderConfig = {
   enabled: env.VNPT_ENABLED,
+  requireRealInPipeline: env.VNPT_REQUIRE_REAL_IN_PIPELINE,
+  allowMockRuntime: env.VNPT_ALLOW_MOCK_RUNTIME,
   baseUrl: env.VNPT_BASE_URL.replace(/\/+$/, ''),
   accessToken: env.VNPT_ACCESS_TOKEN,
   tokenId: env.VNPT_TOKEN_ID,

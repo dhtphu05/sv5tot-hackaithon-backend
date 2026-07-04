@@ -113,8 +113,8 @@ describe('evidence card privacy', () => {
       'evidence-1',
     );
 
-    expect(result.card.rawResponseJson).toBeUndefined();
-    expect(result.card.rawAiResponse).toBeUndefined();
+    expect(result.card?.rawResponseJson).toBeUndefined();
+    expect(result.card?.rawAiResponse).toBeUndefined();
   });
 
   it('blocks students from reading another student evidence card', async () => {

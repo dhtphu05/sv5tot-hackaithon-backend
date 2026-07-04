@@ -16,6 +16,7 @@ import { auditRouter } from './modules/audit/audit.routes';
 import { authRouter } from './modules/auth/auth.routes';
 import { cascadeRouter } from './modules/cascade/cascade.routes';
 import { collectiveRouter } from './modules/collective/collective.routes';
+import { decisionImportsRouter } from './modules/decision-imports/decision-imports.routes';
 import { eventRegistryRouter } from './modules/event-registry/event-registry.routes';
 import { evidencesRouter } from './modules/evidences/evidences.routes';
 import { exportsRouter } from './modules/exports/exports.routes';
@@ -63,6 +64,7 @@ export function createApp() {
   app.use('/api', evidencesRouter);
   app.use('/api', filesRouter);
   app.use('/api/events', eventRegistryRouter);
+  app.use('/api/decision-imports', decisionImportsRouter);
   app.use('/api/knowledge-base', knowledgeBaseRouter);
   app.use('/api', precheckRouter);
   app.use('/api', cascadeRouter);

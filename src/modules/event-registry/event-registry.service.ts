@@ -34,12 +34,15 @@ import type {
   ConfirmIndexInput,
   CreateEventInput,
   ImportParticipantsJsonInput,
+  ImportAsEvidenceInput,
   ImportToApplicationInput,
   ListEventsQuery,
   ParticipantsQuery,
+  SearchEventsQuery,
   StartRosterIndexingInput,
   UpdateEventInput,
 } from './event-registry.validation';
+import { importEventAsEvidence } from '../decision-imports/decision-imports.service';
 
 type UploadedRosterFile = Express.Multer.File;
 
@@ -338,6 +341,75 @@ export class EventRegistryService {
     const { items, total } = await this.repository.listParticipants(event.id, query);
     return {
       items,
+      pagination: {
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalPages: Math.ceil(total / query.limit),
+      },
+    };
+  }
+
+  async search(user: AuthenticatedUser, query: SearchEventsQuery) {
+    const isStudent = user.role === Role.student || user.role === Role.class_representative;
+    const studentCode = isStudent ? user.studentCode : query.studentCode;
+    if (!studentCode) throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'studentCode is required');
+    if (isStudent && query.studentCode && query.studentCode !== user.studentCode) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only search their own student code');
+    }
+
+    const where = {
+      status: EventStatus.active,
+      rosterIndexed: true,
+      ...(query.criterion ? { criterion: query.criterion } : {}),
+      ...(query.q
+        ? {
+            OR: [
+              { eventName: { contains: query.q, mode: 'insensitive' as const } },
+              { organizer: { contains: query.q, mode: 'insensitive' as const } },
+              { officialDocumentNo: { contains: query.q, mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
+      participants: { some: { studentCode } },
+    };
+    const skip = (query.page - 1) * query.limit;
+    const [items, total] = await prisma.$transaction([
+      prisma.eventRegistry.findMany({
+        where,
+        include: {
+          participants: { where: { studentCode }, take: 1 },
+          eventFiles: { include: { file: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+        skip,
+        take: query.limit,
+      }),
+      prisma.eventRegistry.count({ where }),
+    ]);
+    const importedEventIds = query.applicationId
+      ? new Set(
+          (
+            await prisma.evidence.findMany({
+              where: {
+                applicationId: query.applicationId,
+                sourceType: EvidenceSourceType.event_import,
+                eventId: { in: items.map((item) => item.id) },
+              },
+              select: { eventId: true },
+            })
+          )
+            .map((evidence) => evidence.eventId)
+            .filter((eventId): eventId is string => !!eventId),
+        )
+      : new Set<string>();
+
+    return {
+      items: items.map((event) => ({
+        ...this.toEventDto(event),
+        participant: event.participants[0] ?? null,
+        alreadyImported: importedEventIds.has(event.id),
+      })),
       pagination: {
         page: query.page,
         limit: query.limit,
@@ -811,6 +883,17 @@ export class EventRegistryService {
       },
       alreadyImported: false,
     };
+  }
+
+  async importAsEvidence(user: AuthenticatedUser, eventId: string, input: ImportAsEvidenceInput) {
+    return importEventAsEvidence({
+      user,
+      eventId,
+      applicationId: input.applicationId,
+      participantId: input.participantId,
+      evidenceName: input.evidenceName,
+      note: input.note,
+    });
   }
 
   private async getRequiredEvent(eventId: string) {
