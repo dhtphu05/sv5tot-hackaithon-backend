@@ -16,13 +16,19 @@ const demoReviewCriteria = [
 export const reviewTaskListInclude = {
   application: { include: { student: true } },
   collectiveProfile: { include: { representative: true } },
-  assignedOfficer: true,
+  assignedOfficer: { select: { id: true, fullName: true } },
   evidences: {
     include: {
       evidence: {
-        include: {
-          evidenceCard: true,
-          evidenceFiles: { include: { file: true } },
+        select: {
+          status: true,
+          confidence: true,
+          evidenceCard: {
+            select: {
+              confidence: true,
+              warningsJson: true,
+            },
+          },
         },
       },
     },

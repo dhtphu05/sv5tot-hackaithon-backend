@@ -8,6 +8,7 @@ import { securityConfig } from './config/security';
 import { setupSwagger } from './docs/swagger';
 import { errorMiddleware } from './middlewares/error.middleware';
 import { notFoundMiddleware } from './middlewares/not-found.middleware';
+import { performanceLogMiddleware } from './middlewares/performance-log.middleware';
 import { rateLimitMiddleware } from './middlewares/rate-limit.middleware';
 import { requestIdMiddleware } from './middlewares/request-id.middleware';
 import { aiRouter } from './modules/ai/ai.routes';
@@ -49,6 +50,7 @@ export function createApp() {
       genReqId: (req) => req.requestId ?? 'unknown',
     }),
   );
+  app.use(performanceLogMiddleware);
   app.use(rateLimitMiddleware);
 
   setupSwagger(app);

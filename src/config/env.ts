@@ -15,8 +15,8 @@ const envSchema = z.object({
     .default('2025-2026'),
   JWT_ACCESS_SECRET: z.string().min(1, 'JWT_ACCESS_SECRET is required'),
   JWT_REFRESH_SECRET: z.string().min(1, 'JWT_REFRESH_SECRET is required'),
-  JWT_ACCESS_EXPIRES_IN: z.string().min(1).default('15m'),
-  JWT_REFRESH_EXPIRES_IN: z.string().min(1).default('7d'),
+  JWT_ACCESS_EXPIRES_IN: z.string().min(1).default('30m'),
+  JWT_REFRESH_EXPIRES_IN: z.string().min(1).default('30d'),
   BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
   SEED_DEFAULT_PASSWORD: z.string().min(8).default('Password@123'),
   CORS_ORIGIN: z
