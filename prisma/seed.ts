@@ -1,4 +1,4 @@
-import { Criterion, Level, Prisma, Role } from '@prisma/client';
+import { Criterion, Level, Prisma, ReviewTaskStatus, Role } from '@prisma/client';
 import { env } from '../src/config/env';
 import { logger } from '../src/config/logger';
 import { prisma } from '../src/infrastructure/database/prisma';
@@ -6,6 +6,14 @@ import { PasswordService } from '../src/modules/auth/password.service';
 import { fallbackRulesByLevel } from '../src/modules/rules/criteria.constants';
 
 const passwordService = new PasswordService();
+const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
+const demoReviewCriteria: Criterion[] = [
+  Criterion.ethics,
+  Criterion.academic,
+  Criterion.physical,
+  Criterion.volunteer,
+  Criterion.integration,
+];
 
 type SeedUser = {
   email: string;
@@ -15,6 +23,7 @@ type SeedUser = {
   className?: string;
   faculty?: string;
   specialization?: Criterion;
+  specializations?: Criterion[];
 };
 
 const demoUsers: SeedUser[] = [
@@ -35,6 +44,14 @@ const demoUsers: SeedUser[] = [
     faculty: 'Khoa Cong nghe Thong tin',
   },
   {
+    email: 'collective@dut.udn.vn',
+    role: Role.class_representative,
+    fullName: 'Dai dien tap the',
+    studentCode: '102220010',
+    className: '22T_DT1',
+    faculty: 'Khoa Cong nghe Thong tin',
+  },
+  {
     email: 'classrep@dut.udn.vn',
     role: Role.class_representative,
     fullName: 'Trần Lớp Trưởng',
@@ -43,11 +60,18 @@ const demoUsers: SeedUser[] = [
     faculty: 'Khoa Công nghệ Thông tin',
   },
   {
-    email: 'officer.academic@dut.udn.vn',
+    email: 'officer@dut.udn.vn',
     role: Role.officer,
-    fullName: 'Cán bộ Học tập',
+    fullName: 'Can bo xet duyet demo',
+    faculty: 'Khoa Cong nghe Thong tin',
+    specializations: [Criterion.academic, Criterion.ethics, Criterion.volunteer],
+  },
+  {
+    email: demoAllCriteriaOfficerEmail,
+    role: Role.officer,
+    fullName: 'Cán bộ xét duyệt demo',
     faculty: 'Khoa Công nghệ Thông tin',
-    specialization: Criterion.academic,
+    specializations: demoReviewCriteria,
   },
   {
     email: 'officer.volunteer@dut.udn.vn',
@@ -124,12 +148,13 @@ async function seedUsers(): Promise<void> {
       },
     });
 
-    if (seedUser.specialization) {
+    const specializations = seedUser.specializations ?? (seedUser.specialization ? [seedUser.specialization] : []);
+    for (const specialization of specializations) {
       await prisma.officerSpecialization.upsert({
         where: {
           officerId_criterion_facultyScope: {
             officerId: user.id,
-            criterion: seedUser.specialization,
+            criterion: specialization,
             facultyScope: seedUser.faculty ?? '',
           },
         },
@@ -138,7 +163,7 @@ async function seedUsers(): Promise<void> {
         },
         create: {
           officerId: user.id,
-          criterion: seedUser.specialization,
+          criterion: specialization,
           facultyScope: seedUser.faculty ?? '',
           isActive: true,
         },
@@ -217,9 +242,39 @@ function toSeedJson(value: unknown): Prisma.InputJsonValue | undefined {
   return value === null || value === undefined ? undefined : (value as Prisma.InputJsonValue);
 }
 
+async function seedDemoOfficerAssignments(): Promise<void> {
+  if (process.env.NODE_ENV === 'production') {
+    return;
+  }
+
+  const officer = await prisma.user.findUnique({
+    where: { email: demoAllCriteriaOfficerEmail },
+    select: { id: true },
+  });
+  if (!officer) {
+    return;
+  }
+
+  await prisma.reviewTask.updateMany({
+    where: {
+      applicationId: { not: null },
+      criterion: { in: demoReviewCriteria },
+      status: {
+        in: [
+          ReviewTaskStatus.waiting,
+          ReviewTaskStatus.reviewing,
+          ReviewTaskStatus.supplement_required,
+        ],
+      },
+    },
+    data: { assignedOfficerId: officer.id },
+  });
+}
+
 async function main(): Promise<void> {
   await seedUsers();
   await seedCriteriaRules();
+  await seedDemoOfficerAssignments();
   logger.info({ userCount: demoUsers.length }, 'Seed completed');
 }
 

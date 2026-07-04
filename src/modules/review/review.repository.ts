@@ -1,8 +1,17 @@
 // Owns officer review tasks, decisions, supplements, and escalation persistence.
-import { Role, type Criterion, type Prisma } from '@prisma/client';
+import { Criterion, Role, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import type { ListReviewTasksQuery } from './review.validation';
+
+const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
+const demoReviewCriteria = [
+  Criterion.ethics,
+  Criterion.academic,
+  Criterion.physical,
+  Criterion.volunteer,
+  Criterion.integration,
+];
 
 export const reviewTaskListInclude = {
   application: { include: { student: true } },
@@ -148,13 +157,20 @@ export class ReviewRepository {
       where: { officerId: user.id, isActive: true },
       select: { criterion: true, facultyScope: true },
     });
-    const criteria = Array.from(new Set(specializations.map((item) => item.criterion)));
-    const facultyScopes = specializations
+    const effectiveSpecializations =
+      user.email === demoAllCriteriaOfficerEmail
+        ? demoReviewCriteria.map((criterion) => ({
+            criterion,
+            facultyScope: user.faculty,
+          }))
+        : specializations;
+    const criteria = Array.from(new Set(effectiveSpecializations.map((item) => item.criterion)));
+    const effectiveFacultyScopes = effectiveSpecializations
       .map((item) => item.facultyScope)
       .filter((item): item is string => Boolean(item));
-    const scopedCriteriaByFaculty = specializations.filter((item) => item.facultyScope);
+    const scopedCriteriaByFaculty = effectiveSpecializations.filter((item) => item.facultyScope);
     const hasGlobalCriterion = (criterion: Criterion) =>
-      specializations.some((item) => item.criterion === criterion && !item.facultyScope);
+      effectiveSpecializations.some((item) => item.criterion === criterion && !item.facultyScope);
 
     return {
       ...base,
@@ -168,16 +184,16 @@ export class ReviewRepository {
                   ...criteria
                     .filter((criterion) => hasGlobalCriterion(criterion))
                     .map((criterion) => ({ criterion })),
-                  ...(facultyScopes.length
+                  ...(effectiveFacultyScopes.length
                     ? [
                         {
                           application: {
-                            student: { faculty: { in: facultyScopes } },
+                            student: { faculty: { in: effectiveFacultyScopes } },
                           },
                         },
                         {
                           collectiveProfile: {
-                            representative: { faculty: { in: facultyScopes } },
+                            representative: { faculty: { in: effectiveFacultyScopes } },
                           },
                         },
                       ]
@@ -209,7 +225,7 @@ export class ReviewRepository {
       prisma.reviewTask.findMany({
         where,
         include: reviewTaskListInclude,
-        orderBy: [{ dueDate: 'asc' }, { updatedAt: 'asc' }],
+        orderBy: [{ dueDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'desc' }],
         skip,
         take: limit,
       }),

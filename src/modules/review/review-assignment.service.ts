@@ -1,6 +1,15 @@
 import { Criterion, Role, ReviewTaskStatus, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 
+const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
+const demoReviewCriteria: Criterion[] = [
+  Criterion.ethics,
+  Criterion.academic,
+  Criterion.physical,
+  Criterion.volunteer,
+  Criterion.integration,
+];
+
 const activeTaskStatuses = [
   ReviewTaskStatus.waiting,
   ReviewTaskStatus.reviewing,
@@ -44,6 +53,11 @@ export class ReviewAssignmentService {
 
     if (filtered.length === 0) {
       return null;
+    }
+
+    const demoOfficer = getDemoOfficerForCriterion(filtered, input.criterion, input.faculty);
+    if (demoOfficer) {
+      return demoOfficer.officer;
     }
 
     const workloads = await this.getOfficerWorkloads(
@@ -93,6 +107,19 @@ export class ReviewAssignmentService {
     faculty?: string | null,
     db: DbClient = prisma,
   ): Promise<boolean> {
+    const officer = await db.user.findUnique({
+      where: { id: officerId },
+      select: { email: true, role: true, isActive: true },
+    });
+    if (
+      officer?.email === demoAllCriteriaOfficerEmail &&
+      officer.role === Role.officer &&
+      officer.isActive &&
+      demoReviewCriteria.includes(criterion)
+    ) {
+      return true;
+    }
+
     const specialization = await db.officerSpecialization.findFirst({
       where: {
         officerId,
@@ -105,4 +132,23 @@ export class ReviewAssignmentService {
 
     return Boolean(specialization);
   }
+}
+
+function getDemoOfficerForCriterion<
+  T extends { criterion: Criterion; facultyScope: string | null; officer: { email: string } },
+>(items: T[], criterion: Criterion, faculty?: string | null): T | null {
+  if (process.env.NODE_ENV === 'production' || !demoReviewCriteria.includes(criterion)) {
+    return null;
+  }
+
+  const candidates = items.filter((item) => item.officer.email === demoAllCriteriaOfficerEmail);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return (
+    candidates.find((item) => item.facultyScope && item.facultyScope === faculty) ??
+    candidates.find((item) => !item.facultyScope) ??
+    candidates[0]
+  );
 }

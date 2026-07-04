@@ -20,11 +20,57 @@ import { createApplicationAudit } from '../applications/application.helpers';
 import { createNotification, NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from './review-assignment.service';
 import { getApplicationReviewProgress } from './review-progress.service';
-import { ReviewRepository } from './review.repository';
+import { ReviewRepository, reviewTaskListInclude } from './review.repository';
 import type { ListReviewTasksQuery, TaskDecisionInput } from './review.validation';
 
 type RequirementStatus = 'passed' | 'failed' | 'missing' | 'needs_review';
 type RiskLevel = 'low' | 'medium' | 'high';
+type ReviewTaskPermissionReason =
+  | 'manager_full_access'
+  | 'committee_resolution_view'
+  | 'assigned_to_you'
+  | 'claimable_by_specialization'
+  | 'assigned_to_other'
+  | 'finalized'
+  | 'out_of_scope'
+  | 'role_not_allowed';
+
+type ReviewTaskAvailableAction =
+  | 'view'
+  | 'decide'
+  | 'request_supplement'
+  | 'escalate_resolution'
+  | 'claim'
+  | 'request_support';
+
+type ReviewTaskPermissions = {
+  canView: boolean;
+  canAct: boolean;
+  canClaim: boolean;
+  canRequestSupport: boolean;
+  reason: ReviewTaskPermissionReason;
+  reasonLabel: string;
+  badges: string[];
+  availableActions: ReviewTaskAvailableAction[];
+};
+
+type ReviewTaskPriorityReason =
+  | 'overdue'
+  | 'student_resubmitted'
+  | 'low_ai_confidence'
+  | 'due_soon'
+  | 'assigned_to_you'
+  | 'unassigned_claimable'
+  | null;
+
+const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
+const demoReviewCriteria = [
+  Criterion.ethics,
+  Criterion.academic,
+  Criterion.physical,
+  Criterion.volunteer,
+  Criterion.integration,
+];
 
 export class ReviewService {
   constructor(
@@ -60,7 +106,19 @@ export class ReviewService {
 
     const now = Date.now();
     const threeDays = 3 * 24 * 60 * 60 * 1000;
-    const listItems = accessible.map(toTaskListItem).sort(comparePriorityTasks);
+    const listItems = (
+      await Promise.all(
+        accessible.map(async (task) => {
+          const item = toTaskListItem(task);
+          const permissions = await this.getTaskPermissions(user, task);
+          return {
+            ...item,
+            permissions,
+            priorityReason: getTaskPriorityReason(item, permissions),
+          };
+        }),
+      )
+    ).sort(comparePriorityTasks);
     const summary = {
       totalAssigned: listItems.length,
       waiting: listItems.filter((item) => item.status === ReviewTaskStatus.waiting).length,
@@ -102,8 +160,17 @@ export class ReviewService {
         ? {
             id: officer.id,
             fullName: officer.fullName,
-            specializations: officer.officerSpecializations.map((item) => item.criterion),
-            specializationScopes: officer.officerSpecializations,
+            specializations:
+              officer.email === demoAllCriteriaOfficerEmail
+                ? demoReviewCriteria
+                : officer.officerSpecializations.map((item) => item.criterion),
+            specializationScopes:
+              officer.email === demoAllCriteriaOfficerEmail
+                ? demoReviewCriteria.map((criterion) => ({
+                    criterion,
+                    facultyScope: officer.faculty,
+                  }))
+                : officer.officerSpecializations,
           }
         : {
             id: user.id,
@@ -112,7 +179,7 @@ export class ReviewService {
             specializationScopes: [],
           },
       summary,
-      priorityTasks: listItems.slice(0, 8).map((item) => ({
+      priorityTasks: listItems.filter(isActionablePriorityTask).slice(0, 8).map((item) => ({
         taskId: item.taskId,
         applicationId: item.applicationId,
         studentName: item.studentName,
@@ -124,6 +191,8 @@ export class ReviewService {
         riskLevel: item.riskLevel,
         dueDate: item.dueDate,
         updatedAt: item.updatedAt,
+        permissions: item.permissions,
+        priorityReason: item.priorityReason,
       })),
       bottleneckByCriterion,
       recentActivity,
@@ -135,7 +204,13 @@ export class ReviewService {
     const items = [];
     for (const task of data.items) {
       if (await this.canAccessTask(user, task, false)) {
-        items.push(toTaskListItem(task));
+        const item = toTaskListItem(task);
+        const permissions = await this.getTaskPermissions(user, task);
+        items.push({
+          ...item,
+          permissions,
+          priorityReason: getTaskPriorityReason(item, permissions),
+        });
       }
     }
     const filteredItems = query.riskLevel
@@ -156,12 +231,10 @@ export class ReviewService {
 
   async getTaskDetail(user: AuthenticatedUser, taskId: string) {
     const task = await this.getTask(taskId);
-    await this.assertTaskAccess(user, task, true);
+    await this.assertTaskAccess(user, task, false);
 
-    const taskForResponse =
-      task.assignedOfficerId === user.id && task.status === ReviewTaskStatus.waiting
-        ? await this.markTaskStarted(user, task)
-        : task;
+    const taskForResponse = task;
+    const permissions = await this.getTaskPermissions(user, taskForResponse);
 
     const evidences = taskForResponse.evidences.map((item) => item.evidence);
     const knowledgeBaseMatches = await Promise.all(
@@ -189,7 +262,7 @@ export class ReviewService {
       : [];
 
     return {
-      task: toTaskDetail(taskForResponse),
+      task: toTaskDetail(taskForResponse, permissions),
       application: taskForResponse.application
         ? {
             id: taskForResponse.application.id,
@@ -267,6 +340,64 @@ export class ReviewService {
       criteriaChecklist: buildCriteriaChecklist(taskForResponse),
       criterionLevelAssessment: buildCriterionLevelAssessment(taskForResponse),
       audit: auditLogs,
+    };
+  }
+
+  async claimTask(user: AuthenticatedUser, taskId: string) {
+    const task = await this.getTask(taskId);
+    const permissions = await this.getTaskPermissions(user, task);
+
+    if (!permissions.canClaim) {
+      throw new AppError(
+        403,
+        ErrorCodes.REVIEW_TASK_PERMISSION_DENIED,
+        permissions.reasonLabel,
+      );
+    }
+
+    const claimResult = await prisma.reviewTask.updateMany({
+      where: { id: task.id, assignedOfficerId: null },
+      data: {
+        assignedOfficerId: user.id,
+        status:
+          task.status === ReviewTaskStatus.waiting ? ReviewTaskStatus.reviewing : task.status,
+      },
+    });
+
+    if (claimResult.count === 0) {
+      throw new AppError(
+        409,
+        ErrorCodes.CONFLICT,
+        'Task này vừa được giao cho cán bộ khác. Bạn đang ở chế độ chỉ xem.',
+      );
+    }
+
+    const updated = await prisma.reviewTask.findUniqueOrThrow({
+      where: { id: task.id },
+      include: reviewTaskListInclude,
+    });
+    const updatedItem = toTaskListItem(updated);
+    const updatedPermissions = await this.getTaskPermissions(user, updated);
+
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: auditActions.REVIEW_TASK_ASSIGNED,
+      targetType: 'review_task',
+      targetId: task.id,
+      applicationId: task.applicationId,
+      collectiveProfileId: task.collectiveProfileId,
+      beforeStateJson: { assignedOfficerId: task.assignedOfficerId },
+      afterStateJson: { assignedOfficerId: user.id, claimedByOfficer: true },
+      note: 'Officer claimed an unassigned review task',
+    });
+
+    return {
+      task: {
+        ...updatedItem,
+        permissions: updatedPermissions,
+        priorityReason: getTaskPriorityReason(updatedItem, updatedPermissions),
+      },
     };
   }
 
@@ -746,23 +877,96 @@ export class ReviewService {
     },
     decision: boolean,
   ): Promise<boolean> {
+    const permissions = await this.getTaskPermissions(user, task);
+    return decision ? permissions.canAct : permissions.canView;
+  }
+
+  private async getTaskPermissions(
+    user: AuthenticatedUser,
+    task: {
+      assignedOfficerId: string | null;
+      status: ReviewTaskStatus;
+      criterion: Criterion;
+      application: { student: { faculty: string | null } } | null;
+      collectiveProfile: { representative: { faculty: string | null } } | null;
+    },
+  ): Promise<ReviewTaskPermissions> {
+    const final = isFinalReviewTaskStatus(task.status);
+
     if (user.role === Role.manager || user.role === Role.admin) {
-      return true;
+      return buildTaskPermissions({
+        canView: true,
+        canAct: true,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: 'manager_full_access',
+      });
     }
+
     if (user.role === Role.committee) {
-      return !decision && task.status === ReviewTaskStatus.resolution_needed;
+      const canView = task.status === ReviewTaskStatus.resolution_needed;
+      return buildTaskPermissions({
+        canView,
+        canAct: false,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: canView ? 'committee_resolution_view' : 'out_of_scope',
+      });
     }
+
     if (user.role !== Role.officer) {
-      return false;
+      return buildTaskPermissions({
+        canView: false,
+        canAct: false,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: 'role_not_allowed',
+      });
     }
+
+    const faculty =
+      task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty;
+    const specialized =
+      user.email === demoAllCriteriaOfficerEmail ||
+      (await this.assignmentService.canOfficerHandleCriterion(user.id, task.criterion, faculty));
+
     if (task.assignedOfficerId === user.id) {
-      return true;
+      return buildTaskPermissions({
+        canView: true,
+        canAct: !final,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: final ? 'finalized' : 'assigned_to_you',
+      });
     }
-    return this.assignmentService.canOfficerHandleCriterion(
-      user.id,
-      task.criterion,
-      task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty,
-    );
+
+    if (!task.assignedOfficerId && specialized) {
+      return buildTaskPermissions({
+        canView: true,
+        canAct: false,
+        canClaim: !final,
+        canRequestSupport: false,
+        reason: final ? 'finalized' : 'claimable_by_specialization',
+      });
+    }
+
+    if (task.assignedOfficerId && specialized) {
+      return buildTaskPermissions({
+        canView: true,
+        canAct: false,
+        canClaim: false,
+        canRequestSupport: true,
+        reason: final ? 'finalized' : 'assigned_to_other',
+      });
+    }
+
+    return buildTaskPermissions({
+      canView: false,
+      canAct: false,
+      canClaim: false,
+      canRequestSupport: false,
+      reason: 'out_of_scope',
+    });
   }
 
   private async markTaskStarted(
@@ -1277,6 +1481,8 @@ function toTaskListItem(task: {
     riskLevel,
     supplementCount: evidenceSupplementCount,
     officerSuggestedLevel: task.officerSuggestedLevel ?? null,
+    assignedOfficerId: task.assignedOfficer?.id ?? null,
+    assignedOfficerName: task.assignedOfficer?.fullName ?? null,
     application: task.application,
     collectiveProfile: task.collectiveProfile,
     evidenceCount: task._count.evidences,
@@ -1288,7 +1494,10 @@ function toTaskListItem(task: {
   };
 }
 
-function toTaskDetail(task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>) {
+function toTaskDetail(
+  task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
+  permissions?: ReviewTaskPermissions,
+) {
   return {
     id: task.id,
     criterion: task.criterion,
@@ -1300,10 +1509,64 @@ function toTaskDetail(task: NonNullable<Awaited<ReturnType<ReviewRepository['fin
     decisionReason: task.decisionReason,
     supplementRequestJson: task.supplementRequestJson,
     assignedOfficer: task.assignedOfficer,
+    permissions,
     dueDate: task.dueDate,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
   };
+}
+
+function isFinalReviewTaskStatus(status: ReviewTaskStatus) {
+  return (
+    status === ReviewTaskStatus.accepted ||
+    status === ReviewTaskStatus.rejected ||
+    status === ReviewTaskStatus.resolution_needed
+  );
+}
+
+function buildTaskPermissions(
+  input: Omit<ReviewTaskPermissions, 'reasonLabel' | 'badges' | 'availableActions'>,
+) {
+  return {
+    ...input,
+    reasonLabel: taskPermissionReasonLabel(input.reason),
+    badges: buildPermissionBadges(input),
+    availableActions: buildAvailableActions(input),
+  };
+}
+
+function buildPermissionBadges(input: Omit<ReviewTaskPermissions, 'reasonLabel' | 'badges' | 'availableActions'>) {
+  if (input.reason === 'finalized') return ['Đã chốt'];
+  if (input.canAct) return ['Được xử lý'];
+  if (input.canClaim) return ['Có thể nhận'];
+  if (input.canView) return ['Chỉ xem'];
+  return ['Không có quyền'];
+}
+
+function buildAvailableActions(
+  input: Omit<ReviewTaskPermissions, 'reasonLabel' | 'badges' | 'availableActions'>,
+): ReviewTaskAvailableAction[] {
+  const actions: ReviewTaskAvailableAction[] = [];
+  if (input.canView) actions.push('view');
+  if (input.canAct) actions.push('decide', 'request_supplement', 'escalate_resolution');
+  if (input.canClaim) actions.push('claim');
+  if (input.canRequestSupport) actions.push('request_support');
+  return actions;
+}
+
+function taskPermissionReasonLabel(reason: ReviewTaskPermissionReason) {
+  const labels: Record<ReviewTaskPermissionReason, string> = {
+    manager_full_access: 'Hội đồng/Cấp quản lý được xem và xử lý task này.',
+    committee_resolution_view: 'Task đang ở trạng thái hội ý, được xem ở chế độ theo dõi.',
+    assigned_to_you: 'Task được giao cho bạn.',
+    claimable_by_specialization: 'Task chưa phân công và thuộc tiêu chí bạn phụ trách.',
+    assigned_to_other: 'Task đã được giao cho cán bộ khác, bạn chỉ được xem.',
+    finalized: 'Task đã có kết luận, chỉ được xem lại.',
+    out_of_scope: 'Task không thuộc phạm vi phụ trách của bạn.',
+    role_not_allowed: 'Tài khoản hiện tại không có quyền xem task xét duyệt.',
+  };
+
+  return labels[reason];
 }
 
 function metricForCriterion(criterion: Criterion) {
@@ -1555,11 +1818,22 @@ function getTaskRiskLevel(input: {
 }
 
 function comparePriorityTasks(
-  a: ReturnType<typeof toTaskListItem>,
-  b: ReturnType<typeof toTaskListItem>,
+  a: ReturnType<typeof toTaskListItem> & { priorityReason?: ReviewTaskPriorityReason },
+  b: ReturnType<typeof toTaskListItem> & { priorityReason?: ReviewTaskPriorityReason },
 ) {
+  const priorityReasonWeight: Record<Exclude<ReviewTaskPriorityReason, null>, number> = {
+    overdue: 0,
+    student_resubmitted: 1,
+    low_ai_confidence: 2,
+    due_soon: 3,
+    assigned_to_you: 4,
+    unassigned_claimable: 5,
+  };
   const riskWeight: Record<RiskLevel, number> = { high: 0, medium: 1, low: 2 };
   const levelWeight: Record<string, number> = { central: 0, city: 1, university: 2, school: 3 };
+  const aPriority = a.priorityReason ? priorityReasonWeight[a.priorityReason] : 99;
+  const bPriority = b.priorityReason ? priorityReasonWeight[b.priorityReason] : 99;
+  if (aPriority !== bPriority) return aPriority - bPriority;
   const now = Date.now();
   const aOverdue = a.dueDate && new Date(a.dueDate).getTime() < now ? 0 : 1;
   const bOverdue = b.dueDate && new Date(b.dueDate).getTime() < now ? 0 : 1;
@@ -1574,4 +1848,35 @@ function comparePriorityTasks(
     return levelWeight[a.targetLevel] - levelWeight[b.targetLevel];
   }
   return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+}
+
+function getTaskPriorityReason(
+  item: ReturnType<typeof toTaskListItem>,
+  permissions: ReviewTaskPermissions,
+): ReviewTaskPriorityReason {
+  const dueAt = item.dueDate ? new Date(item.dueDate).getTime() : null;
+  const now = Date.now();
+  const active = !isFinalReviewTaskStatus(item.status);
+
+  if (active && dueAt !== null && dueAt < now) return 'overdue';
+  if (active && item.aiConfidence !== null && item.aiConfidence < 0.7) {
+    return 'low_ai_confidence';
+  }
+  if (active && dueAt !== null && dueAt <= now + 3 * 24 * 60 * 60 * 1000) {
+    return 'due_soon';
+  }
+  if (active && permissions.reason === 'assigned_to_you' && permissions.canAct) return 'assigned_to_you';
+  if (active && permissions.reason === 'claimable_by_specialization' && permissions.canClaim)
+    return 'unassigned_claimable';
+  return null;
+}
+
+function isActionablePriorityTask(
+  item: ReturnType<typeof toTaskListItem> & {
+    permissions: ReviewTaskPermissions;
+    priorityReason?: ReviewTaskPriorityReason;
+  },
+) {
+  if (isFinalReviewTaskStatus(item.status)) return false;
+  return Boolean(item.priorityReason || item.permissions.canAct || item.permissions.canClaim);
 }
