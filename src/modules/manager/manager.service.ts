@@ -768,9 +768,6 @@ export class ManagerService {
     if (user.role !== Role.manager && user.role !== Role.committee && user.role !== Role.admin) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager, committee, or admin can finalize results');
     }
-    if (input.overrideAggregation && user.role !== Role.admin) {
-      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only admin can override finalize blockers');
-    }
     if (
       (input.finalStatus === FinalStatus.passed ||
         input.finalStatus === FinalStatus.partially_passed) &&
@@ -787,10 +784,16 @@ export class ManagerService {
     }
 
     const aggregation = await this.getAggregation(user, applicationId);
-    if (!aggregation.canFinalize && !input.overrideAggregation) {
-      throw new AppError(409, ErrorCodes.FINALIZE_BLOCKED, 'Application cannot be finalized yet', {
-        blockingReasons: aggregation.blockingReasons,
-      });
+    const overrideRecommendation = Boolean(input.overrideAggregation);
+    if (!aggregation.canFinalize) {
+      if (!overrideRecommendation) {
+        throw new AppError(409, ErrorCodes.FINALIZE_BLOCKED, 'Application cannot be finalized yet', {
+          blockingReasons: aggregation.blockingReasons,
+        });
+      }
+      if (user.role !== Role.admin) {
+        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only admin can override finalize blockers');
+      }
     }
     if (
       aggregation.application.status === ApplicationStatus.completed ||
@@ -811,17 +814,19 @@ export class ManagerService {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
     const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
-    try {
-      assertFinalizeMatchesCascade(input, freshCascade);
-    } catch (error) {
-      if (
-        error instanceof AppError &&
-        (error.code === ErrorCodes.FINAL_LEVEL_MISMATCH ||
-          error.code === ErrorCodes.FINAL_STATUS_MISMATCH)
-      ) {
-        await persistFinalizeMismatchSnapshot(user, applicationId, input, aggregation, freshCascade, error);
+    if (!overrideRecommendation) {
+      try {
+        assertFinalizeMatchesCascade(input, freshCascade);
+      } catch (error) {
+        if (
+          error instanceof AppError &&
+          (error.code === ErrorCodes.FINAL_LEVEL_MISMATCH ||
+            error.code === ErrorCodes.FINAL_STATUS_MISMATCH)
+        ) {
+          await persistFinalizeMismatchSnapshot(user, applicationId, input, aggregation, freshCascade, error);
+        }
+        throw error;
       }
-      throw error;
     }
 
     const status =
