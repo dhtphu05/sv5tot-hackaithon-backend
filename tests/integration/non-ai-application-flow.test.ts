@@ -250,7 +250,7 @@ describe('non-AI individual application end-to-end flow', () => {
       expect(uploaded.body.data.evidence).toMatchObject({
         id: evidenceId,
         status: EvidenceStatus.pending_indexing,
-        indexingStatus: 'uploaded',
+        indexingStatus: 'pending_indexing',
       });
       expect(uploaded.body.data.file).toMatchObject({
         originalName: `${criterion}.pdf`,

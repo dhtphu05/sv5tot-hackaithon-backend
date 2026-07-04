@@ -116,6 +116,26 @@ enum JobType {
   event_roster_indexing
   evidence_card_generation
   smartreader_extract
+  decision_metadata
+  decision_roster_ocr
+}
+
+enum SmartReaderJobType {
+  evidence_ocr
+  decision_metadata
+  decision_roster_ocr
+  criteria_doc_ocr
+  smoke_test
+}
+
+enum SmartReaderJobStatus {
+  queued
+  uploading
+  processing
+  polling
+  completed
+  failed
+  cancelled
 }
 
 enum FileStorageType {
@@ -172,6 +192,34 @@ enum EventStatus {
   archived
 }
 
+enum DecisionImportStatus {
+  draft
+  uploaded
+  extracting_metadata
+  ocr_processing
+  parsing_roster
+  preview_ready
+  confirmed
+  failed
+  cancelled
+}
+
+enum DecisionTableType {
+  roster
+  criteria
+  signature
+  unknown
+}
+
+enum RosterPreviewValidationStatus {
+  valid
+  warning
+  invalid
+  duplicate
+  missing_student_code
+  needs_manual_review
+}
+
 enum CollectiveStatus {
   draft
   prechecked
@@ -204,6 +252,8 @@ model User {
   applications           Application[]
   uploadedFiles          File[]                  @relation("UploadedFiles")
   ownedFiles             File[]                  @relation("OwnedFiles")
+  createdDecisionImports DecisionImport[]        @relation("DecisionImportCreatedBy")
+  confirmedDecisionImports DecisionImport[]      @relation("DecisionImportConfirmedBy")
   auditLogs              AuditLog[]
   notifications          Notification[]
   collectiveProfiles     CollectiveProfile[]
@@ -319,11 +369,16 @@ model File {
   mimeType                        String
   fileSize                        Int
   uploadedBy                      String              @db.Uuid
+  vnptHash                        String?
+  vnptFileType                    String?
+  vnptUploadedAt                  DateTime?
+  vnptUploadRawJson               Json?
   createdAt                       DateTime            @default(now())
   owner                           User                @relation("OwnedFiles", fields: [ownerId], references: [id], onDelete: Cascade)
   uploader                        User                @relation("UploadedFiles", fields: [uploadedBy], references: [id], onDelete: Restrict)
   evidenceFiles                   EvidenceFile[]
   eventFiles                      EventFile[]
+  decisionImports                 DecisionImport[] @relation("DecisionImportSourceFile")
   sampleCertificateEvents         EventRegistry[]     @relation("EventSampleCertificate")
   sampleCertificateKnowledgeItems KnowledgeBaseItem[] @relation("KnowledgeSampleCertificate")
 
@@ -376,13 +431,21 @@ model EvidenceCard {
   id                      String   @id @default(uuid()) @db.Uuid
   evidenceId              String   @unique @db.Uuid
   ocrText                 String?
+  ocrLinesJson            Json?    @map("ocr_lines_json")
+  ocrParagraphsJson       Json?    @map("ocr_paragraphs_json")
+  ocrTablesJson           Json?    @map("ocr_tables_json")
   extractedFieldsJson     Json?
+  normalizedFieldsJson    Json?    @map("normalized_fields_json")
   warningsJson            Json?
   matchedEventId          String?  @db.Uuid
+  matchedParticipantId    String?  @map("matched_participant_id") @db.Uuid
   matchedKnowledgeItemIds Json?
   confidence              Float?
+  sourceEndpoint          String?  @map("source_endpoint")
+  smartreaderJobId        String?  @map("smartreader_job_id") @db.Uuid
   aiSummary               String?
   rawAiResponse           Json?
+  rawResponseJson         Json?    @map("raw_response_json")
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
   evidence                Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
@@ -402,11 +465,19 @@ model EventRegistry {
   participantCount        Int                @default(0)
   rosterIndexed           Boolean            @default(false)
   sampleCertificateFileId String?            @db.Uuid
+  decisionDocumentId      String?            @db.Uuid
+  sourceDecisionImportId  String?            @db.Uuid
+  officialDocumentNo      String?
+  officialIssueDate       DateTime?
+  officialSigner          String?
+  officialIssuer          String?
   status                  EventStatus        @default(draft)
   createdBy               String             @db.Uuid
   createdAt               DateTime           @default(now())
   updatedAt               DateTime           @updatedAt
   sampleCertificateFile   File?              @relation("EventSampleCertificate", fields: [sampleCertificateFileId], references: [id], onDelete: SetNull)
+  decisionDocument        DecisionDocument?  @relation(fields: [decisionDocumentId], references: [id], onDelete: SetNull)
+  sourceDecisionImport    DecisionImport?    @relation(fields: [sourceDecisionImportId], references: [id], onDelete: SetNull)
   evidences               Evidence[]
   eventFiles              EventFile[]
   participants            EventParticipant[]
@@ -414,6 +485,8 @@ model EventRegistry {
   @@index([criterion])
   @@index([status])
   @@index([eventName])
+  @@index([decisionDocumentId])
+  @@index([sourceDecisionImportId])
 }
 
 model EventFile {
@@ -441,10 +514,125 @@ model EventParticipant {
   indexedRow          Int?
   convertedValue      Float?
   sourceFileId        String?       @db.Uuid
+  sourceDecisionDocumentId String?   @db.Uuid
+  sourcePage          Int?
+  sourceTableIndex    Int?
+  sourceRowIndex      Int?
+  ocrConfidence       Float?
+  normalizedConfidence Float?
+  rawRowJson          Json?
   event               EventRegistry @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sourceDecisionDocument DecisionDocument? @relation(fields: [sourceDecisionDocumentId], references: [id], onDelete: SetNull)
 
   @@unique([eventId, studentCode])
   @@index([studentCode])
+  @@index([sourceDecisionDocumentId])
+}
+
+model DecisionImport {
+  id                 String               @id @default(uuid()) @db.Uuid
+  title              String
+  criterion          Criterion?
+  eventName          String?
+  organizer          String?
+  organizerLevel     Level?
+  startDate          DateTime?
+  endDate            DateTime?
+  convertedValue     Float?
+  convertedUnit      String?
+  eligibleLevelsJson Json?
+  status             DecisionImportStatus @default(draft)
+  sourceFileId       String?              @db.Uuid
+  vnptHash           String?
+  vnptFileType       String?
+  metadataJobId      String?              @db.Uuid
+  rosterJobId        String?              @db.Uuid
+  createdBy          String               @db.Uuid
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  confirmedAt        DateTime?
+  confirmedBy        String?              @db.Uuid
+  lastErrorCode      String?
+  lastErrorMessage   String?
+  lastUserMessage    String?
+  processingStep     String?
+  columnMappingJson  Json?
+  sourceFile         File?                @relation("DecisionImportSourceFile", fields: [sourceFileId], references: [id], onDelete: SetNull)
+  creator            User                 @relation("DecisionImportCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  confirmer          User?                @relation("DecisionImportConfirmedBy", fields: [confirmedBy], references: [id], onDelete: SetNull)
+  documents          DecisionDocument[]
+  tables             DecisionTable[]
+  previewRows        DecisionRosterPreviewRow[]
+  events             EventRegistry[]
+
+  @@index([status])
+  @@index([sourceFileId])
+  @@index([createdBy])
+  @@index([metadataJobId])
+  @@index([rosterJobId])
+}
+
+model DecisionDocument {
+  id                   String         @id @default(uuid()) @db.Uuid
+  decisionImportId      String         @db.Uuid
+  documentNo            String?
+  documentType          String?
+  issuer                String?
+  issueDate             DateTime?
+  effectiveDate         DateTime?
+  signer                String?
+  summary               String?
+  relatedDocumentsJson  Json?
+  rawAdminResponseJson  Json?
+  createdAt             DateTime       @default(now())
+  decisionImport        DecisionImport @relation(fields: [decisionImportId], references: [id], onDelete: Cascade)
+  eventRegistries       EventRegistry[]
+  eventParticipants     EventParticipant[]
+
+  @@unique([decisionImportId])
+  @@index([documentNo])
+}
+
+model DecisionTable {
+  id               String            @id @default(uuid()) @db.Uuid
+  decisionImportId String            @db.Uuid
+  pageNumber       Int?
+  tableIndex       Int?
+  detectedType     DecisionTableType @default(unknown)
+  headerJson       Json?
+  rowsCount        Int               @default(0)
+  confidence       Float?
+  rawTableJson     Json
+  createdAt        DateTime          @default(now())
+  decisionImport   DecisionImport    @relation(fields: [decisionImportId], references: [id], onDelete: Cascade)
+
+  @@index([decisionImportId])
+  @@index([detectedType])
+}
+
+model DecisionRosterPreviewRow {
+  id                     String                        @id @default(uuid()) @db.Uuid
+  decisionImportId       String                        @db.Uuid
+  studentCode            String?
+  studentName            String?
+  className              String?
+  faculty                String?
+  criterion              Criterion?
+  convertedValue         Float?
+  convertedUnit          String?
+  participationStatus    String?
+  sourcePage             Int?
+  sourceTableIndex       Int?
+  sourceRowIndex         Int?
+  validationStatus       RosterPreviewValidationStatus
+  validationWarningsJson Json?
+  rawRowJson             Json?
+  createdAt              DateTime                      @default(now())
+  decisionImport         DecisionImport                @relation(fields: [decisionImportId], references: [id], onDelete: Cascade)
+
+  @@index([decisionImportId])
+  @@index([studentCode])
+  @@index([validationStatus])
 }
 
 model KnowledgeBaseItem {
@@ -600,6 +788,45 @@ model IndexingJob {
   @@index([targetId])
 }
 
+model SmartReaderJob {
+  id                      String               @id @default(uuid()) @db.Uuid
+  jobType                 SmartReaderJobType   @map("job_type")
+  provider                String               @default("vnpt_smartreader")
+  fileId                  String?              @map("file_id") @db.Uuid
+  evidenceId              String?              @map("evidence_id") @db.Uuid
+  eventId                 String?              @map("event_id") @db.Uuid
+  decisionImportId        String?              @map("decision_import_id") @db.Uuid
+  vnptHash                String?              @map("vnpt_hash")
+  vnptFileType            String?              @map("vnpt_file_type")
+  endpoint                String?
+  sessionId               String?              @map("session_id")
+  status                  SmartReaderJobStatus @default(queued)
+  progressProcessedPages  Int?                 @map("progress_processed_pages")
+  progressRemainingPages  Int?                 @map("progress_remaining_pages")
+  resultLink              String?              @map("result_link")
+  requestPayloadJson      Json?                @map("request_payload_json")
+  rawResponseJson         Json?                @map("raw_response_json")
+  redactedErrorJson       Json?                @map("redacted_error_json")
+  vnptMessage             String?              @map("vnpt_message")
+  vnptStatus              String?              @map("vnpt_status")
+  vnptStatusCode          Int?                 @map("vnpt_status_code")
+  vnptLogId               String?              @map("vnpt_log_id")
+  attemptCount            Int                  @default(0) @map("attempt_count")
+  lockedAt                DateTime?            @map("locked_at")
+  lockedBy                String?              @map("locked_by")
+  createdAt               DateTime             @default(now()) @map("created_at")
+  updatedAt               DateTime             @updatedAt @map("updated_at")
+  completedAt             DateTime?            @map("completed_at")
+
+  @@index([jobType, status])
+  @@index([fileId])
+  @@index([evidenceId])
+  @@index([eventId])
+  @@index([decisionImportId])
+  @@index([sessionId])
+  @@map("smartreader_jobs")
+}
+
 model AuditLog {
   id                  String             @id @default(uuid()) @db.Uuid
   actorId             String?            @db.Uuid
@@ -609,8 +836,17 @@ model AuditLog {
   targetId            String
   applicationId       String?            @db.Uuid
   collectiveProfileId String?            @db.Uuid
+  evidenceId          String?            @db.Uuid
+  eventId             String?            @db.Uuid
+  decisionImportId    String?            @db.Uuid
   beforeStateJson     Json?
   afterStateJson      Json?
+  beforeJson          Json?              @map("before_json")
+  afterJson           Json?              @map("after_json")
+  metadataJson        Json?
+  requestId           String?
+  ipAddress           String?
+  userAgent           String?
   note                String?
   createdAt           DateTime           @default(now())
   actor               User?              @relation(fields: [actorId], references: [id], onDelete: SetNull)
@@ -620,6 +856,10 @@ model AuditLog {
   @@index([actorId])
   @@index([applicationId])
   @@index([collectiveProfileId])
+  @@index([evidenceId])
+  @@index([eventId])
+  @@index([decisionImportId])
+  @@index([requestId])
   @@index([targetType, targetId])
 }
 

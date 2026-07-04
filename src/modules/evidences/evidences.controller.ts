@@ -20,6 +20,16 @@ export async function updateEvidence(req: Request, res: Response): Promise<void>
   sendSuccess(res, { evidence }, { requestId: req.requestId });
 }
 
+export async function getEvidence(req: Request, res: Response): Promise<void> {
+  const evidence = await evidencesService.get(req.user!, String(req.params.id));
+  sendSuccess(res, { evidence }, { requestId: req.requestId });
+}
+
+export async function getEvidenceAudit(req: Request, res: Response): Promise<void> {
+  const data = await evidencesService.getAudit(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function deleteEvidence(req: Request, res: Response): Promise<void> {
   const data = await evidencesService.delete(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });

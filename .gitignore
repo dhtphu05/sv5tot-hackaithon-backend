@@ -10,3 +10,4 @@ uploads/**
 !uploads/event-rosters/.gitkeep
 !uploads/certificates/.gitkeep
 !uploads/exports/.gitkeep
+tmp/

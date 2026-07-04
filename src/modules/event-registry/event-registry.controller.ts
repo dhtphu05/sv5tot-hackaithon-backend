@@ -45,6 +45,11 @@ export async function listParticipants(req: Request, res: Response): Promise<voi
   sendSuccess(res, data.items, { requestId: req.requestId, pagination: data.pagination });
 }
 
+export async function searchEvents(req: Request, res: Response): Promise<void> {
+  const data = await service.search(req.user!, req.query as never);
+  sendSuccess(res, data.items, { requestId: req.requestId, pagination: data.pagination });
+}
+
 export async function confirmIndex(req: Request, res: Response): Promise<void> {
   const data = await service.confirmIndex(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });
@@ -62,5 +67,10 @@ export async function importParticipants(req: Request, res: Response): Promise<v
 
 export async function importEventToApplication(req: Request, res: Response): Promise<void> {
   const data = await service.importToApplication(req.user!, String(req.params.id), req.body);
+  sendSuccess(res, data, { requestId: req.requestId }, 201);
+}
+
+export async function importEventAsEvidence(req: Request, res: Response): Promise<void> {
+  const data = await service.importAsEvidence(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId }, 201);
 }

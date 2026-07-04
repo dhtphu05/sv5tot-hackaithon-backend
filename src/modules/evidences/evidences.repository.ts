@@ -26,6 +26,51 @@ export class EvidencesRepository {
     return this.db.evidence.findUnique({ where: { id }, include: evidenceInclude });
   }
 
+  findLatestEvidenceJob(evidenceId: string) {
+    return this.db.indexingJob.findFirst({
+      where: { targetId: evidenceId, jobType: 'evidence_ocr' },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  findLatestSmartReaderJob(evidenceId: string) {
+    return this.db.smartReaderJob.findFirst({
+      where: { evidenceId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async findEvidenceJobIds(evidenceId: string) {
+    const jobs = await this.db.indexingJob.findMany({
+      where: { targetId: evidenceId, jobType: 'evidence_ocr' },
+      select: { id: true },
+    });
+    return jobs.map((job) => job.id);
+  }
+
+  findEvidenceAuditLogs(evidenceId: string, jobIds: string[]) {
+    return this.db.auditLog.findMany({
+      where: {
+        OR: [
+          { evidenceId },
+          { targetType: 'evidence', targetId: evidenceId },
+          { targetType: 'indexing_job', targetId: { in: jobIds } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  findEvidenceAuditSummaryLogs(evidenceId: string) {
+    return this.db.auditLog.findMany({
+      where: { evidenceId },
+      select: { action: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+  }
+
   async list(applicationId: string, query: ListEvidencesQuery) {
     const where: Prisma.EvidenceWhereInput = {
       applicationId,

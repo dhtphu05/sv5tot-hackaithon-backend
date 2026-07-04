@@ -8,6 +8,8 @@ import { asyncHandler } from '../../shared/utils/async-handler';
 import {
   createApplicationEvidence,
   deleteEvidence,
+  getEvidence,
+  getEvidenceAudit,
   getEvidenceCard,
   listApplicationEvidences,
   startEvidenceIndexing,
@@ -40,14 +42,14 @@ evidencesRouter.get(
 evidencesRouter.post(
   '/applications/:applicationId/evidences',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
+  requireRole(Role.student, Role.class_representative, Role.officer, Role.manager, Role.admin),
   validate({ body: createEvidenceSchema }),
   asyncHandler(createApplicationEvidence),
 );
 evidencesRouter.post(
   '/evidences/:id/files',
   requireAuth,
-  requireRole(Role.student, Role.class_representative),
+  requireRole(Role.student, Role.class_representative, Role.officer, Role.manager, Role.admin),
   uploadMiddleware.single('file'),
   asyncHandler(uploadEvidenceFile),
 );
@@ -70,6 +72,32 @@ evidencesRouter.get(
     Role.admin,
   ),
   asyncHandler(getEvidenceCard),
+);
+evidencesRouter.get(
+  '/evidences/:id/audit',
+  requireAuth,
+  requireRole(
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.admin,
+  ),
+  asyncHandler(getEvidenceAudit),
+);
+evidencesRouter.get(
+  '/evidences/:id',
+  requireAuth,
+  requireRole(
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.admin,
+  ),
+  asyncHandler(getEvidence),
 );
 evidencesRouter.patch(
   '/evidences/:id',
