@@ -1018,9 +1018,14 @@ export function buildAggregation(application: ApplicationDetail) {
     rejected: application.resolutionCases.filter((item) => item.status === 'rejected').length,
   };
   const latestCascade = application.cascadeReviews[0] ?? null;
+  const latestCascadeSuggestedLevel = latestCascade
+    ? latestCascade.suggestedLevel
+    : application.targetLevel;
   const suggestedFinalStatus =
     computed.allTasksDone && computed.rejectedCriteria.length === 0
-      ? FinalStatus.passed
+      ? latestCascadeSuggestedLevel
+        ? FinalStatus.passed
+        : FinalStatus.failed
       : computed.rejectedCriteria.length > 0
         ? FinalStatus.pending
         : FinalStatus.pending;
@@ -1040,7 +1045,7 @@ export function buildAggregation(application: ApplicationDetail) {
     suggestedFinalStatus,
     suggestedFinalLevel:
       suggestedFinalStatus === FinalStatus.passed
-        ? (latestCascade?.suggestedLevel ?? application.targetLevel)
+        ? latestCascadeSuggestedLevel
         : null,
     canFinalize: computed.allTasksDone && resolutionSummary.open === 0,
     blockingReasons: buildBlockingReasons(reviewProgress, resolutionSummary.open),
