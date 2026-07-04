@@ -17,26 +17,63 @@ export function normalizeEvidenceOcr(
 ): NormalizedEvidenceOcr {
   const rawObject = asRecord(asRecord(ocr.raw).object ?? ocr.raw);
   const phrases = arrayOfRecords(rawObject.phrases ?? rawObject.Phrase ?? rawObject.phrase);
+  const rawLines = arrayOfRecords(rawObject.lines ?? rawObject.Line ?? rawObject.line).map(recordToLine);
+  const rawParagraphs = arrayOfRecords(
+    rawObject.paragraphs ?? rawObject.Paragraph ?? rawObject.paragraph,
+  ).map(recordToParagraph);
+  const rawTables = arrayOfRecords(rawObject.tables ?? rawObject.Table ?? rawObject.table).map(recordToTable);
   const phraseLines = phrases.flatMap((phrase) => phraseToLines(phrase));
   const phraseParagraphs = phrases.flatMap((phrase) => phraseToParagraphs(phrase));
   const phraseTables = phrases.flatMap((phrase) => phraseToTables(phrase));
-  const lines = ocr.lines.length ? ocr.lines : phraseLines;
-  const paragraphs = ocr.paragraphs.length ? ocr.paragraphs : phraseParagraphs;
-  const tables = ocr.tables.length ? ocr.tables : phraseTables;
-  const text = ocr.text || collectText([lines, paragraphs, tables]);
+  const lines = ocr.lines.length ? ocr.lines : rawLines.length ? rawLines : phraseLines;
+  const paragraphs = ocr.paragraphs.length
+    ? ocr.paragraphs
+    : rawParagraphs.length
+      ? rawParagraphs
+      : phraseParagraphs;
+  const tables = ocr.tables.length ? ocr.tables : rawTables.length ? rawTables : phraseTables;
+  const text = chooseOcrText(ocr.text, lines, paragraphs, phrases, tables);
+  const warnings = [...ocr.warnings, ...normalizeArray(rawObject.warnings ?? rawObject.warning)];
+  if (!text.trim()) warnings.push('ocr_empty_text');
 
   return {
     ocrText: text,
     ocrLinesJson: lines,
     ocrParagraphsJson: paragraphs,
     ocrTablesJson: tables,
-    warnings: [...ocr.warnings, ...normalizeArray(rawObject.warnings ?? rawObject.warning)],
+    warnings,
     warningMessages: [
       ...ocr.warningMessages,
       ...normalizeArray(rawObject.warning_messages ?? rawObject.warningMessages),
     ],
     numOfPages: ocr.numOfPages ?? numberValue(rawObject.num_of_pages) ?? numberValue(rawObject.total_page_num),
     sourceEndpoint,
+  };
+}
+
+function recordToLine(item: Record<string, unknown>): SmartReaderTextLine {
+  return {
+    text: stringValue(item.text ?? item.value ?? item.content ?? item.raw_text) ?? '',
+    confidence: numberValue(item.confidence_score ?? item.confidence ?? item.conf),
+    page: numberValue(item.page_id ?? item.page ?? item.page_num),
+    bbox: item.bboxes ?? item.bbox ?? item.box,
+  };
+}
+
+function recordToParagraph(item: Record<string, unknown>): SmartReaderParagraph {
+  return {
+    text: stringValue(item.text ?? item.value ?? item.content ?? item.raw_text) ?? '',
+    confidence: numberValue(item.confidence_score ?? item.confidence ?? item.conf),
+    page: numberValue(item.page_id ?? item.page ?? item.page_num),
+  };
+}
+
+function recordToTable(item: Record<string, unknown>): SmartReaderTable {
+  const rawRows = item.rows ?? item.Rows ?? item.cells ?? item.Cell ?? item.data;
+  return {
+    rows: Array.isArray(rawRows) ? rawRows : [],
+    confidence: numberValue(item.confidence_score ?? item.confidence ?? item.conf),
+    page: numberValue(item.page_id ?? item.page ?? item.page_num),
   };
 }
 
@@ -110,4 +147,21 @@ function collectText(value: unknown): string {
   const record = value as Record<string, unknown>;
   if (typeof record.text === 'string') return record.text;
   return Object.values(record).map(collectText).filter(Boolean).join('\n');
+}
+
+function chooseOcrText(
+  text: string,
+  lines: SmartReaderTextLine[],
+  paragraphs: SmartReaderParagraph[],
+  phrases: Record<string, unknown>[],
+  tables: SmartReaderTable[],
+): string {
+  if (text.trim()) return text;
+  const lineText = lines.map((line) => line.text).filter(Boolean).join('\n');
+  if (lineText.trim()) return lineText;
+  const paragraphText = paragraphs.map((paragraph) => paragraph.text).filter(Boolean).join('\n');
+  if (paragraphText.trim()) return paragraphText;
+  const phraseText = phrases.map((phrase) => stringValue(phrase.text)).filter(Boolean).join('\n');
+  if (phraseText.trim()) return phraseText;
+  return collectText(tables);
 }

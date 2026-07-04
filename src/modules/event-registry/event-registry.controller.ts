@@ -47,7 +47,7 @@ export async function listParticipants(req: Request, res: Response): Promise<voi
 
 export async function searchEvents(req: Request, res: Response): Promise<void> {
   const data = await service.search(req.user!, req.query as never);
-  sendSuccess(res, data.items, { requestId: req.requestId, pagination: data.pagination });
+  sendSuccess(res, data, { requestId: req.requestId });
 }
 
 export async function confirmIndex(req: Request, res: Response): Promise<void> {

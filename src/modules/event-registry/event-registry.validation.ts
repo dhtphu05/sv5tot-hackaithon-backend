@@ -46,8 +46,9 @@ export const searchEventsQuerySchema = z.object({
   criterion: z.nativeEnum(Criterion).optional(),
   q: z.string().trim().optional(),
   applicationId: z.string().uuid().optional(),
+  track: z.coerce.boolean().default(false),
   page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
+  limit: z.coerce.number().int().positive().max(20).default(5),
 });
 
 export const confirmIndexSchema = z.object({
