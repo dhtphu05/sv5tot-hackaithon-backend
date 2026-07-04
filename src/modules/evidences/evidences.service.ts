@@ -15,6 +15,14 @@ import { StorageService } from '../storage/storage.service';
 import { sanitizeFileName } from '../storage/storage.types';
 import { env } from '../../config/env';
 import { auditActions } from '../../shared/constants/application';
+import {
+  buildMissingFields,
+  buildReadableSummary,
+  getEvidenceStudentStatus,
+  mapWarnings,
+  resolveMatchingStatusForCard,
+  resolveStudentStatusForCard,
+} from '../../shared/dto/evidence-student-status';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -494,8 +502,13 @@ export class EvidencesService {
         job,
         jobId: job.id,
         mode: 'ocr_queued',
+        studentStatus: {
+          ...getEvidenceStudentStatus('recorded_waiting_review'),
+          message: 'Minh chứng đã được lưu. Hệ thống sẽ đọc nhanh file để tạo tóm tắt.',
+          nextAction: 'view_evidence',
+        },
       };
-    });
+	    });
 
     return result;
   }
@@ -527,11 +540,7 @@ export class EvidencesService {
     const evidence = await this.getRequiredEvidence(evidenceId);
     this.assertCanViewEvidence(user, evidence);
 
-    const isPrivileged =
-      user.role === Role.officer ||
-      user.role === Role.manager ||
-      user.role === Role.committee ||
-      user.role === Role.admin;
+    const isPrivileged = this.isPrivileged(user);
     const latestJob = await this.findLatestEvidenceJob(evidence.id);
     const latestSmartReaderJob = await this.findLatestSmartReaderJob(evidence.id);
     const auditSummary = await this.getEvidenceAuditSummary(evidence.id);
@@ -547,27 +556,7 @@ export class EvidencesService {
     return {
       evidence: this.toEvidenceDto(evidence, user),
       card: evidence.evidenceCard
-        ? {
-            id: evidence.evidenceCard.id,
-            ocrText: evidence.evidenceCard.ocrText,
-            ocrLinesJson: evidence.evidenceCard.ocrLinesJson,
-            ocrParagraphsJson: evidence.evidenceCard.ocrParagraphsJson,
-            ocrTablesJson: evidence.evidenceCard.ocrTablesJson,
-            extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
-            normalizedFieldsJson: evidence.evidenceCard.normalizedFieldsJson,
-            warningsJson: evidence.evidenceCard.warningsJson,
-            matchedEventId: evidence.evidenceCard.matchedEventId,
-            matchedParticipantId: evidence.evidenceCard.matchedParticipantId,
-            matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
-            confidence: evidence.evidenceCard.confidence,
-            sourceEndpoint: evidence.evidenceCard.sourceEndpoint,
-            smartreaderJobId: evidence.evidenceCard.smartreaderJobId,
-            aiSummary: evidence.evidenceCard.aiSummary,
-            rawAiResponse: isPrivileged ? evidence.evidenceCard.rawAiResponse : undefined,
-            rawResponseJson: isPrivileged ? evidence.evidenceCard.rawResponseJson : undefined,
-            createdAt: evidence.evidenceCard.createdAt,
-            updatedAt: evidence.evidenceCard.updatedAt,
-          }
+        ? this.toEvidenceCardDto(evidence, isPrivileged)
         : null,
       job: latestJob
         ? {
@@ -575,7 +564,7 @@ export class EvidencesService {
             status: latestJob.status,
             attempts: latestJob.attempts,
             errorMessage: latestJob.errorMessage,
-            resultJson: latestJob.resultJson,
+            resultJson: isPrivileged ? latestJob.resultJson : undefined,
             retryable: latestJob.status === JobStatus.failed,
           }
         : null,
@@ -662,8 +651,21 @@ export class EvidencesService {
 
   private toEvidenceDto(
     evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
-    _user: AuthenticatedUser,
+    user: AuthenticatedUser,
   ) {
+    const isPrivileged = this.isPrivileged(user);
+    const studentStatus = resolveStudentStatusForCard({
+      sourceType: evidence.sourceType,
+      status: evidence.status,
+      indexingStatus: evidence.indexingStatus,
+      criterion: evidence.criterion,
+      ocrText: evidence.evidenceCard?.ocrText,
+      fields: evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson,
+      warnings: evidence.evidenceCard?.warningsJson,
+      matchedEventId: evidence.evidenceCard?.matchedEventId,
+      matchedParticipantId: evidence.evidenceCard?.matchedParticipantId,
+    });
+
     return {
       id: evidence.id,
       applicationId: evidence.applicationId,
@@ -672,12 +674,13 @@ export class EvidencesService {
       sourceType: evidence.sourceType,
       status: evidence.status,
       indexingStatus: evidence.indexingStatus,
-      confidence: evidence.confidence,
+      ...(isPrivileged ? { internalConfidence: evidence.confidence } : {}),
+      studentStatus,
       uxStatus: mapEvidenceUxStatus({
         evidenceStatus: evidence.status,
         indexingStatus: evidence.indexingStatus,
         hasCard: !!evidence.evidenceCard,
-        confidence: evidence.confidence,
+        confidence: isPrivileged ? evidence.confidence : null,
       }),
       createdAt: evidence.createdAt,
       updatedAt: evidence.updatedAt,
@@ -692,10 +695,89 @@ export class EvidencesService {
       card: evidence.evidenceCard
         ? {
             id: evidence.evidenceCard.id,
-            confidence: evidence.evidenceCard.confidence,
-            warnings: evidence.evidenceCard.warningsJson,
+            ...(isPrivileged ? { internalConfidence: evidence.evidenceCard.confidence } : {}),
+            studentStatus,
+            warnings: mapWarnings(evidence.evidenceCard.warningsJson),
           }
         : null,
     };
   }
+
+  private toEvidenceCardDto(
+    evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
+    isPrivileged: boolean,
+  ) {
+    const card = evidence.evidenceCard;
+    if (!card) return null;
+
+    const fields = card.normalizedFieldsJson ?? card.extractedFieldsJson;
+    const readableSummary = buildReadableSummary(fields);
+    const warnings = mapWarnings(card.warningsJson);
+    const missingFields = buildMissingFields(evidence.criterion, fields, card.warningsJson);
+    const studentStatus = resolveStudentStatusForCard({
+      sourceType: evidence.sourceType,
+      status: evidence.status,
+      indexingStatus: evidence.indexingStatus,
+      criterion: evidence.criterion,
+      ocrText: card.ocrText,
+      fields,
+      warnings: card.warningsJson,
+      matchedEventId: card.matchedEventId,
+      matchedParticipantId: card.matchedParticipantId,
+    });
+    const matchingStatus = resolveMatchingStatusForCard({
+      matchedEventId: card.matchedEventId,
+      matchedEventName: readableSummary.eventName,
+      matchedParticipantId: card.matchedParticipantId,
+      warnings: card.warningsJson,
+    });
+
+    const studentCard = {
+      id: card.id,
+      readableSummary,
+      matchingStatus,
+      missingFields,
+      studentStatus,
+      warnings,
+      ocrTextPreview: previewText(card.ocrText),
+      createdAt: card.createdAt,
+      updatedAt: card.updatedAt,
+    };
+
+    if (!isPrivileged) return studentCard;
+
+    return {
+      ...studentCard,
+      ocrText: card.ocrText,
+      ocrLinesJson: card.ocrLinesJson,
+      ocrParagraphsJson: card.ocrParagraphsJson,
+      ocrTablesJson: card.ocrTablesJson,
+      extractedFieldsJson: card.extractedFieldsJson,
+      normalizedFieldsJson: card.normalizedFieldsJson,
+      warningsJson: card.warningsJson,
+      matchedEventId: card.matchedEventId,
+      matchedParticipantId: card.matchedParticipantId,
+      matchedKnowledgeItemIds: card.matchedKnowledgeItemIds,
+      internalConfidence: card.confidence,
+      sourceEndpoint: card.sourceEndpoint,
+      smartreaderJobId: card.smartreaderJobId,
+      technicalSummary: card.aiSummary,
+      rawAiResponse: card.rawAiResponse,
+      rawResponseJson: card.rawResponseJson,
+    };
+  }
+
+  private isPrivileged(user: AuthenticatedUser) {
+    return (
+      user.role === Role.officer ||
+      user.role === Role.manager ||
+      user.role === Role.committee ||
+      user.role === Role.admin
+    );
+  }
+}
+
+function previewText(value?: string | null): string | undefined {
+  if (!value?.trim()) return undefined;
+  return value.trim().replace(/\s+/g, ' ').slice(0, 240);
 }

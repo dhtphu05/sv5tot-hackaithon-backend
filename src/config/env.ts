@@ -22,10 +22,13 @@ const rawEnvSchema = z.object({
     .string()
     .regex(/^\d{4}-\d{4}$/)
     .default('2025-2026'),
-  JWT_ACCESS_SECRET: z.string().min(1, 'JWT_ACCESS_SECRET is required'),
-  JWT_REFRESH_SECRET: z.string().min(1, 'JWT_REFRESH_SECRET is required'),
+  JWT_SECRET: z.string().min(1).optional(),
+  JWT_ACCESS_SECRET: z.string().min(1).optional(),
+  JWT_REFRESH_SECRET: z.string().min(1).optional(),
+  JWT_EXPIRES_IN: z.string().min(1).optional(),
   JWT_ACCESS_EXPIRES_IN: z.string().min(1).default('120m'),
   JWT_REFRESH_EXPIRES_IN: z.string().min(1).default('30d'),
+  BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(15).optional(),
   BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
   SEED_DEFAULT_PASSWORD: z.string().min(8).default('Password@123'),
   CORS_ORIGIN: z
@@ -85,24 +88,31 @@ const rawEnvSchema = z.object({
   VNPT_LOG_RAW_RESPONSE: booleanFromEnv,
   SMARTREADER_SMOKE_AUDIT_ENABLED: booleanFromEnv,
   SMARTREADER_ASYNC_MAX_POLLS: z.coerce.number().int().positive().default(60),
+  JOB_WORKER_ENABLED: booleanFromEnv,
+  JOB_WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   INTERNAL_WORKER_TOKEN: z.string().optional().default(''),
   SMARTBOT_MODE: z.enum(['mock', 'live']).default('mock'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-}).refine((data) => {
-  if (data.STORAGE_DRIVER === 'r2') {
-    return (
-      !!data.R2_BUCKET_NAME &&
-      !!data.R2_ACCOUNT_ID &&
-      !!data.R2_ENDPOINT &&
-      !!data.R2_ACCESS_KEY_ID &&
-      !!data.R2_SECRET_ACCESS_KEY
-    );
-  }
-  return true;
-}, {
-  message: 'R2 configurations (R2_BUCKET_NAME, R2_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY) are required when STORAGE_DRIVER is set to "r2"',
-  path: ['STORAGE_DRIVER'],
-});
+})
+  .refine((data) => !!data.JWT_SECRET || (!!data.JWT_ACCESS_SECRET && !!data.JWT_REFRESH_SECRET), {
+    message: 'JWT_SECRET or both JWT_ACCESS_SECRET/JWT_REFRESH_SECRET are required',
+    path: ['JWT_ACCESS_SECRET'],
+  })
+  .refine((data) => {
+    if (data.STORAGE_DRIVER === 'r2') {
+      return (
+        !!data.R2_BUCKET_NAME &&
+        !!data.R2_ACCOUNT_ID &&
+        !!data.R2_ENDPOINT &&
+        !!data.R2_ACCESS_KEY_ID &&
+        !!data.R2_SECRET_ACCESS_KEY
+      );
+    }
+    return true;
+  }, {
+    message: 'R2 configurations (R2_BUCKET_NAME, R2_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY) are required when STORAGE_DRIVER is set to "r2"',
+    path: ['STORAGE_DRIVER'],
+  });
 
 const parsedEnv = rawEnvSchema.safeParse(process.env);
 
@@ -170,6 +180,10 @@ export const env = {
     process.env.SMARTREADER_SMOKE_AUDIT_ENABLED === undefined
       ? false
       : rawEnv.SMARTREADER_SMOKE_AUDIT_ENABLED,
+  JOB_WORKER_ENABLED:
+    process.env.JOB_WORKER_ENABLED === undefined
+      ? rawEnv.NODE_ENV === 'development'
+      : rawEnv.JOB_WORKER_ENABLED,
   VNPT_ENABLED: vnptEnabled,
   VNPT_REQUIRE_REAL_IN_PIPELINE: vnptRequireRealInPipeline,
   VNPT_ALLOW_MOCK_RUNTIME: vnptAllowMockRuntime,

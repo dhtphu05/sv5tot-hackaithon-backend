@@ -28,13 +28,14 @@ export function extractEvidenceFields(input: {
   const fields: EvidenceExtractedFields = {};
 
   fields.student_code = matchFirst(text, [
-    /\b(?:MSSV|Mã\s*SV|Mã\s*sinh\s*viên|Số\s*thẻ\s*sinh\s*viên)\s*[:-]?\s*([A-Z0-9]{6,12})\b/i,
-    /\b([0-9]{8,12})\b/,
+    /\b(?:MSSV|Mã\s*SV|Mã\s*sinh\s*viên|Mã\s*số\s*sinh\s*viên|Số\s*thẻ\s*sinh\s*viên)\s*[:-]?\s*([A-Z0-9]{6,12})\b/i,
+    /\b(?:sinh\s*viên|student)\s+(?:có\s+)?(?:mã\s*)?([0-9]{8,12})\b/i,
   ]);
   fields.student_name = cleanName(
     matchFirst(text, [
       /(?:Họ\s*và\s*tên|Cấp\s*cho)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
       /(?:Sinh\s*viên)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
+      /(?:Chứng\s*nhận|Ông\/Bà|Ông|Bà)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
       fields.student_code
         ? new RegExp(`([A-ZÀ-Ỹ][^\\n,.;]{3,80})\\s+${escapeRegExp(fields.student_code)}`, 'i')
         : undefined,
@@ -68,7 +69,8 @@ export function extractEvidenceFields(input: {
   ]);
   fields.award_level = matchFirst(text, [/(giải\s+(?:nhất|nhì|ba|khuyến\s*khích|A|B|C))/i]);
   fields.volunteer_days = normalized.includes('tinh nguyen')
-    ? numberFromMatch(text, /([0-9]{1,3})\s*(?:ngày|buổi)\s*(?:tình\s*nguyện|tham\s*gia)/i)
+    ? numberFromMatch(text, /([0-9]{1,3})\s*(?:ngày|buổi)\s*(?:tình\s*nguyện|tham\s*gia)/i) ??
+      (normalized.includes('hien mau') ? 1 : undefined)
     : undefined;
   fields.language_score = matchFirst(text, [
     /\b(IELTS\s*[0-9](?:\.[0-9])?)\b/i,
@@ -148,20 +150,26 @@ function normalizeVietnameseDate(numbers: number[]): string | undefined {
 
 function detectDocumentType(normalized: string): string | undefined {
   if (normalized.includes('quyet dinh')) return 'decision';
+  if (normalized.includes('giay khen')) return 'award';
   if (normalized.includes('giay chung nhan') || normalized.includes('chung nhan')) return 'certificate';
   if (normalized.includes('bang diem')) return 'transcript';
+  if (/(ielts|toeic|toefl|\ba2\b|\bb1\b|\bb2\b|\bc1\b|\bc2\b)/i.test(normalized)) {
+    return 'language_certificate';
+  }
   if (normalized.includes('chung chi')) return 'certificate';
   return undefined;
 }
 
 function detectOrganizerLevel(organizer?: string): string | undefined {
-  if (!organizer) return undefined;
+  if (!organizer) return 'unknown';
   const normalized = normalizeText(organizer);
   if (normalized.includes('trung uong')) return 'central';
   if (normalized.includes('thanh pho') || normalized.includes('tp.')) return 'city';
   if (normalized.includes('dai hoc da nang')) return 'university';
-  if (normalized.includes('truong') || normalized.includes('khoa') || normalized.includes('clb')) return 'school';
-  return undefined;
+  if (normalized.includes('truong')) return 'school';
+  if (normalized.includes('khoa')) return 'faculty';
+  if (normalized.includes('clb') || normalized.includes('cau lac bo')) return 'club';
+  return 'external';
 }
 
 function cleanName(value?: string): string | undefined {
