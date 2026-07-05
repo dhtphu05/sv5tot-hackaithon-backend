@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
+import { buildReadableSummary } from '../../shared/dto/evidence-student-status';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -36,12 +37,7 @@ type ReviewTaskPermissionReason =
   | 'role_not_allowed';
 
 type ReviewTaskAvailableAction =
-  | 'view'
-  | 'decide'
-  | 'request_supplement'
-  | 'escalate_resolution'
-  | 'claim'
-  | 'request_support';
+  'view' | 'decide' | 'request_supplement' | 'escalate_resolution' | 'claim' | 'request_support';
 
 type ReviewTaskPermissions = {
   canView: boolean;
@@ -123,14 +119,17 @@ export class ReviewService {
       totalAssigned: listItems.length,
       waiting: listItems.filter((item) => item.status === ReviewTaskStatus.waiting).length,
       reviewing: listItems.filter((item) => item.status === ReviewTaskStatus.reviewing).length,
-      supplementRequired: listItems.filter((item) => item.status === ReviewTaskStatus.supplement_required)
-        .length,
+      supplementRequired: listItems.filter(
+        (item) => item.status === ReviewTaskStatus.supplement_required,
+      ).length,
       accepted: listItems.filter((item) => item.status === ReviewTaskStatus.accepted).length,
       rejected: listItems.filter((item) => item.status === ReviewTaskStatus.rejected).length,
-      resolutionNeeded: listItems.filter((item) => item.status === ReviewTaskStatus.resolution_needed)
-        .length,
+      resolutionNeeded: listItems.filter(
+        (item) => item.status === ReviewTaskStatus.resolution_needed,
+      ).length,
       aiLowConfidence: listItems.filter((item) => (item.aiConfidence ?? 1) < 0.7).length,
-      overdue: listItems.filter((item) => item.dueDate && new Date(item.dueDate).getTime() < now).length,
+      overdue: listItems.filter((item) => item.dueDate && new Date(item.dueDate).getTime() < now)
+        .length,
       dueSoon: listItems.filter((item) => {
         if (!item.dueDate) return false;
         const due = new Date(item.dueDate).getTime();
@@ -179,21 +178,24 @@ export class ReviewService {
             specializationScopes: [],
           },
       summary,
-      priorityTasks: listItems.filter(isActionablePriorityTask).slice(0, 8).map((item) => ({
-        taskId: item.taskId,
-        applicationId: item.applicationId,
-        studentName: item.studentName,
-        studentCode: item.studentCode,
-        criterion: item.criterion,
-        targetLevel: item.targetLevel,
-        status: item.status,
-        aiConfidence: item.aiConfidence,
-        riskLevel: item.riskLevel,
-        dueDate: item.dueDate,
-        updatedAt: item.updatedAt,
-        permissions: item.permissions,
-        priorityReason: item.priorityReason,
-      })),
+      priorityTasks: listItems
+        .filter(isActionablePriorityTask)
+        .slice(0, 8)
+        .map((item) => ({
+          taskId: item.taskId,
+          applicationId: item.applicationId,
+          studentName: item.studentName,
+          studentCode: item.studentCode,
+          criterion: item.criterion,
+          targetLevel: item.targetLevel,
+          status: item.status,
+          aiConfidence: item.aiConfidence,
+          riskLevel: item.riskLevel,
+          dueDate: item.dueDate,
+          updatedAt: item.updatedAt,
+          permissions: item.permissions,
+          priorityReason: item.priorityReason,
+        })),
       bottleneckByCriterion,
       recentActivity,
     };
@@ -237,6 +239,27 @@ export class ReviewService {
     const permissions = await this.getTaskPermissions(user, taskForResponse);
 
     const evidences = taskForResponse.evidences.map((item) => item.evidence);
+    const matchedEventIds = [
+      ...new Set(
+        evidences
+          .map((evidence) => evidence.evidenceCard?.matchedEventId)
+          .filter((eventId): eventId is string => Boolean(eventId)),
+      ),
+    ];
+    const matchedEvents = matchedEventIds.length
+      ? await prisma.eventRegistry.findMany({
+          where: { id: { in: matchedEventIds } },
+          select: {
+            id: true,
+            eventName: true,
+            organizer: true,
+            organizerLevel: true,
+            startDate: true,
+            endDate: true,
+          },
+        })
+      : [];
+    const matchedEventsById = new Map(matchedEvents.map((event) => [event.id, event]));
     const knowledgeBaseMatches = await Promise.all(
       evidences.map(async (evidence) => ({
         evidenceId: evidence.id,
@@ -287,50 +310,73 @@ export class ReviewService {
         taskForResponse.application?.metrics.filter(
           (metric) => metric.metricType === metricForCriterion(taskForResponse.criterion),
         ) ?? [],
-      evidences: evidences.map((evidence) => ({
-        id: evidence.id,
-        applicationId: evidence.applicationId,
-        evidenceName: evidence.evidenceName,
-        criterion: evidence.criterion,
-        sourceType: evidence.sourceType,
-        status: evidence.status,
-        indexingStatus: evidence.indexingStatus,
-        confidence: evidence.confidence,
-        createdAt: evidence.createdAt,
-        updatedAt: evidence.updatedAt,
-        files: (evidence.evidenceFiles || []).map((link) => ({
-          id: link.file.id,
-          originalName: link.file.originalName,
-          mimeType: link.file.mimeType,
-          fileSize: link.file.fileSize,
-          publicUrl: link.file.publicUrl,
-          fileRole: link.fileRole,
-          uploadedAt: link.file.createdAt,
-          createdAt: link.file.createdAt,
-        })),
-        card: evidence.evidenceCard
-          ? {
-              id: evidence.evidenceCard.id,
-              ocrText: evidence.evidenceCard.ocrText,
-              extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
-              warningsJson: evidence.evidenceCard.warningsJson || [],
-              matchedEventId: evidence.evidenceCard.matchedEventId,
-              matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
-              confidence: evidence.evidenceCard.confidence,
-              aiSummary: evidence.evidenceCard.aiSummary,
-              createdAt: evidence.evidenceCard.createdAt,
-              updatedAt: evidence.evidenceCard.updatedAt,
-            }
-          : null,
-        event: evidence.event
-          ? {
-              id: evidence.event.id,
-              eventName: evidence.event.eventName,
-              organizer: evidence.event.organizer,
-              organizerLevel: evidence.event.organizerLevel,
-            }
-          : null,
-      })),
+      evidences: evidences.map((evidence) => {
+        const fields =
+          evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson;
+        const readableSummary = buildReadableSummary(fields);
+        const displayEvent =
+          evidence.event ??
+          (evidence.evidenceCard?.matchedEventId
+            ? matchedEventsById.get(evidence.evidenceCard.matchedEventId)
+            : null);
+
+        return {
+          id: evidence.id,
+          applicationId: evidence.applicationId,
+          evidenceName: evidence.evidenceName,
+          criterion: evidence.criterion,
+          sourceType: evidence.sourceType,
+          status: evidence.status,
+          indexingStatus: evidence.indexingStatus,
+          confidence: evidence.confidence,
+          createdAt: evidence.createdAt,
+          updatedAt: evidence.updatedAt,
+          files: (evidence.evidenceFiles || []).map((link) => ({
+            id: link.file.id,
+            originalName: link.file.originalName,
+            mimeType: link.file.mimeType,
+            fileSize: link.file.fileSize,
+            publicUrl: link.file.publicUrl,
+            fileRole: link.fileRole,
+            uploadedAt: link.file.createdAt,
+            createdAt: link.file.createdAt,
+          })),
+          card: evidence.evidenceCard
+            ? {
+                id: evidence.evidenceCard.id,
+                ocrText: evidence.evidenceCard.ocrText,
+                readableSummary,
+                extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
+                normalizedFieldsJson: evidence.evidenceCard.normalizedFieldsJson,
+                warningsJson: evidence.evidenceCard.warningsJson || [],
+                matchedEventId: evidence.evidenceCard.matchedEventId,
+                matchingStatus: {
+                  code: evidence.evidenceCard.matchedEventId
+                    ? 'official_match_found'
+                    : 'official_match_not_found',
+                  matchedEventId: evidence.evidenceCard.matchedEventId,
+                  matchedEventName: displayEvent?.eventName ?? readableSummary.eventName ?? null,
+                  matchedParticipantId: evidence.evidenceCard.matchedParticipantId,
+                },
+                matchedKnowledgeItemIds: evidence.evidenceCard.matchedKnowledgeItemIds,
+                confidence: evidence.evidenceCard.confidence,
+                aiSummary: evidence.evidenceCard.aiSummary,
+                createdAt: evidence.evidenceCard.createdAt,
+                updatedAt: evidence.evidenceCard.updatedAt,
+              }
+            : null,
+          event: displayEvent
+            ? {
+                id: displayEvent.id,
+                eventName: displayEvent.eventName,
+                organizer: displayEvent.organizer,
+                organizerLevel: displayEvent.organizerLevel,
+                startDate: displayEvent.startDate,
+                endDate: displayEvent.endDate,
+              }
+            : null,
+        };
+      }),
       precheck:
         taskForResponse.application?.precheckResults[0] ??
         taskForResponse.collectiveProfile?.precheckResults[0] ??
@@ -348,19 +394,14 @@ export class ReviewService {
     const permissions = await this.getTaskPermissions(user, task);
 
     if (!permissions.canClaim) {
-      throw new AppError(
-        403,
-        ErrorCodes.REVIEW_TASK_PERMISSION_DENIED,
-        permissions.reasonLabel,
-      );
+      throw new AppError(403, ErrorCodes.REVIEW_TASK_PERMISSION_DENIED, permissions.reasonLabel);
     }
 
     const claimResult = await prisma.reviewTask.updateMany({
       where: { id: task.id, assignedOfficerId: null },
       data: {
         assignedOfficerId: user.id,
-        status:
-          task.status === ReviewTaskStatus.waiting ? ReviewTaskStatus.reviewing : task.status,
+        status: task.status === ReviewTaskStatus.waiting ? ReviewTaskStatus.reviewing : task.status,
       },
     });
 
@@ -1281,10 +1322,7 @@ function mapDecisionToStatus(decision: ReviewDecision): ReviewTaskStatus {
   return ReviewTaskStatus.resolution_needed;
 }
 
-async function syncApplicationReviewOutcome(
-  tx: Prisma.TransactionClient,
-  applicationId: string,
-) {
+async function syncApplicationReviewOutcome(tx: Prisma.TransactionClient, applicationId: string) {
   const tasks = await tx.reviewTask.findMany({
     where: { applicationId },
     select: { status: true, officerSuggestedLevel: true },
@@ -1445,7 +1483,8 @@ function toTaskListItem(task: {
   _count: { evidences: number };
 }) {
   const aiConfidence = getTaskAiConfidence(task.evidences ?? []);
-  const targetLevel = task.application?.targetLevel ?? task.collectiveProfile?.targetLevel ?? 'school';
+  const targetLevel =
+    task.application?.targetLevel ?? task.collectiveProfile?.targetLevel ?? 'school';
   const riskLevel = getTaskRiskLevel({
     status: task.status,
     dueDate: task.dueDate,
@@ -1535,7 +1574,9 @@ function buildTaskPermissions(
   };
 }
 
-function buildPermissionBadges(input: Omit<ReviewTaskPermissions, 'reasonLabel' | 'badges' | 'availableActions'>) {
+function buildPermissionBadges(
+  input: Omit<ReviewTaskPermissions, 'reasonLabel' | 'badges' | 'availableActions'>,
+) {
   if (input.reason === 'finalized') return ['Đã chốt'];
   if (input.canAct) return ['Được xử lý'];
   if (input.canClaim) return ['Có thể nhận'];
@@ -1585,7 +1626,8 @@ function buildCriteriaChecklist(
     level.requirements.map((requirement) => ({
       id: `${level.level}-${requirement.key}`,
       label: `${levelLabel(level.level)} - ${requirement.label}`,
-      passed: requirement.status === 'passed' ? true : requirement.status === 'failed' ? false : null,
+      passed:
+        requirement.status === 'passed' ? true : requirement.status === 'failed' ? false : null,
       required: true,
       note: requirement.reason,
     })),
@@ -1865,7 +1907,8 @@ function getTaskPriorityReason(
   if (active && dueAt !== null && dueAt <= now + 3 * 24 * 60 * 60 * 1000) {
     return 'due_soon';
   }
-  if (active && permissions.reason === 'assigned_to_you' && permissions.canAct) return 'assigned_to_you';
+  if (active && permissions.reason === 'assigned_to_you' && permissions.canAct)
+    return 'assigned_to_you';
   if (active && permissions.reason === 'claimable_by_specialization' && permissions.canClaim)
     return 'unassigned_claimable';
   return null;

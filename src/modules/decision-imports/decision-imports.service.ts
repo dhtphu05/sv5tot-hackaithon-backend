@@ -19,6 +19,12 @@ import {
 import { env } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
+import {
+  buildOfficialMatchingStatus,
+  buildReadableSummary,
+  getEvidenceStudentStatus,
+  mapWarnings,
+} from '../../shared/dto/evidence-student-status';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -769,18 +775,21 @@ export async function importEventAsEvidence(input: {
   if (!participant || participant.eventId !== event.id || participant.studentCode !== studentCode) {
     throw new AppError(404, ErrorCodes.PARTICIPANT_NOT_FOUND, 'Student is not in the confirmed roster');
   }
+  if ((participant.participationStatus ?? 'confirmed').toLowerCase() !== 'confirmed') {
+    throw new AppError(400, ErrorCodes.PARTICIPANT_NOT_FOUND, 'Participant is not confirmed');
+  }
 
   const existing = await prisma.evidence.findFirst({
     where: { applicationId: application.id, sourceType: EvidenceSourceType.event_import, eventId: event.id },
     include: { evidenceCard: true, evidenceFiles: { include: { file: true } } },
   });
-  if (existing) return { evidence: existing, alreadyImported: true };
+  if (existing) return formatOfficialImportResponse(existing, event, participant, true);
 
-  const evidence = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const created = await tx.evidence.create({
       data: {
         applicationId: application.id,
-        evidenceName: input.evidenceName ?? `Tham gia ${event.eventName}`,
+        evidenceName: input.evidenceName ?? event.eventName,
         criterion: event.criterion,
         sourceType: EvidenceSourceType.event_import,
         eventId: event.id,
@@ -789,30 +798,37 @@ export async function importEventAsEvidence(input: {
         confidence: 0.96,
       },
     });
-    await tx.evidenceCard.create({
+    const readableSummary = {
+      studentName: participant.studentName,
+      studentCode: participant.studentCode,
+      className: participant.className,
+      faculty: participant.faculty,
+      eventName: event.eventName,
+      organizer: event.organizer,
+      organizerLevel: event.organizerLevel,
+      startDate: event.startDate?.toISOString() ?? null,
+      endDate: event.endDate?.toISOString() ?? null,
+      convertedValue: participant.convertedValue ?? event.convertedValue,
+      convertedUnit: event.convertedUnit,
+      officialDocumentNo: event.officialDocumentNo,
+    };
+    const card = await tx.evidenceCard.create({
       data: {
         evidenceId: created.id,
-        ocrText: `Minh chứng được nhập từ quyết định/danh sách sự kiện đã xác nhận: ${event.eventName}.`,
+        ocrText: null,
         extractedFieldsJson: {
-          source: 'event_registry_decision_import',
+          source: 'official_matching',
           eventId: event.id,
           participantId: participant.id,
-          studentCode: participant.studentCode,
-          studentName: participant.studentName,
-          eventName: event.eventName,
+          ...readableSummary,
         },
         matchedEventId: event.id,
         matchedParticipantId: participant.id,
         matchedKnowledgeItemIds: [],
-        warningsJson: [
-          {
-            code: 'EVENT_REGISTRY_IMPORT_REQUIRES_REVIEW',
-            message: 'Minh chứng nhập từ Event Registry vẫn cần cán bộ xét duyệt xác nhận cuối cùng.',
-          },
-        ],
+        warningsJson: [],
         confidence: 0.96,
-        aiSummary: 'Minh chứng được tạo từ roster quyết định đã xác nhận.',
-        rawAiResponse: { source: 'event_registry_import_as_evidence' },
+        aiSummary: 'Minh chứng được tạo từ danh sách chính thức đã xác nhận.',
+        rawAiResponse: { source: 'official_matching_import' },
       },
     });
     await createApplicationAudit(tx, {
@@ -825,7 +841,132 @@ export async function importEventAsEvidence(input: {
       afterStateJson: { eventId: event.id, participantId: participant.id, studentCode: participant.studentCode },
       note: input.note,
     });
-    return created;
+    await createApplicationAudit(tx, {
+      actorId: input.user.id,
+      actorRole: input.user.role,
+      action: auditActions.EVIDENCE_CREATED,
+      targetType: 'evidence',
+      targetId: created.id,
+      applicationId: application.id,
+      afterStateJson: {
+        eventId: event.id,
+        participantId: participant.id,
+        sourceType: EvidenceSourceType.event_import,
+        statusCode: 'official_match_found',
+      },
+    });
+    await createApplicationAudit(tx, {
+      actorId: input.user.id,
+      actorRole: input.user.role,
+      action: auditActions.EVIDENCE_CARD_GENERATED,
+      targetType: 'evidence_card',
+      targetId: card.id,
+      applicationId: application.id,
+      afterStateJson: {
+        evidenceId: created.id,
+        eventId: event.id,
+        participantId: participant.id,
+        statusCode: 'official_match_found',
+        warningCount: 0,
+      },
+    });
+    return {
+      ...created,
+      evidenceCard: card,
+      evidenceFiles: [],
+    };
   });
-  return { evidence, alreadyImported: false };
+  return formatOfficialImportResponse(result, event, participant, false);
+}
+
+function formatOfficialImportResponse(
+  evidence: {
+    id: string;
+    applicationId: string | null;
+    evidenceName: string;
+    criterion: Criterion;
+    sourceType: EvidenceSourceType;
+    eventId: string | null;
+    status: EvidenceStatus;
+    indexingStatus: IndexingStatus;
+    createdAt: Date;
+    updatedAt: Date;
+    evidenceCard?: {
+      id: string;
+      extractedFieldsJson: Prisma.JsonValue | null;
+      warningsJson: Prisma.JsonValue | null;
+      matchedEventId: string | null;
+      matchedParticipantId: string | null;
+    } | null;
+  },
+  event: {
+    id: string;
+    eventName: string;
+    criterion: Criterion;
+    organizer: string;
+    organizerLevel: Level;
+    startDate: Date | null;
+    endDate: Date | null;
+    convertedValue: number | null;
+    convertedUnit: string | null;
+    officialDocumentNo: string | null;
+  },
+  participant: {
+    id: string;
+    studentCode: string;
+    studentName: string;
+    className: string | null;
+    faculty: string | null;
+    convertedValue: number | null;
+  },
+  alreadyImported: boolean,
+) {
+  const readableSummary = buildReadableSummary(
+    evidence.evidenceCard?.extractedFieldsJson ?? {
+      studentName: participant.studentName,
+      studentCode: participant.studentCode,
+      className: participant.className,
+      faculty: participant.faculty,
+      eventName: event.eventName,
+      organizer: event.organizer,
+      organizerLevel: event.organizerLevel,
+      startDate: event.startDate?.toISOString() ?? null,
+      endDate: event.endDate?.toISOString() ?? null,
+      convertedValue: participant.convertedValue ?? event.convertedValue,
+      convertedUnit: event.convertedUnit,
+      officialDocumentNo: event.officialDocumentNo,
+    },
+  );
+  const studentStatus = getEvidenceStudentStatus('official_match_found');
+  const matchingStatus = buildOfficialMatchingStatus({
+    found: true,
+    matchedEventId: event.id,
+    matchedEventName: event.eventName,
+    matchedParticipantId: participant.id,
+  });
+
+  return {
+    evidence: {
+      id: evidence.id,
+      applicationId: evidence.applicationId,
+      evidenceName: evidence.evidenceName,
+      criterion: evidence.criterion,
+      sourceType: evidence.sourceType,
+      eventId: evidence.eventId,
+      status: evidence.status,
+      indexingStatus: evidence.indexingStatus,
+      studentStatus,
+      createdAt: evidence.createdAt,
+      updatedAt: evidence.updatedAt,
+    },
+    card: {
+      readableSummary,
+      matchingStatus,
+      studentStatus,
+      missingFields: [],
+      warnings: mapWarnings(evidence.evidenceCard?.warningsJson ?? []),
+    },
+    alreadyImported,
+    message: alreadyImported ? 'Minh chứng đã có trong hồ sơ.' : 'Đã thêm minh chứng vào hồ sơ.',
+  };
 }

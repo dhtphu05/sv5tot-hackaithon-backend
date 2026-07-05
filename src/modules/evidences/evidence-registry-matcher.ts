@@ -12,6 +12,10 @@ export async function matchEvidenceRegistry(
   criterion: Criterion,
   fields: EvidenceExtractedFields,
 ): Promise<EvidenceRegistryMatch> {
+  if (fields.document_type === 'transcript') {
+    return { eventId: null, participantId: null, warnings: [] };
+  }
+
   const eventName = fields.event_name;
   const event = eventName
     ? await prisma.eventRegistry.findFirst({

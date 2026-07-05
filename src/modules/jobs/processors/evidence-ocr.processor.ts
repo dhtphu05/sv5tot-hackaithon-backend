@@ -16,6 +16,7 @@ import {
 import { env } from '../../../config/env';
 import { prisma } from '../../../infrastructure/database/prisma';
 import { auditActions } from '../../../shared/constants/application';
+import { buildMissingFields } from '../../../shared/dto/evidence-student-status';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes, type ErrorCode } from '../../../shared/errors/error-codes';
 import { AuditService } from '../../audit/audit.service';
@@ -144,6 +145,13 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       warnings: normalizedOcr.warnings,
       warningMessages: normalizedOcr.warningMessages,
     });
+    const missingFields = buildMissingFields(evidence.criterion, normalizedFields, warningEntries);
+    const matchingStatusCode =
+      matched.eventId && matched.participantId
+        ? 'official_match_found'
+        : matched.eventId
+          ? 'official_match_not_found'
+          : 'none';
     const nextIndexingStatus = scoring.needsManualReview
       ? IndexingStatus.needs_manual_review
       : IndexingStatus.indexed;
@@ -171,7 +179,7 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
           confidence: scoring.confidence,
           sourceEndpoint: normalizedOcr.sourceEndpoint,
           smartreaderJobId: output.smartreaderJobId,
-          aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields, scoring.confidence),
+          aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields),
           rawAiResponse: undefined,
           rawResponseJson,
         },
@@ -190,7 +198,7 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
           confidence: scoring.confidence,
           sourceEndpoint: normalizedOcr.sourceEndpoint,
           smartreaderJobId: output.smartreaderJobId,
-          aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields, scoring.confidence),
+          aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields),
           rawAiResponse: undefined,
           rawResponseJson,
         },
@@ -216,6 +224,10 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       applicationId: evidence.applicationId,
       evidenceId: evidence.id,
       metadata: {
+        provider: 'vnpt_smartreader',
+        fileId: primaryFile.id,
+        criterion: evidence.criterion,
+        sourceType: evidence.sourceType,
         numOfPages: normalizedOcr.numOfPages,
         lineCount: normalizedOcr.ocrLinesJson.length,
         paragraphCount: normalizedOcr.ocrParagraphsJson.length,
@@ -230,18 +242,115 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       entityId: evidence.id,
       applicationId: evidence.applicationId,
       evidenceId: evidence.id,
-      metadata: { confidence: scoring.confidence, indexingStatus: nextIndexingStatus },
+      metadata: {
+        provider: 'vnpt_smartreader',
+        fileId: primaryFile.id,
+        criterion: evidence.criterion,
+        sourceType: evidence.sourceType,
+        indexingStatus: nextIndexingStatus,
+        statusCode: missingFields.length > 0 ? 'needs_more_info' : 'evidence_read',
+        studentStatusCode: missingFields.length > 0 ? 'needs_more_info' : 'evidence_read',
+        matchingStatusCode,
+        missingFieldCount: missingFields.length,
+        warningCount: warningEntries.length,
+        matchedEventId: matched.eventId,
+        matchedParticipantId: matched.participantId,
+      },
     });
-    if (scoring.needsManualReview) {
+    await auditService.log({
+      actorId: actor?.id,
+      actorRole: actor?.role,
+      action: auditActions.SMARTREADER_EVIDENCE_READ,
+      entityType: 'evidence',
+      entityId: evidence.id,
+      applicationId: evidence.applicationId,
+      evidenceId: evidence.id,
+      metadata: {
+        provider: 'vnpt_smartreader',
+        fileId: primaryFile.id,
+        criterion: evidence.criterion,
+        sourceType: evidence.sourceType,
+        statusCode: missingFields.length > 0 ? 'needs_more_info' : 'evidence_read',
+        studentStatusCode: missingFields.length > 0 ? 'needs_more_info' : 'evidence_read',
+        matchingStatusCode,
+        missingFieldCount: missingFields.length,
+        warningCount: warningEntries.length,
+        matchedEventId: matched.eventId,
+        matchedParticipantId: matched.participantId,
+      },
+    });
+    await auditService.log({
+      actorId: actor?.id,
+      actorRole: actor?.role,
+      action: matched.eventId && matched.participantId
+        ? auditActions.OFFICIAL_MATCH_FOUND
+        : auditActions.OFFICIAL_MATCH_NOT_FOUND,
+      entityType: 'evidence',
+      entityId: evidence.id,
+      applicationId: evidence.applicationId,
+      evidenceId: evidence.id,
+      eventId: matched.eventId,
+      metadata: {
+        provider: 'vnpt_smartreader',
+        fileId: primaryFile.id,
+        criterion: evidence.criterion,
+        sourceType: evidence.sourceType,
+        studentStatusCode: matched.eventId && matched.participantId
+          ? 'official_match_found'
+          : 'official_match_not_found',
+        matchingStatusCode,
+        missingFieldCount: missingFields.length,
+        warningCount: warningEntries.length,
+        matchedEventId: matched.eventId,
+        matchedParticipantId: matched.participantId,
+      },
+    });
+    if (missingFields.length > 0) {
       await auditService.log({
         actorId: actor?.id,
         actorRole: actor?.role,
-        action: auditActions.EVIDENCE_NEEDS_MANUAL_REVIEW,
+        action: auditActions.EVIDENCE_MISSING_INFO_DETECTED,
         entityType: 'evidence',
         entityId: evidence.id,
         applicationId: evidence.applicationId,
         evidenceId: evidence.id,
-        metadata: { confidence: scoring.confidence, warnings: warningEntries },
+        metadata: {
+          provider: 'vnpt_smartreader',
+          fileId: primaryFile.id,
+          criterion: evidence.criterion,
+          sourceType: evidence.sourceType,
+          statusCode: 'needs_more_info',
+          studentStatusCode: 'needs_more_info',
+          matchingStatusCode,
+          missingFieldCount: missingFields.length,
+          warningCount: warningEntries.length,
+          matchedEventId: matched.eventId,
+          matchedParticipantId: matched.participantId,
+        },
+      });
+    }
+    if (scoring.needsManualReview) {
+      await auditService.log({
+        actorId: actor?.id,
+        actorRole: actor?.role,
+        action: auditActions.EVIDENCE_SENT_TO_HUMAN_VERIFICATION,
+        entityType: 'evidence',
+        entityId: evidence.id,
+        applicationId: evidence.applicationId,
+        evidenceId: evidence.id,
+        metadata: {
+          provider: 'vnpt_smartreader',
+          fileId: primaryFile.id,
+          criterion: evidence.criterion,
+          sourceType: evidence.sourceType,
+          statusCode: 'needs_human_verification',
+          studentStatusCode: 'needs_human_verification',
+          matchingStatusCode,
+          missingFieldCount: missingFields.length,
+          warningCount: warningEntries.length,
+          matchedEventId: matched.eventId,
+          matchedParticipantId: matched.participantId,
+        },
       });
     }
 
@@ -495,13 +604,25 @@ function buildWarnings(
   ocr: Pick<SmartReaderOcrResult, 'warnings' | 'warningMessages'>,
 ): Array<{ code: string; message: string }> {
   const providerWarnings = [...ocr.warnings, ...ocr.warningMessages].map((message) => ({
-    code: 'SMARTREADER_WARNING',
+    code: providerWarningCode(message),
     message,
   }));
   return [
     ...codes.map((code) => ({ code, message: warningMessage(code) })),
     ...providerWarnings,
   ];
+}
+
+function providerWarningCode(message: string): string {
+  const normalized = message
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (normalized.includes('nghieng')) return 'smartreader_warning_anh_dau_vao_nghieng';
+  if (normalized.includes('mat goc') || normalized.includes('matgoc')) {
+    return 'smartreader_warning_anh_dau_vao_mat_goc';
+  }
+  return 'smartreader_warning';
 }
 
 function warningMessage(code: string): string {
@@ -521,10 +642,9 @@ function warningMessage(code: string): string {
 function buildEvidenceSummary(
   evidenceName: string,
   fields: ReturnType<typeof normalizeEvidenceFields>,
-  confidence: number,
 ): string {
   const subject = fields.event_name ?? evidenceName;
-  return `OCR đã tạo thẻ minh chứng cho "${subject}" với confidence ${confidence}. Cán bộ/Hội đồng vẫn cần xác nhận cuối.`;
+  return `SmartReader đã đọc các thông tin chính từ "${subject}". Cán bộ/Hội đồng vẫn là người xác nhận cuối.`;
 }
 
 function selectOcrEndpoint(file: File): string {
@@ -560,7 +680,7 @@ function mapSmartReaderFailure(error: unknown): SmartReaderFailure {
   if (error instanceof AppError && error.code === ErrorCodes.OCR_EMPTY_TEXT) {
     return {
       code: ErrorCodes.OCR_EMPTY_TEXT,
-      userMessage: 'VNPT SmartReader không trả về nội dung OCR cho minh chứng này.',
+      userMessage: 'File chưa đọc rõ. Bạn có thể tải lại bản rõ hơn.',
       technicalMessage,
       retryable: false,
     };
@@ -596,7 +716,7 @@ function mapSmartReaderFailure(error: unknown): SmartReaderFailure {
   if (/upload/i.test(technicalMessage)) {
     return {
       code: ErrorCodes.VNPT_UPLOAD_FAILED,
-      userMessage: 'Không upload được tệp minh chứng lên VNPT SmartReader.',
+      userMessage: 'Chưa gửi được file đến dịch vụ số hoá. Vui lòng thử lại.',
       technicalMessage,
       retryable: true,
     };
@@ -604,7 +724,7 @@ function mapSmartReaderFailure(error: unknown): SmartReaderFailure {
 
   return {
     code: ErrorCodes.VNPT_OCR_FAILED,
-    userMessage: 'VNPT SmartReader OCR minh chứng thất bại.',
+    userMessage: 'Hệ thống chưa đọc được file này. Bạn có thể tải lại bản rõ hơn hoặc chờ cán bộ xác minh.',
     technicalMessage,
     retryable: true,
   };
