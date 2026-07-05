@@ -78,6 +78,43 @@ export const openApiDocument = {
           phone: { type: 'string', example: '0901234567' },
         },
       },
+      ChatbotMessageRequest: {
+        type: 'object',
+        required: ['text'],
+        properties: {
+          text: { type: 'string', maxLength: 2000 },
+          sessionId: { type: 'string' },
+          applicationId: { type: 'string', format: 'uuid' },
+          contextScope: {
+            type: 'string',
+            enum: ['student_helpdesk', 'reviewer_copilot', 'manager_assistant', 'committee_assistant'],
+          },
+          pageContext: {
+            type: 'object',
+            properties: {
+              page: {
+                type: 'string',
+                enum: [
+                  'dashboard',
+                  'evidence',
+                  'precheck',
+                  'cascade',
+                  'review_task',
+                  'manager_dashboard',
+                  'resolution_hub',
+                ],
+              },
+              criterion: {
+                type: 'string',
+                enum: ['ethics', 'academic', 'physical', 'volunteer', 'integration', 'priority', 'collective'],
+              },
+              evidenceId: { type: 'string', format: 'uuid' },
+              taskId: { type: 'string', format: 'uuid' },
+              resolutionCaseId: { type: 'string', format: 'uuid' },
+            },
+          },
+        },
+      },
       RefreshRequest: {
         type: 'object',
         required: ['refreshToken'],
@@ -1381,7 +1418,17 @@ export const openApiDocument = {
       },
     },
     '/api/audit/logs': placeholderPath('Audit', 'List audit logs placeholder'),
-    '/api/chatbot/message': placeholderPath('AI', 'Send chatbot message placeholder'),
+    '/api/chatbot/message': {
+      post: {
+        tags: ['AI'],
+        summary: 'Send contextual Smartbot message',
+        description:
+          'Backend-only VNPT Smartbot proxy. Mock mode works without VNPT bot credentials. Official results are never decided by Smartbot.',
+        security: bearerSecurity,
+        requestBody: jsonRequest('#/components/schemas/ChatbotMessageRequest'),
+        responses: { '200': jsonResponse('Normalized Smartbot response') },
+      },
+    },
     '/api/smartux/events': placeholderPath('SmartUX', 'Create SmartUX event placeholder'),
     '/api/exports/applications': placeholderPath('Exports', 'Export applications placeholder'),
   },

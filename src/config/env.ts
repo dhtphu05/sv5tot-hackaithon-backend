@@ -91,7 +91,22 @@ const rawEnvSchema = z.object({
   JOB_WORKER_ENABLED: booleanFromEnv,
   JOB_WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   INTERNAL_WORKER_TOKEN: z.string().optional().default(''),
-  SMARTBOT_MODE: z.enum(['mock', 'live']).default('mock'),
+  SMARTBOT_MODE: z.enum(['mock', 'live', 'real']).default('mock'),
+  SMARTBOT_BASE_URL: z.string().url().default('https://assistant-stream.vnpt.vn'),
+  SMARTBOT_BOT_ID: z.string().optional().default(''),
+  SMARTBOT_ACCESS_TOKEN: z.string().optional().default(''),
+  SMARTBOT_TOKEN_ID: z.string().optional().default(''),
+  SMARTBOT_TOKEN_KEY: z.string().optional().default(''),
+  SMARTBOT_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  SMARTBOT_INPUT_CHANNEL: z.string().min(1).default('livechat'),
+  SMARTBOT_USE_DYNAMIC_PROMPT: booleanFromEnv,
+  SMARTBOT_WEBHOOK_TOKEN: z.string().optional().default(''),
+  SMARTBOT_LOG_RAW_RESPONSE: booleanFromEnv,
+  GEMINI_ENABLED: booleanFromEnv,
+  GEMINI_API_KEY: z.string().optional().default(''),
+  GEMINI_MODEL: z.string().min(1).default('gemini-2.5-flash'),
+  GEMINI_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  GEMINI_LOG_RAW_RESPONSE: booleanFromEnv,
   MAIL_ENABLED: booleanFromEnv,
   MAIL_PROVIDER: z.enum(['smtp', 'console']).default('console'),
   SMTP_HOST: z.string().optional().default(''),
@@ -165,6 +180,8 @@ const vnptRequireRealInPipeline =
     : rawEnv.VNPT_REQUIRE_REAL_IN_PIPELINE;
 const vnptAllowMockRuntime =
   process.env.VNPT_ALLOW_MOCK_RUNTIME === undefined ? false : rawEnv.VNPT_ALLOW_MOCK_RUNTIME;
+const geminiEnabled =
+  process.env.GEMINI_ENABLED === undefined ? false : rawEnv.GEMINI_ENABLED;
 
 if (
   vnptEnabled &&
@@ -181,11 +198,19 @@ if (vnptRequireRealInPipeline && vnptAllowMockRuntime) {
   );
 }
 
+if (geminiEnabled && !rawEnv.GEMINI_API_KEY) {
+  throw new Error('Invalid environment configuration: GEMINI_API_KEY is required when GEMINI_ENABLED=true');
+}
+
 if (
   rawEnv.NODE_ENV === 'production' &&
   (jwtAccessSecret === 'change_me' || jwtRefreshSecret === 'change_me')
 ) {
   throw new Error('JWT secrets must be changed in production');
+}
+
+if (rawEnv.NODE_ENV === 'production' && !rawEnv.SMARTBOT_WEBHOOK_TOKEN) {
+  throw new Error('Invalid environment configuration: SMARTBOT_WEBHOOK_TOKEN is required in production');
 }
 
 export const env = {
@@ -216,5 +241,14 @@ export const env = {
   VNPT_ENABLED: vnptEnabled,
   VNPT_REQUIRE_REAL_IN_PIPELINE: vnptRequireRealInPipeline,
   VNPT_ALLOW_MOCK_RUNTIME: vnptAllowMockRuntime,
+  GEMINI_ENABLED: geminiEnabled,
+  GEMINI_LOG_RAW_RESPONSE:
+    process.env.GEMINI_LOG_RAW_RESPONSE === undefined ? false : rawEnv.GEMINI_LOG_RAW_RESPONSE,
+  SMARTBOT_USE_DYNAMIC_PROMPT:
+    process.env.SMARTBOT_USE_DYNAMIC_PROMPT === undefined
+      ? true
+      : rawEnv.SMARTBOT_USE_DYNAMIC_PROMPT,
+  SMARTBOT_LOG_RAW_RESPONSE:
+    process.env.SMARTBOT_LOG_RAW_RESPONSE === undefined ? false : rawEnv.SMARTBOT_LOG_RAW_RESPONSE,
 };
 export type Env = typeof env;

@@ -7,6 +7,7 @@ import {
   IndexingStatus,
   JobStatus,
   JobType,
+  Prisma,
   ReviewTaskStatus,
   Role,
 } from '@prisma/client';
@@ -33,6 +34,7 @@ import {
 } from '../applications/application.helpers';
 import { AuditService } from '../audit/audit.service';
 import { JobsService } from '../jobs/jobs.service';
+import { buildEvidenceCardFieldLayers } from './evidence-card-field-presenter';
 import { mapEvidenceUxStatus } from './evidence-ux-status.mapper';
 import { EvidencesRepository } from './evidences.repository';
 import type {
@@ -82,7 +84,11 @@ export class EvidencesService {
     assertApplicationEditable(application);
 
     if (input.sourceType !== EvidenceSourceType.manual_upload) {
-      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'sourceType must be manual_upload for uploaded evidence');
+      throw new AppError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        'sourceType must be manual_upload for uploaded evidence',
+      );
     }
 
     const status: EvidenceStatus = EvidenceStatus.draft;
@@ -109,7 +115,7 @@ export class EvidencesService {
           data: {
             evidenceId: created.id,
             ocrText: input.description ?? 'Minh chứng được nhập thủ công.',
-            extractedFieldsJson: (input.metadata ?? {}) as any,
+            extractedFieldsJson: (input.metadata ?? {}) as Prisma.InputJsonValue,
             warningsJson: [],
             confidence: 1.0,
             aiSummary: 'Minh chứng xét duyệt thủ công không dùng AI.',
@@ -435,8 +441,9 @@ export class EvidencesService {
           indexingStatus,
         },
         include: {
-          application: { include: { student: true } },
+          application: { include: { student: true, metrics: true } },
           collectiveProfile: true,
+          event: true,
           evidenceFiles: {
             include: {
               file: true,
@@ -518,7 +525,10 @@ export class EvidencesService {
     const evidence = await this.getRequiredEvidence(evidenceId);
     this.assertCanViewEvidence(user, evidence);
 
-    const { job, reused } = await this.jobsService.enqueueIndexingJob(evidence.id, JobType.evidence_ocr);
+    const { job, reused } = await this.jobsService.enqueueIndexingJob(
+      evidence.id,
+      JobType.evidence_ocr,
+    );
     await prisma.evidence.update({
       where: { id: evidence.id },
       data: {
@@ -556,9 +566,7 @@ export class EvidencesService {
 
     return {
       evidence: this.toEvidenceDto(evidence, user),
-      card: evidence.evidenceCard
-        ? this.toEvidenceCardDto(evidence, isPrivileged)
-        : null,
+      card: evidence.evidenceCard ? this.toEvidenceCardDto(evidence, isPrivileged) : null,
       job: latestJob
         ? {
             id: latestJob.id,
@@ -634,11 +642,14 @@ export class EvidencesService {
   }
 
   private findEvidenceAuditLogs(evidenceId: string, jobIds: string[]) {
-    return this.evidencesRepository.findEvidenceAuditLogs?.(evidenceId, jobIds) ?? Promise.resolve([]);
+    return (
+      this.evidencesRepository.findEvidenceAuditLogs?.(evidenceId, jobIds) ?? Promise.resolve([])
+    );
   }
 
   private async getEvidenceAuditSummary(evidenceId: string) {
-    const logs = await (this.evidencesRepository.findEvidenceAuditSummaryLogs?.(evidenceId) ?? Promise.resolve([]));
+    const logs = await (this.evidencesRepository.findEvidenceAuditSummaryLogs?.(evidenceId) ??
+      Promise.resolve([]));
     return {
       total: logs.length,
       latestAction: logs[0]?.action ?? null,
@@ -661,7 +672,8 @@ export class EvidencesService {
       indexingStatus: evidence.indexingStatus,
       criterion: evidence.criterion,
       ocrText: evidence.evidenceCard?.ocrText,
-      fields: evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson,
+      fields:
+        evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson,
       warnings: evidence.evidenceCard?.warningsJson,
       matchedEventId: evidence.evidenceCard?.matchedEventId,
       matchedParticipantId: evidence.evidenceCard?.matchedParticipantId,
@@ -712,6 +724,29 @@ export class EvidencesService {
     if (!card) return null;
 
     const fields = card.normalizedFieldsJson ?? card.extractedFieldsJson;
+    const fieldLayers = buildEvidenceCardFieldLayers({
+      evidenceName: evidence.evidenceName,
+      sourceType: evidence.sourceType,
+      criterion: evidence.criterion,
+      extractedFields: card.extractedFieldsJson,
+      normalizedFields: fields,
+      matchedEventId: card.matchedEventId,
+      matchedParticipantId: card.matchedParticipantId,
+      warnings: card.warningsJson,
+      studentProfileFields: {
+        studentName: evidence.application?.student.fullName,
+        studentCode: evidence.application?.student.studentCode,
+        className: evidence.application?.student.className,
+        faculty: evidence.application?.student.faculty,
+      },
+      applicationMetrics:
+        evidence.application?.metrics.map((metric) => ({
+          metricType: metric.metricType,
+          value: metric.value,
+          scale: metric.scale,
+        })) ?? [],
+      targetLevel: evidence.application?.targetLevel,
+    });
     const readableSummary = buildReadableSummary(fields);
     const warnings = mapWarnings(card.warningsJson);
     const missingFields = buildMissingFields(evidence.criterion, fields, card.warningsJson);
@@ -736,6 +771,15 @@ export class EvidencesService {
     const studentCard = {
       id: card.id,
       readableSummary,
+      userProvidedFields: fieldLayers.userProvidedFields,
+      studentProfileFields: fieldLayers.studentProfileFields,
+      extractedFields: fieldLayers.extractedFields,
+      normalizedFields: fieldLayers.normalizedFields,
+      verifiedFields: fieldLayers.verifiedFields,
+      primaryFields: fieldLayers.primaryFields,
+      fieldConfidence: fieldLayers.fieldConfidence,
+      metricSuggestions: fieldLayers.metricSuggestions,
+      academic: fieldLayers.academic,
       matchingStatus,
       missingFields,
       studentStatus,

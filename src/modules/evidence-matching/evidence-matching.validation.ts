@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 export const evidenceMatchingSearchQuerySchema = z.object({
   studentCode: z.string().trim().optional(),
+  studentName: z.string().trim().optional(),
   criterion: z.nativeEnum(Criterion).optional(),
   q: z.string().trim().optional(),
   applicationId: z.string().uuid().optional(),
