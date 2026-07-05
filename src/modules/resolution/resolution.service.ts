@@ -877,6 +877,9 @@ async function notifyStudentAfterResolution(
     },
     tx,
   );
+  if (input.decision !== 'supplement_required' && input.decision !== 'rejected') {
+    return;
+  }
   await emailOutboxService.enqueue(
     {
       recipientEmail: resolutionCase.application.student.email,
@@ -887,23 +890,32 @@ async function notifyStudentAfterResolution(
       templateKey:
         input.decision === 'supplement_required'
           ? 'supplement_requested'
-          : 'application_status_updated',
+          : 'application_rejected',
       payload: {
+        studentName: resolutionCase.application.student.fullName,
         recipientName: resolutionCase.application.student.fullName,
+        applicationCode: resolutionCase.applicationId,
         applicationId: resolutionCase.applicationId,
         schoolYear: resolutionCase.application.schoolYear,
         targetLevel: resolutionCase.application.targetLevel,
         criterion: resolutionCase.evidence?.criterion,
+        criterionName: resolutionCase.evidence?.criterion ?? relatedTask?.criterion,
         status: applicationStatus,
-        context: input.note,
         reason: input.note,
+        reviewNote: input.note,
+        supplementSummary: input.note,
       },
-      dedupeKey: buildEmailDedupeKey('resolution_student_update', {
-        resolutionCaseId: resolutionCase.id,
-        applicationId: resolutionCase.applicationId,
-        decision: input.decision,
-        applicationStatus,
-      }),
+      dedupeKey: buildEmailDedupeKey(
+        input.decision === 'supplement_required'
+          ? 'resolution_supplement_requested'
+          : 'resolution_application_rejected',
+        {
+          resolutionCaseId: resolutionCase.id,
+          applicationId: resolutionCase.applicationId,
+          decision: input.decision,
+          applicationStatus,
+        },
+      ),
     },
     tx,
   );

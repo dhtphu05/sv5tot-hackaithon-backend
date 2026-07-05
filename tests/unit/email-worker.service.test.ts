@@ -1,6 +1,15 @@
 import { EmailOutboxStatus } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
+import { prisma } from '../../src/infrastructure/database/prisma';
 import { EmailWorkerService } from '../../src/modules/mail/email-worker.service';
+
+vi.mock('../../src/infrastructure/database/prisma', () => ({
+  prisma: {
+    reviewTask: {
+      findMany: vi.fn(),
+    },
+  },
+}));
 
 const baseEmail = {
   id: 'email-1',
@@ -123,6 +132,58 @@ describe('EmailWorkerService', () => {
       expect.objectContaining({
         action: 'EMAIL_FAILED',
         targetType: 'email_outbox',
+      }),
+    );
+  });
+
+  it('queues deadline reminder with stable milestone dedupe key', async () => {
+    vi.mocked(prisma.reviewTask.findMany).mockResolvedValue([
+      {
+        id: 'review-task-1',
+        criterion: 'academic',
+        dueDate: new Date('2026-07-06T12:00:00.000Z'),
+        supplementRequestJson: {
+          requestedFields: ['Bảng điểm xác nhận'],
+          reason: 'Cần làm rõ minh chứng học tập.',
+        },
+        application: {
+          id: 'app-1',
+          studentId: 'student-1',
+          schoolYear: '2025-2026',
+          targetLevel: 'school',
+          student: {
+            email: 'student@dut.udn.vn',
+            fullName: 'Nguyễn Văn A',
+          },
+        },
+      },
+    ] as never);
+    const repository = {
+      findNextDue: vi.fn().mockResolvedValue(null),
+    };
+    const outboxService = {
+      enqueue: vi.fn().mockResolvedValue({ id: 'email-1', created: true }),
+    };
+    const service = new EmailWorkerService(
+      repository as never,
+      { send: vi.fn() } as never,
+      outboxService as never,
+      vi.fn().mockResolvedValue({}),
+      true,
+    );
+
+    const result = await service.runTick(new Date('2026-07-05T12:00:00.000Z'));
+
+    expect(result.remindersQueued).toBe(1);
+    expect(outboxService.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateKey: 'supplement_deadline_reminder',
+        dedupeKey: 'supplement_deadline_reminder:review-task-1:D-1',
+        payload: expect.objectContaining({
+          reminderWindow: 'D-1',
+          criterionName: 'academic',
+          supplementSummary: expect.stringContaining('Bảng điểm xác nhận'),
+        }),
       }),
     );
   });
