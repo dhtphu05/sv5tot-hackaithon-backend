@@ -102,6 +102,11 @@ const rawEnvSchema = z.object({
   SMARTBOT_USE_DYNAMIC_PROMPT: booleanFromEnv,
   SMARTBOT_WEBHOOK_TOKEN: z.string().optional().default(''),
   SMARTBOT_LOG_RAW_RESPONSE: booleanFromEnv,
+  GEMINI_ENABLED: booleanFromEnv,
+  GEMINI_API_KEY: z.string().optional().default(''),
+  GEMINI_MODEL: z.string().min(1).default('gemini-2.5-flash'),
+  GEMINI_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  GEMINI_LOG_RAW_RESPONSE: booleanFromEnv,
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 })
   .refine((data) => !!data.JWT_SECRET || (!!data.JWT_ACCESS_SECRET && !!data.JWT_REFRESH_SECRET), {
@@ -147,6 +152,8 @@ const vnptRequireRealInPipeline =
     : rawEnv.VNPT_REQUIRE_REAL_IN_PIPELINE;
 const vnptAllowMockRuntime =
   process.env.VNPT_ALLOW_MOCK_RUNTIME === undefined ? false : rawEnv.VNPT_ALLOW_MOCK_RUNTIME;
+const geminiEnabled =
+  process.env.GEMINI_ENABLED === undefined ? false : rawEnv.GEMINI_ENABLED;
 
 if (
   vnptEnabled &&
@@ -161,6 +168,10 @@ if (vnptRequireRealInPipeline && vnptAllowMockRuntime) {
   throw new Error(
     'Invalid environment configuration: VNPT_REQUIRE_REAL_IN_PIPELINE=true cannot be combined with VNPT_ALLOW_MOCK_RUNTIME=true',
   );
+}
+
+if (geminiEnabled && !rawEnv.GEMINI_API_KEY) {
+  throw new Error('Invalid environment configuration: GEMINI_API_KEY is required when GEMINI_ENABLED=true');
 }
 
 if (
@@ -201,6 +212,9 @@ export const env = {
   VNPT_ENABLED: vnptEnabled,
   VNPT_REQUIRE_REAL_IN_PIPELINE: vnptRequireRealInPipeline,
   VNPT_ALLOW_MOCK_RUNTIME: vnptAllowMockRuntime,
+  GEMINI_ENABLED: geminiEnabled,
+  GEMINI_LOG_RAW_RESPONSE:
+    process.env.GEMINI_LOG_RAW_RESPONSE === undefined ? false : rawEnv.GEMINI_LOG_RAW_RESPONSE,
   SMARTBOT_USE_DYNAMIC_PROMPT:
     process.env.SMARTBOT_USE_DYNAMIC_PROMPT === undefined
       ? true

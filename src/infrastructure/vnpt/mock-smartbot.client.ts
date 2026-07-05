@@ -18,7 +18,7 @@ export class MockSmartbotClient implements SmartbotClient {
       return response(input.session_id, [
         {
           type: 'text',
-          text: 'Mình sẽ tìm trong Matching Hub các minh chứng demo phù hợp cấp Trường, ví dụ Mùa hè xanh 2025 hoặc Hiến máu nhân đạo đợt 1.',
+          text: 'Mình sẽ tìm trong Matching Hub các minh chứng phù hợp cấp Trường, ví dụ Mùa hè xanh 2025 hoặc Hiến máu nhân đạo đợt 1.',
         },
       ]);
     }
@@ -58,7 +58,7 @@ export class MockSmartbotClient implements SmartbotClient {
     return response(input.session_id, [
       {
         type: 'text',
-        text: 'Ở demo cấp Trường, tiêu chí Tình nguyện tốt thường cần đủ số ngày hoạt động hoặc minh chứng tương đương theo quy định. Mình có thể giải thích tiêu chí và gợi ý minh chứng, không chốt kết quả chính thức.',
+        text: 'Ở cấp Trường, tiêu chí Tình nguyện tốt thường cần đủ số ngày hoạt động hoặc minh chứng tương đương theo quy định. Mình có thể giải thích tiêu chí và gợi ý minh chứng, không chốt kết quả chính thức.',
       },
     ]);
   }

@@ -18,6 +18,7 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { buildEvidenceCardFieldLayers } from '../evidences/evidence-card-field-presenter';
 import { createNotification, NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from './review-assignment.service';
 import { getApplicationReviewProgress } from './review-progress.service';
@@ -319,6 +320,31 @@ export class ReviewService {
           (evidence.evidenceCard?.matchedEventId
             ? matchedEventsById.get(evidence.evidenceCard.matchedEventId)
             : null);
+        const fieldLayers = evidence.evidenceCard
+          ? buildEvidenceCardFieldLayers({
+              evidenceName: evidence.evidenceName,
+              sourceType: evidence.sourceType,
+              criterion: evidence.criterion,
+              extractedFields: evidence.evidenceCard.extractedFieldsJson,
+              normalizedFields: fields,
+              matchedEventId: evidence.evidenceCard.matchedEventId,
+              matchedParticipantId: evidence.evidenceCard.matchedParticipantId,
+              warnings: evidence.evidenceCard.warningsJson,
+              studentProfileFields: {
+                studentName: taskForResponse.application?.student.fullName,
+                studentCode: taskForResponse.application?.student.studentCode,
+                className: taskForResponse.application?.student.className,
+                faculty: taskForResponse.application?.student.faculty,
+              },
+              applicationMetrics:
+                taskForResponse.application?.metrics.map((metric) => ({
+                  metricType: metric.metricType,
+                  value: metric.value,
+                  scale: metric.scale,
+                })) ?? [],
+              targetLevel: taskForResponse.application?.targetLevel,
+            })
+          : null;
 
         return {
           id: evidence.id,
@@ -346,6 +372,15 @@ export class ReviewService {
                 id: evidence.evidenceCard.id,
                 ocrText: evidence.evidenceCard.ocrText,
                 readableSummary,
+                userProvidedFields: fieldLayers?.userProvidedFields,
+                studentProfileFields: fieldLayers?.studentProfileFields,
+                extractedFields: fieldLayers?.extractedFields,
+                normalizedFields: fieldLayers?.normalizedFields,
+                verifiedFields: fieldLayers?.verifiedFields,
+                primaryFields: fieldLayers?.primaryFields,
+                fieldConfidence: fieldLayers?.fieldConfidence,
+                metricSuggestions: fieldLayers?.metricSuggestions,
+                academic: fieldLayers?.academic,
                 extractedFieldsJson: evidence.evidenceCard.extractedFieldsJson,
                 normalizedFieldsJson: evidence.evidenceCard.normalizedFieldsJson,
                 warningsJson: evidence.evidenceCard.warningsJson || [],
@@ -610,17 +645,19 @@ export class ReviewService {
           });
         }
       } else {
-        let defaultEvidenceStatus = 'under_review';
-        if (input.decision === ReviewDecision.accepted) defaultEvidenceStatus = 'accepted';
-        if (input.decision === ReviewDecision.rejected) defaultEvidenceStatus = 'rejected';
+        let defaultEvidenceStatus: EvidenceStatus = EvidenceStatus.under_review;
+        if (input.decision === ReviewDecision.accepted)
+          defaultEvidenceStatus = EvidenceStatus.accepted;
+        if (input.decision === ReviewDecision.rejected)
+          defaultEvidenceStatus = EvidenceStatus.rejected;
         if (input.decision === ReviewDecision.supplement_required)
-          defaultEvidenceStatus = 'needs_supplement';
+          defaultEvidenceStatus = EvidenceStatus.needs_supplement;
         if (input.decision === ReviewDecision.resolution_needed)
-          defaultEvidenceStatus = 'resolution_needed';
+          defaultEvidenceStatus = EvidenceStatus.resolution_needed;
 
         await tx.evidence.updateMany({
           where: { id: { in: evidenceIds } },
-          data: { status: defaultEvidenceStatus as any },
+          data: { status: defaultEvidenceStatus },
         });
       }
 
@@ -797,7 +834,7 @@ export class ReviewService {
   ) {
     const evidenceDecisions = (input.evidenceIds || []).map((id) => ({
       evidenceId: id,
-      status: 'needs_supplement' as any,
+      status: EvidenceStatus.needs_supplement,
     }));
 
     const result = await this.decideTask(user, taskId, {
@@ -858,7 +895,7 @@ export class ReviewService {
   ) {
     const evidenceDecisions = (input.evidenceIds || []).map((id) => ({
       evidenceId: id,
-      status: 'resolution_needed' as any,
+      status: EvidenceStatus.resolution_needed,
     }));
 
     const result = await this.decideTask(user, taskId, {
@@ -1178,7 +1215,7 @@ export class ReviewService {
 
     const criteriaToCreate = Array.from(criteriaToEnsure).filter((c) => !existingCriteria.has(c));
 
-    const createdTasks: any[] = [];
+    const createdTasks: Prisma.ReviewTaskGetPayload<object>[] = [];
 
     await prisma.$transaction(async (tx) => {
       for (const criterion of criteriaToCreate) {

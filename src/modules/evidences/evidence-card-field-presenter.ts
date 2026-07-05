@@ -69,7 +69,7 @@ export function buildEvidenceCardFieldLayers(input: {
   const normalizedRaw = isRecord(input.normalizedFields) ? input.normalizedFields : {};
   const studentProfileFields = presentFields(input.studentProfileFields);
   const warningCodes = warningCodeSet(input.warnings);
-  const verifiedFields =
+  const verifiedFields: JsonRecord =
     input.sourceType === 'event_import' || (input.matchedEventId && input.matchedParticipantId)
       ? removeEmpty({
           matchSource: 'event_registry',
@@ -215,14 +215,18 @@ function buildMetricSuggestions(fields: JsonRecord): JsonRecord {
 
 function buildAcademicLayer(input: {
   criterion: Criterion | string;
-  applicationMetrics: Array<{ metricType: string; value: number | string | null; scale?: number | null }>;
+  applicationMetrics: Array<{
+    metricType: string;
+    value: number | string | null;
+    scale?: number | null;
+  }>;
   targetLevel?: string | null;
   metricSuggestions: JsonRecord;
 }): JsonRecord | undefined {
   if (input.criterion !== 'academic') return undefined;
 
   const metric = input.applicationMetrics.find((item) => item.metricType === 'gpa');
-  const userGpa = metric ? numberValue(metric.value) ?? null : null;
+  const userGpa = metric ? (numberValue(metric.value) ?? null) : null;
   const suggestion = isRecord(input.metricSuggestions.gpa) ? input.metricSuggestions.gpa : null;
   const threshold = gpaThreshold(input.targetLevel);
 

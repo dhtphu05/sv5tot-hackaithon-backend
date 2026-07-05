@@ -51,7 +51,7 @@ export async function buildSafeChatbotContext(input: {
     missingSummary:
       summarizeMissing(application?.precheckResults[0]?.missingItemsJson) ??
       'Thiếu minh chứng Thể lực tốt; Tình nguyện mới ghi nhận 1/2 ngày',
-    deadlineSummary: 'Hạn nộp/bổ sung demo: 30/10',
+    deadlineSummary: 'Hạn nộp/bổ sung: 30/10',
     nextAction:
       application?.precheckResults[0]?.nextBestAction ??
       'Tìm minh chứng tình nguyện hoặc upload minh chứng thể lực',

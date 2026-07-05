@@ -49,29 +49,29 @@ export function getSchoolDemoEvidenceSummary(_ctx: SafeChatbotContext): SchoolDe
     type: 'action_cards',
     title: 'Minh chứng hiện có trong hồ sơ cấp Trường',
     message: [
-      'Mình đã kiểm tra dữ liệu demo của hồ sơ cấp Trường. Hiện hồ sơ đã có một số minh chứng, nhưng vẫn còn điểm cần bổ sung.',
+      'Mình đã kiểm tra dữ liệu hồ sơ cấp Trường. Hiện hồ sơ đã có một số minh chứng, nhưng vẫn còn điểm cần bổ sung.',
       officialResultCaveat,
     ].join('\n'),
     subtitle:
-      'Mình đã kiểm tra dữ liệu demo của hồ sơ cấp Trường. Hiện hồ sơ đã có một số minh chứng, nhưng vẫn còn điểm cần bổ sung.',
+      'Mình đã kiểm tra dữ liệu hồ sơ cấp Trường. Hiện hồ sơ đã có một số minh chứng, nhưng vẫn còn điểm cần bổ sung.',
     cards: [
       {
         type: 'gap_item',
         title: 'Hiến máu nhân đạo đợt 1',
         status: 'Đã ghi nhận',
-        description: 'Tiêu chí: Tình nguyện tốt. Giá trị quy đổi demo: 1 ngày tình nguyện.',
+        description: 'Tiêu chí: Tình nguyện tốt. Giá trị quy đổi: 1 ngày tình nguyện.',
       },
       {
         type: 'gap_item',
         title: 'Bảng điểm học tập',
         status: 'Có dữ liệu',
-        description: 'Tiêu chí: Học tập tốt. Dữ liệu demo dùng để đối chiếu GPA cấp Trường.',
+        description: 'Tiêu chí: Học tập tốt. Dữ liệu dùng để đối chiếu GPA cấp Trường.',
       },
       {
         type: 'gap_item',
         title: 'Điểm rèn luyện',
         status: 'Có dữ liệu',
-        description: 'Tiêu chí: Đạo đức tốt. Dữ liệu demo dùng để đối chiếu điểm rèn luyện cấp Trường.',
+        description: 'Tiêu chí: Đạo đức tốt. Dữ liệu dùng để đối chiếu điểm rèn luyện cấp Trường.',
       },
       {
         type: 'gap_item',
@@ -99,10 +99,10 @@ export function searchSchoolDemoMatchingHub(_ctx: SafeChatbotContext): SchoolDem
     type: 'action_cards',
     title: 'Minh chứng tìm thấy trong Matching Hub',
     message: [
-      'Đã tìm thấy minh chứng demo phù hợp với tiêu chí Tình nguyện tốt cấp Trường.',
+      'Đã tìm thấy minh chứng phù hợp với tiêu chí Tình nguyện tốt cấp Trường.',
       officialResultCaveat,
     ].join('\n'),
-    subtitle: 'Đã tìm thấy minh chứng demo phù hợp với tiêu chí Tình nguyện tốt cấp Trường.',
+    subtitle: 'Đã tìm thấy minh chứng phù hợp với tiêu chí Tình nguyện tốt cấp Trường.',
     cards: [
       {
         type: 'matching_event',
@@ -114,7 +114,7 @@ export function searchSchoolDemoMatchingHub(_ctx: SafeChatbotContext): SchoolDem
         type: 'matching_event',
         title: 'Hiến máu nhân đạo đợt 1',
         status: 'Đã tìm thấy trong Matching Hub',
-        description: 'Giá trị quy đổi demo: 1 ngày tình nguyện.',
+        description: 'Giá trị quy đổi: 1 ngày tình nguyện.',
       },
     ],
     actions: [

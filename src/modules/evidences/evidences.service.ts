@@ -440,8 +440,9 @@ export class EvidencesService {
           indexingStatus,
         },
         include: {
-          application: { include: { student: true } },
+          application: { include: { student: true, metrics: true } },
           collectiveProfile: true,
+          event: true,
           evidenceFiles: {
             include: {
               file: true,
