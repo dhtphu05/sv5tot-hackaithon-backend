@@ -43,7 +43,7 @@ describe('EmailOutboxService', () => {
       expect.objectContaining({
         recipientEmail: 'student@dut.udn.vn',
         templateKey: 'application_submitted',
-        subject: '[5TOT] Ho so da duoc nop',
+        subject: '[5TOT.2025-2026] XÁC NHẬN TIẾP NHẬN HỒ SƠ SINH VIÊN 5 TỐT',
         dedupeKey: 'application_submitted:app-1:v1',
       }),
       tx,

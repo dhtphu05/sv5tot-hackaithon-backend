@@ -697,13 +697,18 @@ export class ReviewService {
             notificationId: notification.id,
             templateKey: 'supplement_requested',
             payload: {
+              studentName: application.student.fullName,
               recipientName: application.student.fullName,
+              applicationCode: applicationId,
               applicationId,
               schoolYear: application.schoolYear,
               targetLevel: application.targetLevel,
               criterion: task.criterion,
+              criterionName: task.criterion,
               deadline: readSupplementDeadline(input.supplementRequestJson),
               reason: officerNote,
+              reviewNote: officerNote,
+              supplementSummary: buildSupplementSummary(input.supplementRequestJson, officerNote),
             },
             dedupeKey: buildEmailDedupeKey('supplement_requested', {
               applicationId,
@@ -765,7 +770,7 @@ export class ReviewService {
           resolutionCaseId = createdCase.id;
         }
 
-        const notification = await this.notificationsService.create(
+        await this.notificationsService.create(
           {
             userId: application.studentId,
             applicationId,
@@ -781,33 +786,6 @@ export class ReviewService {
             type: NotificationType.review_updated,
             title: 'Hồ sơ được chuyển hội đồng xem xét',
             message: officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
-          },
-          tx,
-        );
-        await this.emailOutboxService.enqueue(
-          {
-            recipientEmail: application.student.email,
-            recipientName: application.student.fullName,
-            relatedUserId: application.studentId,
-            applicationId,
-            notificationId: notification.id,
-            templateKey: 'application_status_updated',
-            payload: {
-              recipientName: application.student.fullName,
-              applicationId,
-              schoolYear: application.schoolYear,
-              targetLevel: application.targetLevel,
-              status: ApplicationStatus.resolution_needed,
-              context: officerNote ?? 'Mot tieu chi can hoi dong xem xet.',
-            },
-            dedupeKey: buildEmailDedupeKey('application_status_updated', {
-              applicationId,
-              reviewTaskId: task.id,
-              status: ApplicationStatus.resolution_needed,
-              resolutionCaseId,
-            }),
-            actorId: user.id,
-            actorRole: user.role,
           },
           tx,
         );
@@ -898,16 +876,19 @@ export class ReviewService {
               relatedUserId: application.studentId,
               applicationId,
               notificationId: notification.id,
-              templateKey: 'application_status_updated',
+              templateKey: 'application_rejected',
               payload: {
+                studentName: application.student.fullName,
                 recipientName: application.student.fullName,
+                applicationCode: applicationId,
                 applicationId,
                 schoolYear: application.schoolYear,
                 targetLevel: application.targetLevel,
                 status: ApplicationStatus.rejected,
-                context: officerNote ?? 'Ho so co tieu chi khong dat.',
+                reason: officerNote,
+                reviewNote: officerNote,
               },
-              dedupeKey: buildEmailDedupeKey('application_status_updated', {
+              dedupeKey: buildEmailDedupeKey('application_rejected', {
                 applicationId,
                 reviewTaskId: task.id,
                 status: ApplicationStatus.rejected,
@@ -2004,6 +1985,34 @@ function readSupplementDeadline(value: unknown): string | undefined {
   }
   const deadline = (value as { deadline?: unknown }).deadline;
   return typeof deadline === 'string' && deadline.trim() ? deadline : undefined;
+}
+
+function buildSupplementSummary(value: unknown, fallback?: string | null): string | undefined {
+  const parts: string[] = [];
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const request = value as {
+      requestedFields?: unknown;
+      reason?: unknown;
+      note?: unknown;
+      summary?: unknown;
+    };
+    if (typeof request.summary === 'string' && request.summary.trim()) {
+      parts.push(request.summary.trim());
+    }
+    if (Array.isArray(request.requestedFields) && request.requestedFields.length > 0) {
+      const fields = request.requestedFields
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        .map((item) => item.trim());
+      if (fields.length > 0) {
+        parts.push(`Các mục cần bổ sung/làm rõ: ${fields.join(', ')}`);
+      }
+    }
+    for (const item of [request.reason, request.note]) {
+      if (typeof item === 'string' && item.trim()) parts.push(item.trim());
+    }
+  }
+  if (parts.length > 0) return Array.from(new Set(parts)).join('\n');
+  return fallback?.trim() || undefined;
 }
 
 function resultStatusIsRejected(status: ApplicationStatus | undefined): boolean {

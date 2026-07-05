@@ -1,9 +1,9 @@
-import { ApplicationStatus, ReviewTaskStatus } from '@prisma/client';
+import { ApplicationStatus, ReviewTaskStatus, type Prisma } from '@prisma/client';
 import { env } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
 import { MailService } from '../../infrastructure/mail/mail.service';
 import { createApplicationAudit } from '../applications/application.helpers';
-import { buildEmailDedupeKey, EmailOutboxService } from './email-outbox.service';
+import { EmailOutboxService } from './email-outbox.service';
 import { MailRepository, type EmailOutboxRecord } from './mail.repository';
 
 type EmailWorkerAuditInput = Parameters<typeof createApplicationAudit>[1];
@@ -115,13 +115,17 @@ export class EmailWorkerService {
       if (!task.application || !task.dueDate) continue;
       const window = reminderWindow(task.dueDate, now);
       const payload = {
+        studentName: task.application.student.fullName,
         recipientName: task.application.student.fullName,
+        applicationCode: task.application.id,
         applicationId: task.application.id,
         schoolYear: task.application.schoolYear,
         targetLevel: task.application.targetLevel,
         criterion: task.criterion,
+        criterionName: task.criterion,
+        supplementSummary: supplementSummaryFromJson(task.supplementRequestJson),
         deadline: task.dueDate.toISOString(),
-        window,
+        reminderWindow: window,
       };
       const result = await this.outboxService.enqueue({
         recipientEmail: task.application.student.email,
@@ -130,11 +134,7 @@ export class EmailWorkerService {
         applicationId: task.application.id,
         templateKey: 'supplement_deadline_reminder',
         payload,
-        dedupeKey: buildEmailDedupeKey('supplement_deadline_reminder', {
-          reviewTaskId: task.id,
-          dueDate: task.dueDate.toISOString(),
-          window,
-        }),
+        dedupeKey: `supplement_deadline_reminder:${task.id}:${window}`,
       });
       if (result.created) queued += 1;
     }
@@ -150,7 +150,30 @@ function retryDelayMs(attempts: number): number {
 
 function reminderWindow(dueDate: Date, now: Date): string {
   const diffMs = dueDate.getTime() - now.getTime();
-  if (diffMs < 0) return 'overdue';
-  if (diffMs <= 24 * 60 * 60 * 1000) return '1d';
-  return '3d';
+  if (diffMs < 0) return 'OVERDUE';
+  if (diffMs <= 24 * 60 * 60 * 1000) return 'D-1';
+  return 'D-3';
+}
+
+function supplementSummaryFromJson(value: Prisma.JsonValue | null | undefined): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const request = value as {
+    requestedFields?: unknown;
+    reason?: unknown;
+    note?: unknown;
+    summary?: unknown;
+  };
+  const parts: string[] = [];
+  for (const item of [request.summary, request.reason, request.note]) {
+    if (typeof item === 'string' && item.trim()) parts.push(item.trim());
+  }
+  if (Array.isArray(request.requestedFields) && request.requestedFields.length > 0) {
+    const fields = request.requestedFields
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim());
+    if (fields.length > 0) {
+      parts.push(`Các mục cần bổ sung/làm rõ: ${fields.join(', ')}`);
+    }
+  }
+  return parts.length > 0 ? Array.from(new Set(parts)).join('\n') : undefined;
 }
