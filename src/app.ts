@@ -16,6 +16,7 @@ import { applicationsRouter } from './modules/applications/applications.routes';
 import { auditRouter } from './modules/audit/audit.routes';
 import { authRouter } from './modules/auth/auth.routes';
 import { cascadeRouter } from './modules/cascade/cascade.routes';
+import { chatbotRouter } from './modules/chatbot/chatbot.routes';
 import { collectiveRouter } from './modules/collective/collective.routes';
 import { decisionImportsRouter } from './modules/decision-imports/decision-imports.routes';
 import { evidenceMatchingRouter } from './modules/evidence-matching/evidence-matching.routes';
@@ -34,6 +35,7 @@ import { notificationsRouter } from './modules/notifications/notifications.route
 import { precheckRouter } from './modules/precheck/precheck.routes';
 import { resolutionRouter } from './modules/resolution/resolution.routes';
 import { reviewRouter } from './modules/review/review.routes';
+import { smartbotHooksRouter } from './modules/smartbot-hooks/smartbot-hooks.routes';
 import { smartReaderRouter } from './modules/smartreader/smartreader.routes';
 import { smartUxRouter } from './modules/smartux/smartux.routes';
 import { meRouter, usersRouter } from './modules/users/users.routes';
@@ -82,6 +84,8 @@ export function createApp() {
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/audit', auditRouter);
   app.use('/api/jobs', jobsRouter);
+  app.use('/api/chatbot', chatbotRouter);
+  app.use('/api/smartbot', smartbotHooksRouter);
   app.use('/api/mail', mailRouter);
   app.use('/api', aiRouter);
   app.use('/api/internal/smartreader', smartReaderRouter);

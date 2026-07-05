@@ -16,6 +16,7 @@ import {
   Role,
   RosterPreviewValidationStatus,
 } from '@prisma/client';
+import type { IndexingJob, SmartReaderJob } from '@prisma/client';
 import { env } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
@@ -30,6 +31,10 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { AuditService } from '../audit/audit.service';
 import { assertApplicationEditable, assertApplicationOwner, createApplicationAudit } from '../applications/application.helpers';
+import {
+  normalizeMatchingText,
+  resolveExactParticipantNameMatch,
+} from '../event-registry/event-participant-matching';
 import { runIndexingJob } from '../jobs/jobs.service';
 import { getSmartReaderAdapter, redactSmartReaderSecrets } from '../smartreader';
 import { StorageService } from '../storage/storage.service';
@@ -49,6 +54,13 @@ import { suggestRosterColumnMapping, type DecisionColumnMapping } from './roster
 import { markDuplicateRows, normalizeRosterRow, type NormalizedRosterPreviewRow } from './roster-row.normalizer';
 
 type DecisionImportRecord = Prisma.DecisionImportGetPayload<{ include: typeof decisionImportInclude }>;
+type DecisionImportListRecord = Prisma.DecisionImportGetPayload<{
+  include: {
+    sourceFile: true;
+    documents: true;
+    _count: { select: { previewRows: true; tables: true } };
+  };
+}>;
 type UploadedDecisionFile = Express.Multer.File;
 
 const auditService = new AuditService();
@@ -60,7 +72,7 @@ export class DecisionImportsService {
   async list(_user: AuthenticatedUser, query: ListDecisionImportsQuery) {
     const { items, total } = await this.repository.list(query);
     return {
-      items: await Promise.all(items.map((item) => this.toListDto(item))),
+      items: await this.toListDtos(items),
       pagination: {
         page: query.page,
         limit: query.limit,
@@ -498,12 +510,49 @@ export class DecisionImportsService {
     return record;
   }
 
-  private async toListDto(record: Prisma.DecisionImportGetPayload<{ include: { sourceFile: true; documents: true; _count: { select: { previewRows: true; tables: true } } } }>) {
-    const [metadataJob, rosterJob, smartReaderJob] = await Promise.all([
-      record.metadataJobId ? prisma.indexingJob.findUnique({ where: { id: record.metadataJobId } }) : null,
-      record.rosterJobId ? prisma.indexingJob.findUnique({ where: { id: record.rosterJobId } }) : null,
-      prisma.smartReaderJob.findFirst({ where: { decisionImportId: record.id }, orderBy: { createdAt: 'desc' } }),
+  private async toListDtos(records: DecisionImportListRecord[]) {
+    if (!records.length) return [];
+
+    const indexingJobIds = Array.from(
+      new Set(records.flatMap((record) => [record.metadataJobId, record.rosterJobId].filter(Boolean) as string[])),
+    );
+    const decisionImportIds = records.map((record) => record.id);
+
+    const [indexingJobs, smartReaderJobs] = await Promise.all([
+      indexingJobIds.length
+        ? prisma.indexingJob.findMany({ where: { id: { in: indexingJobIds } } })
+        : Promise.resolve([]),
+      prisma.smartReaderJob.findMany({
+        where: { decisionImportId: { in: decisionImportIds } },
+        orderBy: { createdAt: 'desc' },
+      }),
     ]);
+
+    const indexingJobById = new Map(indexingJobs.map((job) => [job.id, job]));
+    const latestSmartReaderJobByImportId = new Map<string, SmartReaderJob>();
+    for (const job of smartReaderJobs) {
+      if (job.decisionImportId && !latestSmartReaderJobByImportId.has(job.decisionImportId)) {
+        latestSmartReaderJobByImportId.set(job.decisionImportId, job);
+      }
+    }
+
+    return records.map((record) =>
+      this.toListDto(record, {
+        metadataJob: record.metadataJobId ? indexingJobById.get(record.metadataJobId) ?? null : null,
+        rosterJob: record.rosterJobId ? indexingJobById.get(record.rosterJobId) ?? null : null,
+        smartReaderJob: latestSmartReaderJobByImportId.get(record.id) ?? null,
+      }),
+    );
+  }
+
+  private toListDto(
+    record: DecisionImportListRecord,
+    jobs: {
+      metadataJob: IndexingJob | null;
+      rosterJob: IndexingJob | null;
+      smartReaderJob: SmartReaderJob | null;
+    },
+  ) {
     return {
       id: record.id,
       title: record.title,
@@ -514,9 +563,9 @@ export class DecisionImportsService {
       tableCount: record._count.tables,
       uxStatus: mapDecisionImportUxStatus({
         status: record.status,
-        metadataJobStatus: metadataJob?.status,
-        rosterJobStatus: rosterJob?.status,
-        smartReaderStatus: smartReaderJob?.status,
+        metadataJobStatus: jobs.metadataJob?.status,
+        rosterJobStatus: jobs.rosterJob?.status,
+        smartReaderStatus: jobs.smartReaderJob?.status,
         previewRowCount: record._count.previewRows,
       }),
       createdAt: record.createdAt,
@@ -766,13 +815,14 @@ export async function importEventAsEvidence(input: {
   }
 
   const studentCode = isStudent ? input.user.studentCode : application.student.studentCode;
-  if (!studentCode) throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'Student code is required');
-  const participant = input.participantId
-    ? await prisma.eventParticipant.findUnique({ where: { id: input.participantId } })
-    : await prisma.eventParticipant.findUnique({
-        where: { eventId_studentCode: { eventId: event.id, studentCode } },
-      });
-  if (!participant || participant.eventId !== event.id || participant.studentCode !== studentCode) {
+  const studentName = application.student.fullName || (isStudent ? input.user.fullName : null);
+  const participant = await resolveParticipantForOfficialImport({
+    eventId: event.id,
+    participantId: input.participantId,
+    studentCode,
+    studentName,
+  });
+  if (!participant) {
     throw new AppError(404, ErrorCodes.PARTICIPANT_NOT_FOUND, 'Student is not in the confirmed roster');
   }
   if ((participant.participationStatus ?? 'confirmed').toLowerCase() !== 'confirmed') {
@@ -877,6 +927,54 @@ export async function importEventAsEvidence(input: {
     };
   });
   return formatOfficialImportResponse(result, event, participant, false);
+}
+
+async function resolveParticipantForOfficialImport(input: {
+  eventId: string;
+  participantId?: string;
+  studentCode?: string | null;
+  studentName?: string | null;
+}) {
+  if (!input.studentCode && !input.studentName) {
+    throw new AppError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      'Student name or student code is required',
+    );
+  }
+
+  if (input.participantId) {
+    const participant = await prisma.eventParticipant.findUnique({ where: { id: input.participantId } });
+    if (!participant || participant.eventId !== input.eventId) return null;
+    if (
+      input.studentName &&
+      normalizeMatchingText(participant.studentName) !== normalizeMatchingText(input.studentName)
+    ) {
+      return null;
+    }
+    if (!input.studentName && input.studentCode && participant.studentCode !== input.studentCode) {
+      return null;
+    }
+    return participant;
+  }
+
+  if (input.studentName) {
+    const candidates = await prisma.eventParticipant.findMany({ where: { eventId: input.eventId } });
+    const nameMatch = resolveExactParticipantNameMatch(candidates, input.studentName);
+    if (nameMatch.status === 'matched') return nameMatch.participant;
+    if (nameMatch.status === 'duplicate') {
+      throw new AppError(
+        409,
+        ErrorCodes.CONFLICT,
+        'Multiple confirmed roster participants match this student name',
+      );
+    }
+  }
+
+  if (!input.studentCode) return null;
+  return prisma.eventParticipant.findUnique({
+    where: { eventId_studentCode: { eventId: input.eventId, studentCode: input.studentCode } },
+  });
 }
 
 function formatOfficialImportResponse(

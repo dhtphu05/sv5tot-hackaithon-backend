@@ -16,6 +16,7 @@
     "seed": "tsx prisma/seed.ts",
     "create-admin": "tsx scripts/create-admin.ts",
     "smartreader:smoke": "tsx scripts/smoke-smartreader.ts",
+    "smoke:smartbot": "tsx scripts/smoke-smartbot.ts",
     "worker:tick": "tsx scripts/worker-tick.ts",
     "test": "vitest run"
   },

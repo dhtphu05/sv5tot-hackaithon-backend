@@ -44,4 +44,25 @@ describe('event participant normalizer', () => {
       convertedValue: 3,
     });
   });
+
+  it('removes a trailing class suffix from the mapped student name', () => {
+    const participant = applyColumnMapping(
+      {
+        MSSV: '104240020',
+        'Họ và tên': 'Mai Quang Hưng 24N1',
+        Lớp: 'XNDS',
+      },
+      {
+        studentCode: 'MSSV',
+        studentName: 'Họ và tên',
+        className: 'Lớp',
+      },
+      { convertedValue: null },
+    );
+
+    expect(participant).toMatchObject({
+      studentName: 'Mai Quang Hưng',
+      className: 'XNDS',
+    });
+  });
 });

@@ -21,6 +21,10 @@ import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes, type ErrorCode } from '../../../shared/errors/error-codes';
 import { AuditService } from '../../audit/audit.service';
 import {
+  buildEvidenceCardFieldLayers,
+  hasEventNameMismatchWithUserInput,
+} from '../../evidences/evidence-card-field-presenter';
+import {
   getSmartReaderAdapter,
   mapOcrResponse,
   redactSmartReaderSecrets,
@@ -109,7 +113,11 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
     const normalizedOcr = normalizeEvidenceOcr(output.ocr, output.sourceEndpoint);
 
     if (!normalizedOcr.ocrText.trim()) {
-      throw new AppError(422, ErrorCodes.OCR_EMPTY_TEXT, 'VNPT SmartReader returned no OCR text for evidence');
+      throw new AppError(
+        422,
+        ErrorCodes.OCR_EMPTY_TEXT,
+        'VNPT SmartReader returned no OCR text for evidence',
+      );
     }
 
     await prisma.evidence.update({
@@ -134,17 +142,57 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
     });
 
     const matched = await matchEvidenceRegistry(evidence.criterion, normalizedFields);
+    const semanticWarningCodes = [
+      ...(hasEventNameMismatchWithUserInput({
+        evidenceName: evidence.evidenceName,
+        extractedEventName: normalizedFields.event_name,
+      })
+        ? ['event_name_mismatch_with_user_input']
+        : []),
+      ...buildProfileConflictWarnings({
+        profile: evidence.application?.student,
+        fields: normalizedFields,
+      }),
+      ...(isOcrTextLowQuality(normalizedOcr.ocrText) ? ['ocr_text_low_quality'] : []),
+    ];
     const scoring = scoreEvidenceConfidence({
       ocrSucceeded: true,
       fields: normalizedFields,
       evidenceName: evidence.evidenceName,
       matchedEventId: matched.eventId,
-      warnings: [...normalizedOcr.warnings, ...normalizedOcr.warningMessages, ...matched.warnings],
+      warnings: [
+        ...normalizedOcr.warnings,
+        ...normalizedOcr.warningMessages,
+        ...matched.warnings,
+        ...semanticWarningCodes,
+      ],
     });
-    const warningEntries = buildWarnings(scoring.warningCodes, {
-      warnings: normalizedOcr.warnings,
-      warningMessages: normalizedOcr.warningMessages,
+    const warningEntries = buildWarnings(
+      [...scoring.warningCodes, ...matched.warnings, ...semanticWarningCodes],
+      {
+        warnings: normalizedOcr.warnings,
+        warningMessages: normalizedOcr.warningMessages,
+      },
+    );
+    const fieldLayers = buildEvidenceCardFieldLayers({
+      evidenceName: evidence.evidenceName,
+      sourceType: evidence.sourceType,
+      criterion: evidence.criterion,
+      extractedFields,
+      normalizedFields,
+      matchedEventId: matched.eventId,
+      matchedParticipantId: matched.participantId,
+      warnings: warningEntries,
+      studentProfileFields: {
+        studentName: evidence.application?.student.fullName,
+        studentCode: evidence.application?.student.studentCode,
+        className: evidence.application?.student.className,
+        faculty: evidence.application?.student.faculty,
+      },
     });
+    const lowConfidenceFieldCount = Object.values(fieldLayers.fieldConfidence).filter(
+      (confidence) => confidence < 0.6,
+    ).length;
     const missingFields = buildMissingFields(evidence.criterion, normalizedFields, warningEntries);
     const matchingStatusCode =
       matched.eventId && matched.participantId
@@ -253,6 +301,8 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
         matchingStatusCode,
         missingFieldCount: missingFields.length,
         warningCount: warningEntries.length,
+        lowConfidenceFieldCount,
+        fieldConfidenceKeys: Object.keys(fieldLayers.fieldConfidence),
         matchedEventId: matched.eventId,
         matchedParticipantId: matched.participantId,
       },
@@ -282,9 +332,10 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
     await auditService.log({
       actorId: actor?.id,
       actorRole: actor?.role,
-      action: matched.eventId && matched.participantId
-        ? auditActions.OFFICIAL_MATCH_FOUND
-        : auditActions.OFFICIAL_MATCH_NOT_FOUND,
+      action:
+        matched.eventId && matched.participantId
+          ? auditActions.OFFICIAL_MATCH_FOUND
+          : auditActions.OFFICIAL_MATCH_NOT_FOUND,
       entityType: 'evidence',
       entityId: evidence.id,
       applicationId: evidence.applicationId,
@@ -295,9 +346,10 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
         fileId: primaryFile.id,
         criterion: evidence.criterion,
         sourceType: evidence.sourceType,
-        studentStatusCode: matched.eventId && matched.participantId
-          ? 'official_match_found'
-          : 'official_match_not_found',
+        studentStatusCode:
+          matched.eventId && matched.participantId
+            ? 'official_match_found'
+            : 'official_match_not_found',
         matchingStatusCode,
         missingFieldCount: missingFields.length,
         warningCount: warningEntries.length,
@@ -330,6 +382,25 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       });
     }
     if (scoring.needsManualReview) {
+      await auditService.log({
+        actorId: actor?.id,
+        actorRole: actor?.role,
+        action: auditActions.EVIDENCE_NEEDS_MANUAL_REVIEW,
+        entityType: 'evidence',
+        entityId: evidence.id,
+        applicationId: evidence.applicationId,
+        evidenceId: evidence.id,
+        metadata: {
+          provider: 'vnpt_smartreader',
+          criterion: evidence.criterion,
+          sourceType: evidence.sourceType,
+          confidence: scoring.confidence,
+          missingFieldCount: missingFields.length,
+          warningCount: warningEntries.length,
+          lowConfidenceFieldCount,
+          fieldConfidenceKeys: Object.keys(fieldLayers.fieldConfidence),
+        },
+      });
       await auditService.log({
         actorId: actor?.id,
         actorRole: actor?.role,
@@ -456,27 +527,29 @@ async function ensureSmartReaderUpload(
     metadata: { vnptHashPresent: !!uploaded.hash, fileType: uploaded.fileType },
   });
 
-  return prisma.file.update({
-    where: { id: file.id },
-    data: {
-      vnptHash: uploaded.hash,
-      vnptFileType: uploaded.fileType,
-      vnptUploadedAt: new Date(),
-      vnptUploadRawJson: env.VNPT_SAVE_RAW_RESPONSE
-        ? (redactSmartReaderSecrets(uploaded.raw) as Prisma.InputJsonValue)
-        : undefined,
-    },
-  }).then(async (updated) => {
-    await prisma.smartReaderJob.update({
-      where: { id: smartreaderJobId },
+  return prisma.file
+    .update({
+      where: { id: file.id },
       data: {
-        status: SmartReaderJobStatus.processing,
-        vnptHash: updated.vnptHash,
-        vnptFileType: updated.vnptFileType,
+        vnptHash: uploaded.hash,
+        vnptFileType: uploaded.fileType,
+        vnptUploadedAt: new Date(),
+        vnptUploadRawJson: env.VNPT_SAVE_RAW_RESPONSE
+          ? (redactSmartReaderSecrets(uploaded.raw) as Prisma.InputJsonValue)
+          : undefined,
       },
+    })
+    .then(async (updated) => {
+      await prisma.smartReaderJob.update({
+        where: { id: smartreaderJobId },
+        data: {
+          status: SmartReaderJobStatus.processing,
+          vnptHash: updated.vnptHash,
+          vnptFileType: updated.vnptFileType,
+        },
+      });
+      return updated;
     });
-    return updated;
-  });
 }
 
 async function prepareSmartReaderUploadSource(file: File): Promise<{
@@ -494,7 +567,10 @@ async function prepareSmartReaderUploadSource(file: File): Promise<{
   }
 
   const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), '5tot-smartreader-'));
-  const tempPath = path.join(tempDirectory, path.basename(file.originalName || file.filePath || file.id));
+  const tempPath = path.join(
+    tempDirectory,
+    path.basename(file.originalName || file.filePath || file.id),
+  );
   await fs.writeFile(tempPath, Buffer.from(await response.arrayBuffer()));
 
   return {
@@ -560,7 +636,9 @@ async function runAsyncOcr(file: File, smartreaderJobId: string): Promise<Eviden
     });
 
     if (result.status === 'completed' || result.status === 'completed_with_link') {
-      const downloaded = result.resultLink ? await downloadResultLink(result.resultLink) : undefined;
+      const downloaded = result.resultLink
+        ? await downloadResultLink(result.resultLink)
+        : undefined;
       const ocr = downloaded ?? result;
       await prisma.smartReaderJob.update({
         where: { id: smartreaderJobId },
@@ -572,7 +650,11 @@ async function runAsyncOcr(file: File, smartreaderJobId: string): Promise<Eviden
           completedAt: new Date(),
         },
       });
-      return { ocr, sourceEndpoint: result.resultLink ? 'ocrAsync:result-link' : 'ocrAsync:result', smartreaderJobId };
+      return {
+        ocr,
+        sourceEndpoint: result.resultLink ? 'ocrAsync:result-link' : 'ocrAsync:result',
+        smartreaderJobId,
+      };
     }
 
     if (result.status === 'failed' || result.status === 'cancelled') {
@@ -607,10 +689,7 @@ function buildWarnings(
     code: providerWarningCode(message),
     message,
   }));
-  return [
-    ...codes.map((code) => ({ code, message: warningMessage(code) })),
-    ...providerWarnings,
-  ];
+  return [...codes.map((code) => ({ code, message: warningMessage(code) })), ...providerWarnings];
 }
 
 function providerWarningCode(message: string): string {
@@ -635,6 +714,18 @@ function warningMessage(code: string): string {
     LOW_IMAGE_QUALITY: 'Ảnh/tệp có dấu hiệu mờ, nghiêng hoặc mất góc.',
     POSSIBLE_STUDENT_MISMATCH: 'Thông tin có dấu hiệu không khớp sinh viên.',
     LOW_CONFIDENCE: 'Độ tin cậy thấp, cần kiểm tra thủ công.',
+    field_low_confidence: 'Một số thông tin OCR chưa chắc chắn.',
+    ocr_text_low_quality:
+      'Nội dung đọc được có thể chưa chính xác do chất lượng file hoặc định dạng giấy chứng nhận.',
+    ocr_student_name_conflict: 'Tên sinh viên trong file chưa khớp rõ với hồ sơ.',
+    ocr_class_conflict: 'Lớp trong file chưa khớp rõ với hồ sơ.',
+    ocr_faculty_conflict: 'Khoa trong file chưa khớp rõ với hồ sơ.',
+    event_name_mismatch_with_user_input:
+      'Tên hoạt động hệ thống đọc được khác tên minh chứng đã nhập.',
+    participant_name_duplicate: 'Có nhiều sinh viên trùng họ tên trong danh sách chính thức.',
+    participant_name_not_matched: 'Không tìm thấy họ tên sinh viên trong danh sách chính thức.',
+    participant_not_matched_registry: 'Không tìm thấy sinh viên trong danh sách chính thức.',
+    not_matched_registry: 'Chưa tìm thấy hoạt động trong danh sách chính thức.',
   };
   return messages[code] ?? code;
 }
@@ -645,6 +736,72 @@ function buildEvidenceSummary(
 ): string {
   const subject = fields.event_name ?? evidenceName;
   return `SmartReader đã đọc các thông tin chính từ "${subject}". Cán bộ/Hội đồng vẫn là người xác nhận cuối.`;
+}
+
+function buildProfileConflictWarnings(input: {
+  profile?: {
+    fullName?: string | null;
+    studentCode?: string | null;
+    className?: string | null;
+    faculty?: string | null;
+  } | null;
+  fields: ReturnType<typeof normalizeEvidenceFields>;
+}) {
+  const warnings: string[] = [];
+  if (
+    input.profile?.fullName &&
+    input.fields.student_name &&
+    !isSimilarText(input.profile.fullName, input.fields.student_name)
+  ) {
+    warnings.push('ocr_student_name_conflict');
+  }
+  if (
+    input.profile?.className &&
+    input.fields.class_name &&
+    normalizeMatch(input.profile.className) !== normalizeMatch(input.fields.class_name)
+  ) {
+    warnings.push('ocr_class_conflict');
+  }
+  if (
+    input.profile?.faculty &&
+    input.fields.faculty &&
+    !isSimilarText(input.profile.faculty, input.fields.faculty)
+  ) {
+    warnings.push('ocr_faculty_conflict');
+  }
+  return warnings;
+}
+
+function isOcrTextLowQuality(text: string): boolean {
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (tokens.length < 20) return false;
+  const suspicious = tokens.filter((token) => {
+    const normalized = normalizeMatch(token);
+    if (!normalized) return false;
+    return /[a-z]{12,}/.test(normalized) || /\d[a-z]{4,}|[a-z]{4,}\d/.test(normalized);
+  });
+  return suspicious.length / tokens.length > 0.22;
+}
+
+function isSimilarText(left: string, right: string): boolean {
+  const a = normalizeMatch(left);
+  const b = normalizeMatch(right);
+  if (!a || !b) return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+  const aTokens = new Set(a.split(' ').filter((token) => token.length > 1));
+  const bTokens = new Set(b.split(' ').filter((token) => token.length > 1));
+  const overlap = [...aTokens].filter((token) => bTokens.has(token)).length;
+  return overlap >= Math.min(aTokens.size, bTokens.size) * 0.6;
+}
+
+function normalizeMatch(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/đ/g, 'd')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function selectOcrEndpoint(file: File): string {
@@ -676,7 +833,8 @@ type SmartReaderFailure = {
 };
 
 function mapSmartReaderFailure(error: unknown): SmartReaderFailure {
-  const technicalMessage = error instanceof Error ? error.message : 'Unknown VNPT SmartReader failure';
+  const technicalMessage =
+    error instanceof Error ? error.message : 'Unknown VNPT SmartReader failure';
   if (error instanceof AppError && error.code === ErrorCodes.OCR_EMPTY_TEXT) {
     return {
       code: ErrorCodes.OCR_EMPTY_TEXT,
@@ -724,7 +882,8 @@ function mapSmartReaderFailure(error: unknown): SmartReaderFailure {
 
   return {
     code: ErrorCodes.VNPT_OCR_FAILED,
-    userMessage: 'Hệ thống chưa đọc được file này. Bạn có thể tải lại bản rõ hơn hoặc chờ cán bộ xác minh.',
+    userMessage:
+      'Hệ thống chưa đọc được file này. Bạn có thể tải lại bản rõ hơn hoặc chờ cán bộ xác minh.',
     technicalMessage,
     retryable: true,
   };

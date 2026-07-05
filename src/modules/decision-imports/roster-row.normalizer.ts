@@ -1,4 +1,5 @@
 import { Criterion, RosterPreviewValidationStatus } from '@prisma/client';
+import { stripTrailingClassSuffixFromName } from '../event-registry/event-participant-matching';
 import type { DecisionColumnMapping } from './roster-column-mapping.service';
 
 export type NormalizedRosterPreviewRow = {
@@ -29,7 +30,8 @@ export function normalizeRosterRow(input: {
 }): NormalizedRosterPreviewRow {
   const warnings: Array<{ code: string; message: string }> = [];
   const studentCode = clean(read(input.row, input.mapping.studentCode));
-  const studentName = clean(read(input.row, input.mapping.studentName));
+  const studentName =
+    stripTrailingClassSuffixFromName(clean(read(input.row, input.mapping.studentName))) || undefined;
   const convertedValue =
     numberValue(read(input.row, input.mapping.convertedValue)) ?? input.fallbackConvertedValue ?? undefined;
   const criterion = criterionValue(read(input.row, input.mapping.criterion)) ?? input.fallbackCriterion ?? undefined;

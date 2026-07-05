@@ -31,23 +31,11 @@ export function extractEvidenceFields(input: {
     /\b(?:MSSV|Mã\s*SV|Mã\s*sinh\s*viên|Mã\s*số\s*sinh\s*viên|Số\s*thẻ\s*sinh\s*viên)\s*[:-]?\s*([A-Z0-9]{6,12})\b/i,
     /\b(?:sinh\s*viên|student)\s+(?:có\s+)?(?:mã\s*)?([0-9]{8,12})\b/i,
   ]);
-  fields.student_name = cleanName(
-    matchFirst(text, [
-      /(?:Họ\s*và\s*tên|Cấp\s*cho)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
-      /(?:Sinh\s*viên)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
-      /(?:Chứng\s*nhận|Ông\/Bà|Ông|Bà)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
-      fields.student_code
-        ? new RegExp(`([A-ZÀ-Ỹ][^\\n,.;]{3,80})\\s+${escapeRegExp(fields.student_code)}`, 'i')
-        : undefined,
-    ]),
-  );
-  fields.class_name = matchFirst(text, [
-    /(?:Lớp|Chi\s*đoàn)\s*[:-]?\s*([A-Z0-9._-]{2,20})/i,
-    /\b([0-9]{2}[A-ZĐ]{1,6}[0-9]?)\b/u,
-  ]);
+  fields.student_name = selectStudentName(text, fields.student_code);
+  fields.class_name = selectClassName(text);
   fields.document_type = detectDocumentType(normalized);
   fields.certificate_type = fields.document_type;
-  fields.faculty = matchFirst(text, [/(?:Khoa|Viện|Ngành)[ \t]*[:-]?[ \t]*([^\n,.;]{3,80})/i]);
+  fields.faculty = selectFaculty(text);
 
   const isTranscript = fields.document_type === 'transcript';
   if (isTranscript) {
@@ -159,6 +147,70 @@ function matchDate(text: string, patterns: RegExp[]): string | undefined {
     if (normalized) return normalized;
   }
   return undefined;
+}
+
+function selectStudentName(text: string, studentCode?: string): string | undefined {
+  const candidates = [
+    matchFirst(text, [
+      /(?:Họ\s*và\s*tên|Cấp\s*cho)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
+      /(?:Sinh\s*viên)\s*[:-]?\s*([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
+    ]),
+    studentCode
+      ? matchFirst(text, [
+          new RegExp(`([A-ZÀ-Ỹ][^\\n,.;]{3,80})\\s+${escapeRegExp(studentCode)}`, 'i'),
+        ])
+      : undefined,
+  ];
+  return candidates
+    .map(cleanName)
+    .find((candidate) => candidate && isPlausibleStudentName(candidate));
+}
+
+function selectFaculty(text: string): string | undefined {
+  const explicit = matchFirst(text, [
+    /(?:Khoa|Viện|Đơn\s*vị)[ \t]*:[ \t]*([^\n,.;]{3,80})/i,
+    /(?:Khoa|Viện|Đơn\s*vị)[ \t]+([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
+  ]);
+  if (!explicit) return undefined;
+  const value = normalizeWhitespace(explicit);
+  if (/^\s*trong\b/i.test(value) || isNoisyProfileField(value)) return undefined;
+  return value;
+}
+
+function selectClassName(text: string): string | undefined {
+  const explicit = matchFirst(text, [/(?:Lớp|Chi\s*đoàn)\s*[:-]?\s*([A-Z0-9._-]{2,24})/i]);
+  if (explicit && isClassCode(explicit)) return explicit.toUpperCase();
+
+  const standalone = matchFirst(text, [/\b([0-9]{2}[A-ZĐ]{1,8}(?:CLC)?[0-9]?)\b/u]);
+  return standalone && isClassCode(standalone) ? standalone.toUpperCase() : undefined;
+}
+
+function isPlausibleStudentName(value: string): boolean {
+  const normalized = normalizeText(value);
+  if (isNoisyProfileField(value)) return false;
+  if (/\d/.test(value)) return false;
+  if (normalized.split(/\s+/).length < 2) return false;
+  return true;
+}
+
+function isNoisyProfileField(value: string): boolean {
+  const normalized = normalizeText(value);
+  return [
+    'nganh',
+    'khoa',
+    'truong',
+    'hoi nghi',
+    'cuoc thi',
+    'ky su',
+    'tri tue nhan tao',
+    'bim',
+    'aik',
+    'nghien cuu',
+  ].some((keyword) => normalized.includes(keyword));
+}
+
+function isClassCode(value: string): boolean {
+  return /^[0-9]{2}[A-ZĐ]{1,8}(?:[_-]?[A-ZĐ0-9]{1,8})?$/.test(value.toUpperCase());
 }
 
 function normalizeVietnameseDate(numbers: number[]): string | undefined {

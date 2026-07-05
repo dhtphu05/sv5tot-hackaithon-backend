@@ -94,6 +94,7 @@ describe('EvidenceMatchingService', () => {
     );
     expect(result.items[0]).toMatchObject({
       matchType: 'exact_name_and_student_found',
+      event: { eventName: 'Mùa hè xanh 2026' },
       importable: true,
       studentStatus: { code: 'official_match_found' },
     });
@@ -125,6 +126,113 @@ describe('EvidenceMatchingService', () => {
       importable: false,
       participant: null,
       studentStatus: { code: 'official_match_not_found' },
+    });
+  });
+
+  it('uses student fullName when studentCode is missing', async () => {
+    const db = {
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue([
+          event({
+            participants: [participant({ studentName: 'Nguyễn Văn Sinh' })],
+          }),
+        ]),
+      },
+      evidence: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.search(
+      { ...baseUser, studentCode: null, fullName: 'Nguyen Van Sinh' },
+      {
+        q: 'Mùa hè xanh 2026',
+        criterion: Criterion.volunteer,
+        page: 1,
+        limit: 5,
+        track: false,
+      },
+    );
+
+    expect(db.eventRegistry.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: { participants: true },
+      }),
+    );
+    expect(result).toMatchObject({
+      studentCode: null,
+      studentName: 'Nguyen Van Sinh',
+      items: [
+        {
+          importable: true,
+          participant: { id: 'participant-1' },
+          studentStatus: { code: 'official_match_found' },
+        },
+      ],
+    });
+  });
+
+  it('allows officer search by studentName without studentCode', async () => {
+    const db = {
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue([
+          event({
+            participants: [participant({ studentName: 'Bùi Quốc Anh' })],
+          }),
+        ]),
+      },
+      evidence: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.search(
+      { ...baseUser, role: Role.officer, studentCode: null },
+      {
+        q: 'Mùa hè xanh 2026',
+        studentName: 'Bui Quoc Anh',
+        page: 1,
+        limit: 5,
+        track: false,
+      },
+    );
+
+    expect(result.items[0]).toMatchObject({
+      importable: true,
+      participant: { studentName: 'Bùi Quốc Anh' },
+    });
+  });
+
+  it('matches studentName against roster names that include trailing class suffixes', async () => {
+    const db = {
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue([
+          event({
+            participants: [participant({ studentName: 'Bùi Quốc Anh 25N1' })],
+          }),
+        ]),
+      },
+      evidence: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.search(
+      { ...baseUser, studentCode: null, fullName: 'Bùi Quốc Anh' },
+      {
+        q: 'Mùa hè xanh 2026',
+        page: 1,
+        limit: 5,
+        track: false,
+      },
+    );
+
+    expect(result.items[0]).toMatchObject({
+      importable: true,
+      participant: { studentName: 'Bùi Quốc Anh 25N1' },
     });
   });
 

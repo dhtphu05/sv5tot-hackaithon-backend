@@ -38,15 +38,7 @@ type ResolutionCaseWithInclude = Prisma.ResolutionCaseGetPayload<{
 }>;
 
 type ResolutionFinalDecision = ResolutionDecisionInput['decision'];
-const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
 const emailOutboxService = new EmailOutboxService();
-const demoReviewCriteria: Criterion[] = [
-  Criterion.ethics,
-  Criterion.academic,
-  Criterion.physical,
-  Criterion.volunteer,
-  Criterion.integration,
-];
 
 export class ResolutionService {
   async listCases(user: AuthenticatedUser, query: ListResolutionCasesQuery) {
@@ -553,18 +545,6 @@ async function canOfficerHandleResolutionCriterion(
 ) {
   const criterion = resolutionCase.evidence?.criterion ?? fallbackCriterion;
   if (!criterion) return false;
-  const officer = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true, role: true, isActive: true },
-  });
-  if (
-    officer?.email === demoAllCriteriaOfficerEmail &&
-    officer.role === Role.officer &&
-    officer.isActive &&
-    demoReviewCriteria.includes(criterion)
-  ) {
-    return true;
-  }
   const spec = await prisma.officerSpecialization.findFirst({
     where: { officerId: userId, criterion, isActive: true },
   });

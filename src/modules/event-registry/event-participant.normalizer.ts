@@ -1,3 +1,5 @@
+import { stripTrailingClassSuffixFromName } from './event-participant-matching';
+
 export type RosterColumnMapping = {
   studentCode: string;
   studentName?: string;
@@ -21,9 +23,7 @@ export function normalizeStudentCode(value: unknown): string {
 }
 
 export function normalizeVietnameseName(value: unknown): string {
-  return String(value ?? '')
-    .trim()
-    .replace(/\s+/g, ' ');
+  return stripTrailingClassSuffixFromName(String(value ?? ''));
 }
 
 export function normalizeParticipationStatus(value: unknown): string {

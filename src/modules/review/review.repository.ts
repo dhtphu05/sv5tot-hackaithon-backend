@@ -1,17 +1,8 @@
 // Owns officer review tasks, decisions, supplements, and escalation persistence.
-import { Criterion, Role, type Prisma } from '@prisma/client';
+import { Role, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import type { ListReviewTasksQuery } from './review.validation';
-
-const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
-const demoReviewCriteria = [
-  Criterion.ethics,
-  Criterion.academic,
-  Criterion.physical,
-  Criterion.volunteer,
-  Criterion.integration,
-];
 
 export const reviewTaskListInclude = {
   application: { include: { student: true } },
@@ -161,22 +152,9 @@ export class ReviewRepository {
 
     const specializations = await prisma.officerSpecialization.findMany({
       where: { officerId: user.id, isActive: true },
-      select: { criterion: true, facultyScope: true },
+      select: { criterion: true },
     });
-    const effectiveSpecializations =
-      user.email === demoAllCriteriaOfficerEmail
-        ? demoReviewCriteria.map((criterion) => ({
-            criterion,
-            facultyScope: user.faculty,
-          }))
-        : specializations;
-    const criteria = Array.from(new Set(effectiveSpecializations.map((item) => item.criterion)));
-    const effectiveFacultyScopes = effectiveSpecializations
-      .map((item) => item.facultyScope)
-      .filter((item): item is string => Boolean(item));
-    const scopedCriteriaByFaculty = effectiveSpecializations.filter((item) => item.facultyScope);
-    const hasGlobalCriterion = (criterion: Criterion) =>
-      effectiveSpecializations.some((item) => item.criterion === criterion && !item.facultyScope);
+    const criteria = Array.from(new Set(specializations.map((item) => item.criterion)));
 
     return {
       ...base,
@@ -186,36 +164,6 @@ export class ReviewRepository {
           ? [
               {
                 criterion: { in: criteria },
-                OR: [
-                  ...criteria
-                    .filter((criterion) => hasGlobalCriterion(criterion))
-                    .map((criterion) => ({ criterion })),
-                  ...(effectiveFacultyScopes.length
-                    ? [
-                        {
-                          application: {
-                            student: { faculty: { in: effectiveFacultyScopes } },
-                          },
-                        },
-                        {
-                          collectiveProfile: {
-                            representative: { faculty: { in: effectiveFacultyScopes } },
-                          },
-                        },
-                      ]
-                    : []),
-                  ...scopedCriteriaByFaculty.map((spec) => ({
-                    criterion: spec.criterion,
-                    OR: [
-                      { application: { student: { faculty: spec.facultyScope ?? undefined } } },
-                      {
-                        collectiveProfile: {
-                          representative: { faculty: spec.facultyScope ?? undefined },
-                        },
-                      },
-                    ],
-                  })),
-                ],
               },
             ]
           : []),

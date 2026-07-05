@@ -4,8 +4,9 @@ import { prisma } from '../../infrastructure/database/prisma';
 import type { ListEvidencesQuery } from './evidences.validation';
 
 export const evidenceInclude = {
-  application: { include: { student: true } },
+  application: { include: { student: true, metrics: true } },
   collectiveProfile: true,
+  event: true,
   evidenceFiles: {
     include: {
       file: true,
