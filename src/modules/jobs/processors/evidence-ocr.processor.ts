@@ -141,7 +141,7 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       matchedEventId: matched.eventId,
       warnings: [...normalizedOcr.warnings, ...normalizedOcr.warningMessages, ...matched.warnings],
     });
-    const warningEntries = buildWarnings(scoring.warningCodes, {
+    const warningEntries = buildWarnings([...scoring.warningCodes, ...matched.warnings], {
       warnings: normalizedOcr.warnings,
       warningMessages: normalizedOcr.warningMessages,
     });
@@ -635,6 +635,10 @@ function warningMessage(code: string): string {
     LOW_IMAGE_QUALITY: 'Ảnh/tệp có dấu hiệu mờ, nghiêng hoặc mất góc.',
     POSSIBLE_STUDENT_MISMATCH: 'Thông tin có dấu hiệu không khớp sinh viên.',
     LOW_CONFIDENCE: 'Độ tin cậy thấp, cần kiểm tra thủ công.',
+    participant_name_duplicate: 'Có nhiều sinh viên trùng họ tên trong danh sách chính thức.',
+    participant_name_not_matched: 'Không tìm thấy họ tên sinh viên trong danh sách chính thức.',
+    participant_not_matched_registry: 'Không tìm thấy sinh viên trong danh sách chính thức.',
+    not_matched_registry: 'Chưa tìm thấy hoạt động trong danh sách chính thức.',
   };
   return messages[code] ?? code;
 }

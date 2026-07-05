@@ -91,7 +91,17 @@ const rawEnvSchema = z.object({
   JOB_WORKER_ENABLED: booleanFromEnv,
   JOB_WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   INTERNAL_WORKER_TOKEN: z.string().optional().default(''),
-  SMARTBOT_MODE: z.enum(['mock', 'live']).default('mock'),
+  SMARTBOT_MODE: z.enum(['mock', 'live', 'real']).default('mock'),
+  SMARTBOT_BASE_URL: z.string().url().default('https://assistant-stream.vnpt.vn'),
+  SMARTBOT_BOT_ID: z.string().optional().default(''),
+  SMARTBOT_ACCESS_TOKEN: z.string().optional().default(''),
+  SMARTBOT_TOKEN_ID: z.string().optional().default(''),
+  SMARTBOT_TOKEN_KEY: z.string().optional().default(''),
+  SMARTBOT_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  SMARTBOT_INPUT_CHANNEL: z.string().min(1).default('livechat'),
+  SMARTBOT_USE_DYNAMIC_PROMPT: booleanFromEnv,
+  SMARTBOT_WEBHOOK_TOKEN: z.string().optional().default(''),
+  SMARTBOT_LOG_RAW_RESPONSE: booleanFromEnv,
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 })
   .refine((data) => !!data.JWT_SECRET || (!!data.JWT_ACCESS_SECRET && !!data.JWT_REFRESH_SECRET), {
@@ -160,6 +170,10 @@ if (
   throw new Error('JWT secrets must be changed in production');
 }
 
+if (rawEnv.NODE_ENV === 'production' && !rawEnv.SMARTBOT_WEBHOOK_TOKEN) {
+  throw new Error('Invalid environment configuration: SMARTBOT_WEBHOOK_TOKEN is required in production');
+}
+
 export const env = {
   ...rawEnv,
   JWT_ACCESS_SECRET: jwtAccessSecret,
@@ -187,5 +201,11 @@ export const env = {
   VNPT_ENABLED: vnptEnabled,
   VNPT_REQUIRE_REAL_IN_PIPELINE: vnptRequireRealInPipeline,
   VNPT_ALLOW_MOCK_RUNTIME: vnptAllowMockRuntime,
+  SMARTBOT_USE_DYNAMIC_PROMPT:
+    process.env.SMARTBOT_USE_DYNAMIC_PROMPT === undefined
+      ? true
+      : rawEnv.SMARTBOT_USE_DYNAMIC_PROMPT,
+  SMARTBOT_LOG_RAW_RESPONSE:
+    process.env.SMARTBOT_LOG_RAW_RESPONSE === undefined ? false : rawEnv.SMARTBOT_LOG_RAW_RESPONSE,
 };
 export type Env = typeof env;

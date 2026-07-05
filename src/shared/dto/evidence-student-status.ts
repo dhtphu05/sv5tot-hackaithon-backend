@@ -344,6 +344,18 @@ const warningCopy: Record<string, Omit<EvidenceWarning, 'code'>> = {
     label: 'Chưa tìm thấy trong danh sách chính thức',
     message: 'Bạn vẫn có thể upload minh chứng để cán bộ xác minh.',
   },
+  participant_name_duplicate: {
+    label: 'Trùng họ tên trong danh sách',
+    message: 'Có nhiều sinh viên cùng họ tên trong danh sách chính thức. Cán bộ cần kiểm tra thủ công.',
+  },
+  participant_name_not_matched: {
+    label: 'Chưa khớp họ tên',
+    message: 'Chưa tìm thấy họ tên sinh viên trong danh sách chính thức.',
+  },
+  participant_not_matched_registry: {
+    label: 'Chưa khớp sinh viên',
+    message: 'Chưa tìm thấy sinh viên trong danh sách chính thức.',
+  },
   ocr_empty_text: {
     label: 'Không đọc rõ file',
     message: 'File chưa đọc rõ. Bạn có thể tải lại bản rõ hơn.',
@@ -366,6 +378,9 @@ const legacyWarningAliases: Record<string, string> = {
   EVENT_MISSING_DATE: 'missing_issue_date',
   EVENT_MISSING_CONVERTED_VALUE: 'missing_volunteer_days',
   not_matched_registry: 'official_match_not_found',
+  participant_name_not_matched: 'participant_name_not_matched',
+  participant_name_duplicate: 'participant_name_duplicate',
+  participant_not_matched_registry: 'participant_not_matched_registry',
   OCR_FAILED: 'ocr_empty_text',
   OCR_EMPTY_TEXT: 'ocr_empty_text',
   LOW_CONFIDENCE: 'needs_human_verification',

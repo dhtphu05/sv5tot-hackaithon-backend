@@ -953,3 +953,86 @@ model CollectivePrecheckResult {
 
   @@index([collectiveProfileId, createdAt])
 }
+
+model ChatSession {
+  id                 String   @id @default(uuid()) @db.Uuid
+  userId             String   @db.Uuid
+  role               String
+  applicationId      String?  @db.Uuid
+  reviewTaskId       String?  @db.Uuid
+  resolutionCaseId   String?  @db.Uuid
+  provider           String   @default("vnpt_smartbot")
+  providerSessionId  String?
+  contextScope       String?
+  status             String   @default("active")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  messages           ChatMessage[]
+  actions            ChatbotAction[]
+  handoffs           ChatbotHandoff[]
+
+  @@index([userId])
+  @@index([applicationId])
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id                    String      @id @default(uuid()) @db.Uuid
+  sessionId             String      @db.Uuid
+  sender                String
+  textRedacted          String?
+  normalizedPayloadJson Json?
+  providerStatus        Int?
+  metadataJson          Json?
+  createdAt             DateTime    @default(now())
+  session               ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("chat_messages")
+}
+
+model ChatbotAction {
+  id                   String      @id @default(uuid()) @db.Uuid
+  sessionId            String      @db.Uuid
+  userId               String      @db.Uuid
+  actionType           String
+  toolName             String?
+  label                String
+  route                String?
+  queryJson            Json?
+  payloadJson          Json?
+  requiredRole         String?
+  requiresConfirmation Boolean     @default(false)
+  status               String      @default("pending")
+  expiresAt            DateTime
+  confirmedAt          DateTime?
+  executedAt           DateTime?
+  auditLogId           String?     @db.Uuid
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+  session              ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([userId])
+  @@index([status])
+  @@map("chatbot_actions")
+}
+
+model ChatbotHandoff {
+  id                 String      @id @default(uuid()) @db.Uuid
+  sessionId          String      @db.Uuid
+  userId             String      @db.Uuid
+  applicationId      String?     @db.Uuid
+  reviewTaskId       String?     @db.Uuid
+  resolutionCaseId   String?     @db.Uuid
+  reason             String?
+  status             String      @default("pending")
+  assignedOfficerId  String?     @db.Uuid
+  createdAt          DateTime    @default(now())
+  resolvedAt         DateTime?
+  session            ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@map("chatbot_handoffs")
+}

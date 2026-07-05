@@ -17,6 +17,10 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { AuditService } from '../audit/audit.service';
+import {
+  normalizeMatchingText,
+  resolveExactParticipantNameMatch,
+} from '../event-registry/event-participant-matching';
 import type { EvidenceMatchingSearchQuery } from './evidence-matching.validation';
 
 type EventWithParticipant = EventRegistry & { participants: EventParticipant[] };
@@ -36,17 +40,21 @@ export class EvidenceMatchingService {
 
   async search(user: AuthenticatedUser, query: EvidenceMatchingSearchQuery) {
     const isStudent = user.role === Role.student || user.role === Role.class_representative;
-    const studentCode = isStudent ? user.studentCode : query.studentCode;
+    const target = await this.resolveSearchTarget(user, query, isStudent);
 
-    if (!studentCode) {
-      throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'studentCode is required');
-    }
     if (isStudent && query.studentCode && query.studentCode !== user.studentCode) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only search their own student code');
     }
+    if (
+      isStudent &&
+      query.studentName &&
+      normalizeMatchingText(query.studentName) !== normalizeMatchingText(user.fullName)
+    ) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only search their own name');
+    }
 
     const normalizedQuery = normalizeMatchingText(query.q ?? '');
-    const candidates = await this.findCandidates(query, studentCode);
+    const candidates = await this.findCandidates(query, target);
     const ranked = candidates
       .map((event) => rankEvent(event, normalizedQuery))
       .filter((item) => item.matchType !== 'no_match' || !normalizedQuery)
@@ -90,7 +98,8 @@ export class EvidenceMatchingService {
         entityType: 'official_matching',
         entityId: user.id,
         metadata: {
-          studentCode,
+          studentCode: target.studentCode ?? null,
+          studentName: target.studentName ?? null,
           criterion: query.criterion ?? null,
           query: query.q ?? null,
           statusCode: items.some((item) => item.importable) ? 'official_match_found' : 'official_match_not_found',
@@ -102,7 +111,8 @@ export class EvidenceMatchingService {
     return {
       query: query.q ?? '',
       criterion: query.criterion ?? null,
-      studentCode,
+      studentCode: target.studentCode ?? null,
+      studentName: target.studentName ?? null,
       items,
       emptyState: {
         studentStatus: getEvidenceStudentStatus('official_match_not_found'),
@@ -112,7 +122,7 @@ export class EvidenceMatchingService {
 
   private async findCandidates(
     query: EvidenceMatchingSearchQuery,
-    studentCode: string,
+    target: { studentCode?: string | null; studentName?: string | null },
   ): Promise<EventWithParticipant[]> {
     const where: Prisma.EventRegistryWhereInput = {
       status: EventStatus.active,
@@ -120,17 +130,73 @@ export class EvidenceMatchingService {
       ...(query.criterion ? { criterion: query.criterion } : {}),
     };
 
-    return this.db.eventRegistry.findMany({
+    const events = (await this.db.eventRegistry.findMany({
       where,
       include: {
-        participants: {
-          where: { studentCode },
-          take: 1,
-        },
+        participants: target.studentName
+          ? true
+          : {
+              where: { studentCode: target.studentCode! },
+              take: 1,
+            },
       },
       orderBy: { updatedAt: 'desc' },
       take: Math.max(query.limit * 10, 80),
-    }) as Promise<EventWithParticipant[]>;
+    })) as EventWithParticipant[];
+
+    if (!target.studentName) return events;
+
+    return events.map((event) => {
+      const nameMatch = resolveExactParticipantNameMatch(event.participants, target.studentName);
+      if (nameMatch.status === 'matched') {
+        return { ...event, participants: [nameMatch.participant] };
+      }
+      if (nameMatch.status === 'duplicate') {
+        return { ...event, participants: [] };
+      }
+      const fallback = target.studentCode
+        ? event.participants.find((participant) => participant.studentCode === target.studentCode)
+        : undefined;
+      return { ...event, participants: fallback ? [fallback] : [] };
+    });
+  }
+
+  private async resolveSearchTarget(
+    user: AuthenticatedUser,
+    query: EvidenceMatchingSearchQuery,
+    isStudent: boolean,
+  ) {
+    let studentCode = isStudent ? user.studentCode : query.studentCode;
+    let studentName = query.studentName?.trim() || undefined;
+
+    if (query.applicationId && (!studentCode || !studentName)) {
+      const application = await this.db.application.findUnique({
+        where: { id: query.applicationId },
+        select: {
+          student: {
+            select: { studentCode: true, fullName: true },
+          },
+        },
+      });
+      if (!application) {
+        throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+      }
+      studentCode = studentCode ?? application.student.studentCode;
+      studentName = studentName ?? application.student.fullName;
+    }
+
+    if (!studentCode && !studentName && isStudent) {
+      studentName = user.fullName;
+    }
+    if (!studentCode && !studentName) {
+      throw new AppError(
+        400,
+        ErrorCodes.VALIDATION_ERROR,
+        'studentName or studentCode is required',
+      );
+    }
+
+    return { studentCode, studentName };
   }
 
   private async findImportedEventIds(applicationId: string, eventIds: string[]) {
@@ -206,16 +272,6 @@ function resolveMatchType(matchType: OfficialMatchType, participantFound: boolea
   return 'no_match';
 }
 
-export function normalizeMatchingText(value: string): string {
-  return value
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 function tokenOverlap(query: string, target: string): number {
   const queryTokens = new Set(query.split(' ').filter((token) => token.length >= 2));
   if (queryTokens.size === 0) return 0;
@@ -230,6 +286,7 @@ function tokenOverlap(query: string, target: string): number {
 function toOfficialMatchingEventDto(event: EventRegistry) {
   return {
     id: event.id,
+    eventName: event.eventName,
     name: event.eventName,
     criterion: event.criterion,
     organizer: event.organizer,
@@ -249,5 +306,6 @@ function toParticipantDto(participant: EventParticipant) {
     studentName: participant.studentName,
     className: participant.className,
     faculty: participant.faculty,
+    convertedValue: participant.convertedValue,
   };
 }

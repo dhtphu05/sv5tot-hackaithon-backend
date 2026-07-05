@@ -30,6 +30,10 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { AuditService } from '../audit/audit.service';
 import { assertApplicationEditable, assertApplicationOwner, createApplicationAudit } from '../applications/application.helpers';
+import {
+  normalizeMatchingText,
+  resolveExactParticipantNameMatch,
+} from '../event-registry/event-participant-matching';
 import { runIndexingJob } from '../jobs/jobs.service';
 import { getSmartReaderAdapter, redactSmartReaderSecrets } from '../smartreader';
 import { StorageService } from '../storage/storage.service';
@@ -766,13 +770,14 @@ export async function importEventAsEvidence(input: {
   }
 
   const studentCode = isStudent ? input.user.studentCode : application.student.studentCode;
-  if (!studentCode) throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'Student code is required');
-  const participant = input.participantId
-    ? await prisma.eventParticipant.findUnique({ where: { id: input.participantId } })
-    : await prisma.eventParticipant.findUnique({
-        where: { eventId_studentCode: { eventId: event.id, studentCode } },
-      });
-  if (!participant || participant.eventId !== event.id || participant.studentCode !== studentCode) {
+  const studentName = application.student.fullName || (isStudent ? input.user.fullName : null);
+  const participant = await resolveParticipantForOfficialImport({
+    eventId: event.id,
+    participantId: input.participantId,
+    studentCode,
+    studentName,
+  });
+  if (!participant) {
     throw new AppError(404, ErrorCodes.PARTICIPANT_NOT_FOUND, 'Student is not in the confirmed roster');
   }
   if ((participant.participationStatus ?? 'confirmed').toLowerCase() !== 'confirmed') {
@@ -877,6 +882,54 @@ export async function importEventAsEvidence(input: {
     };
   });
   return formatOfficialImportResponse(result, event, participant, false);
+}
+
+async function resolveParticipantForOfficialImport(input: {
+  eventId: string;
+  participantId?: string;
+  studentCode?: string | null;
+  studentName?: string | null;
+}) {
+  if (!input.studentCode && !input.studentName) {
+    throw new AppError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      'Student name or student code is required',
+    );
+  }
+
+  if (input.participantId) {
+    const participant = await prisma.eventParticipant.findUnique({ where: { id: input.participantId } });
+    if (!participant || participant.eventId !== input.eventId) return null;
+    if (
+      input.studentName &&
+      normalizeMatchingText(participant.studentName) !== normalizeMatchingText(input.studentName)
+    ) {
+      return null;
+    }
+    if (!input.studentName && input.studentCode && participant.studentCode !== input.studentCode) {
+      return null;
+    }
+    return participant;
+  }
+
+  if (input.studentName) {
+    const candidates = await prisma.eventParticipant.findMany({ where: { eventId: input.eventId } });
+    const nameMatch = resolveExactParticipantNameMatch(candidates, input.studentName);
+    if (nameMatch.status === 'matched') return nameMatch.participant;
+    if (nameMatch.status === 'duplicate') {
+      throw new AppError(
+        409,
+        ErrorCodes.CONFLICT,
+        'Multiple confirmed roster participants match this student name',
+      );
+    }
+  }
+
+  if (!input.studentCode) return null;
+  return prisma.eventParticipant.findUnique({
+    where: { eventId_studentCode: { eventId: input.eventId, studentCode: input.studentCode } },
+  });
 }
 
 function formatOfficialImportResponse(
