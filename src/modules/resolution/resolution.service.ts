@@ -155,7 +155,9 @@ export class ResolutionService {
       }),
     ]);
     const relatedEvidences = await findRelatedEvidences(resolutionCase, relatedTask);
-    const primaryEvidence = resolutionCase.evidence ? toResolutionEvidence(resolutionCase.evidence) : null;
+    const primaryEvidence = resolutionCase.evidence
+      ? toResolutionEvidence(resolutionCase.evidence)
+      : null;
 
     return {
       resolutionCase: toResolutionListItem(resolutionCase),
@@ -169,7 +171,9 @@ export class ResolutionService {
         status: resolutionCase.status,
         committeeDecision: resolutionCase.committeeDecision,
         createdBy: { id: resolutionCase.createdBy, fullName: resolutionCase.createdBy },
-        closedBy: resolutionCase.closedBy ? { id: resolutionCase.closedBy, fullName: resolutionCase.closedBy } : null,
+        closedBy: resolutionCase.closedBy
+          ? { id: resolutionCase.closedBy, fullName: resolutionCase.closedBy }
+          : null,
         createdAt: resolutionCase.createdAt,
         updatedAt: resolutionCase.closedAt ?? resolutionCase.createdAt,
       },
@@ -319,16 +323,23 @@ export class ResolutionService {
         });
       }
 
-      await notifyStudentAfterResolution(tx, resolutionCase, input, applicationStatus);
+      await notifyStudentAfterResolution(tx, {
+        resolutionCase,
+        input,
+        applicationStatus,
+        relatedTask,
+        updatedEvidenceIds,
+      });
       await notifyResolutionWatchers(tx, {
         actorId: user.id,
         applicationId: resolutionCase.applicationId,
-        evidenceId: resolutionCase.evidenceId,
+        evidenceId: updatedEvidenceIds[0] ?? resolutionCase.evidenceId,
         reviewTaskId: relatedTask?.id,
         resolutionCaseId: resolutionCase.id,
+        criterion: resolutionCase.evidence?.criterion ?? relatedTask?.criterion ?? null,
         decision: input.decision,
         status: closedStatus,
-        title: 'Resolution case updated',
+        title: 'Kết luận hội đồng đã cập nhật',
         message: input.note,
         assignedOfficerId: relatedTask?.assignedOfficerId,
       });
@@ -517,14 +528,6 @@ async function accessWhere(
 
 function canManageResolution(user: AuthenticatedUser) {
   return user.role === Role.manager || user.role === Role.committee || user.role === Role.admin;
-}
-
-async function getOfficerCriteria(userId: string) {
-  const specs = await prisma.officerSpecialization.findMany({
-    where: { officerId: userId, isActive: true },
-    select: { criterion: true },
-  });
-  return specs.map((spec) => spec.criterion);
 }
 
 async function canOfficerHandleResolutionCriterion(
@@ -761,9 +764,19 @@ async function ensureResolutionOpenedAudit(
 
 async function notifyStudentAfterResolution(
   tx: Prisma.TransactionClient,
-  resolutionCase: ResolutionCaseWithInclude,
-  input: ResolutionDecisionInput,
-  applicationStatus: ApplicationStatus,
+  {
+    resolutionCase,
+    input,
+    applicationStatus,
+    relatedTask,
+    updatedEvidenceIds,
+  }: {
+    resolutionCase: ResolutionCaseWithInclude;
+    input: ResolutionDecisionInput;
+    applicationStatus: ApplicationStatus;
+    relatedTask: Awaited<ReturnType<typeof findRelatedReviewTask>>;
+    updatedEvidenceIds: string[];
+  },
 ) {
   const notificationType =
     input.decision === 'supplement_required'
@@ -771,18 +784,33 @@ async function notifyStudentAfterResolution(
       : NotificationType.review_updated;
   const title =
     input.decision === 'supplement_required'
-      ? 'Can bo yeu cau bo sung minh chung'
-      : 'Ket qua xu ly hoi dong da cap nhat';
+      ? 'Cán bộ yêu cầu bổ sung minh chứng'
+      : 'Kết quả xử lý hội đồng đã cập nhật';
+  const criterion = resolutionCase.evidence?.criterion ?? relatedTask?.criterion ?? null;
+  const evidenceIds =
+    updatedEvidenceIds.length > 0
+      ? updatedEvidenceIds
+      : resolutionCase.evidenceId
+        ? [resolutionCase.evidenceId]
+        : [];
   await createNotification(
     {
       userId: resolutionCase.application.studentId,
       applicationId: resolutionCase.applicationId,
-      evidenceId: resolutionCase.evidenceId,
+      evidenceId: evidenceIds[0] ?? null,
+      reviewTaskId: relatedTask?.id ?? null,
       resolutionCaseId: resolutionCase.id,
       type: notificationType,
       title,
       message: input.note,
-      metadata: { decision: input.decision, applicationStatus },
+      metadata: {
+        criterion,
+        decision: input.decision,
+        applicationStatus,
+        evidenceIds,
+        resolutionCaseId: resolutionCase.id,
+        reviewTaskId: relatedTask?.id ?? null,
+      },
     },
     tx,
   );
@@ -796,6 +824,7 @@ async function notifyResolutionWatchers(
     evidenceId: string | null;
     reviewTaskId?: string | null;
     resolutionCaseId: string;
+    criterion?: Criterion | null;
     decision: ResolutionFinalDecision;
     status: ResolutionStatus;
     title: string;
@@ -826,7 +855,14 @@ async function notifyResolutionWatchers(
           type: NotificationType.review_updated,
           title: input.title,
           message: input.message,
-          metadata: { decision: input.decision, status: input.status },
+          metadata: {
+            criterion: input.criterion ?? null,
+            decision: input.decision,
+            status: input.status,
+            evidenceId: input.evidenceId,
+            reviewTaskId: input.reviewTaskId ?? null,
+            resolutionCaseId: input.resolutionCaseId,
+          },
         },
         tx,
       ),

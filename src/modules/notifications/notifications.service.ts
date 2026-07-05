@@ -29,15 +29,13 @@ export class NotificationsService {
       message: input.message,
       applicationId: input.applicationId,
       collectiveProfileId: input.collectiveProfileId,
+      evidenceId: input.evidenceId,
+      reviewTaskId: input.reviewTaskId,
+      resolutionCaseId: input.resolutionCaseId,
+      metadata: input.metadata,
     };
     const created = await this.notificationsRepository.create(data, tx);
-    return toNotificationSummary({
-      ...created,
-      evidenceId: input.evidenceId ?? null,
-      reviewTaskId: input.reviewTaskId ?? null,
-      resolutionCaseId: input.resolutionCaseId ?? null,
-      metadata: input.metadata ?? null,
-    });
+    return toNotificationSummary(created);
   }
 
   async listForUser(userId: string, query: ListNotificationsQuery) {
@@ -77,9 +75,6 @@ export class NotificationsService {
 
 const notificationsService = new NotificationsService();
 
-export function createNotification(
-  input: CreateNotificationInput,
-  tx?: Prisma.TransactionClient,
-) {
+export function createNotification(input: CreateNotificationInput, tx?: Prisma.TransactionClient) {
   return notificationsService.create(input, tx);
 }

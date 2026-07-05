@@ -636,6 +636,11 @@ export class ReviewService {
       });
 
       if (input.decision === ReviewDecision.supplement_required) {
+        const supplementRequest = (input.supplementRequestJson ?? {}) as Record<string, unknown>;
+        const selectedEvidenceIds = input.evidenceDecisions.length
+          ? input.evidenceDecisions.map((item) => item.evidenceId)
+          : evidenceIds;
+        const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
         await tx.application.update({
           where: { id: applicationId },
           data: { status: ApplicationStatus.supplement_required },
@@ -644,8 +649,14 @@ export class ReviewService {
           {
             userId: application.studentId,
             applicationId,
+            evidenceId: primaryEvidenceId,
             reviewTaskId: task.id,
-            metadata: { criterion: task.criterion, evidenceIds },
+            metadata: {
+              criterion: task.criterion,
+              evidenceIds: selectedEvidenceIds,
+              deadline: supplementRequest.deadline ?? null,
+              requestedFields: supplementRequest.requestedFields ?? [],
+            },
             type: NotificationType.supplement_required,
             title: 'Cần bổ sung minh chứng',
             message: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
@@ -655,19 +666,36 @@ export class ReviewService {
       }
 
       if (input.decision === ReviewDecision.resolution_needed) {
+        const selectedEvidenceIds = input.evidenceDecisions.length
+          ? input.evidenceDecisions.map((item) => item.evidenceId)
+          : evidenceIds;
+        const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
         await tx.application.update({
           where: { id: applicationId },
           data: { status: ApplicationStatus.resolution_needed },
         });
 
         const existingCase = await tx.resolutionCase.findFirst({
-          where: { applicationId, status: 'open' },
+          where: {
+            applicationId,
+            status: 'open',
+            OR: primaryEvidenceId
+              ? [{ evidenceId: primaryEvidenceId }, { evidenceId: null }]
+              : [{ evidenceId: null }],
+          },
+          orderBy: { createdAt: 'desc' },
         });
         let resolutionCaseId = existingCase?.id ?? null;
-        if (!existingCase) {
+        if (existingCase && primaryEvidenceId && !existingCase.evidenceId) {
+          await tx.resolutionCase.update({
+            where: { id: existingCase.id },
+            data: { evidenceId: primaryEvidenceId },
+          });
+        } else if (!existingCase) {
           const createdCase = await tx.resolutionCase.create({
             data: {
               applicationId,
+              evidenceId: primaryEvidenceId,
               reason: officerNote ?? 'Cần hội đồng xem xét.',
               createdBy: user.id,
               status: 'open',
@@ -680,9 +708,15 @@ export class ReviewService {
           {
             userId: application.studentId,
             applicationId,
+            evidenceId: primaryEvidenceId,
             reviewTaskId: task.id,
             resolutionCaseId,
-            metadata: { criterion: task.criterion, evidenceIds },
+            metadata: {
+              criterion: task.criterion,
+              evidenceIds: selectedEvidenceIds,
+              primaryEvidenceId,
+              resolutionCaseId,
+            },
             type: NotificationType.review_updated,
             title: 'Hồ sơ được chuyển hội đồng xem xét',
             message: officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
@@ -695,7 +729,13 @@ export class ReviewService {
           resolutionCaseId,
           'Có hồ sơ cần xử lý đối sánh',
           officerNote ?? 'Một task được chuyển sang cần hội đồng xem xét.',
-          { reviewTaskId: task.id, criterion: task.criterion, evidenceIds },
+          {
+            reviewTaskId: task.id,
+            criterion: task.criterion,
+            evidenceIds: selectedEvidenceIds,
+            primaryEvidenceId,
+            resolutionCaseId,
+          },
         );
       }
 
@@ -852,11 +892,18 @@ export class ReviewService {
     taskId: string,
     input: {
       reason: string;
+      evidenceId?: string;
       evidenceIds?: string[];
       priority?: string;
     },
   ) {
-    const evidenceDecisions = (input.evidenceIds || []).map((id) => ({
+    const selectedEvidenceIds =
+      input.evidenceIds && input.evidenceIds.length > 0
+        ? input.evidenceIds
+        : input.evidenceId
+          ? [input.evidenceId]
+          : [];
+    const evidenceDecisions = selectedEvidenceIds.map((id) => ({
       evidenceId: id,
       status: 'resolution_needed' as any,
     }));
@@ -876,7 +923,7 @@ export class ReviewService {
       targetId: taskId,
       applicationId: result.application?.id,
       afterStateJson: {
-        evidenceIds: input.evidenceIds,
+        evidenceIds: selectedEvidenceIds,
         priority: input.priority || 'normal',
       },
       note: input.reason,

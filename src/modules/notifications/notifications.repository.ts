@@ -6,6 +6,10 @@ export type PersistNotificationInput = {
   userId: string;
   applicationId?: string | null;
   collectiveProfileId?: string | null;
+  evidenceId?: string | null;
+  reviewTaskId?: string | null;
+  resolutionCaseId?: string | null;
+  metadata?: unknown;
   type: NotificationType;
   title: string;
   message: string;
@@ -16,7 +20,21 @@ export class NotificationsRepository {
 
   create(input: PersistNotificationInput, tx?: Prisma.TransactionClient) {
     const client = tx ?? this.db;
-    return client.notification.create({ data: input });
+    return client.notification.create({
+      data: {
+        userId: input.userId,
+        applicationId: input.applicationId,
+        collectiveProfileId: input.collectiveProfileId,
+        evidenceId: input.evidenceId,
+        reviewTaskId: input.reviewTaskId,
+        resolutionCaseId: input.resolutionCaseId,
+        metadata:
+          input.metadata === undefined ? undefined : (input.metadata as Prisma.InputJsonValue),
+        type: input.type,
+        title: input.title,
+        message: input.message,
+      },
+    });
   }
 
   listForUser(userId: string, query: ListNotificationsQuery) {
