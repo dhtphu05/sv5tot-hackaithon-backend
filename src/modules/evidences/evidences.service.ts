@@ -336,12 +336,12 @@ export class EvidencesService {
     }
 
     // Validate MIME Type
-    const allowedMimeTypes = ['image/jpeg', 'image/png', 'application/pdf'];
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
     if (!allowedMimeTypes.includes(file.mimetype)) {
       throw new AppError(
         400,
         ErrorCodes.FILE_TYPE_NOT_ALLOWED,
-        'File type not allowed. Only JPEG, PNG, and PDF are allowed.',
+        'File type not allowed. Only JPEG, PNG, WEBP, and PDF are allowed.',
       );
     }
 
@@ -495,7 +495,7 @@ export class EvidencesService {
         jobId: job.id,
         mode: 'ocr_queued',
       };
-    });
+    }, { timeout: 20000 });
 
     return result;
   }

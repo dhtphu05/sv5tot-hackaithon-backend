@@ -7,6 +7,7 @@ export type AuditLogInput = {
   entityType: string;
   entityId?: string | null;
   applicationId?: string | null;
+  collectiveProfileId?: string | null;
   evidenceId?: string | null;
   eventId?: string | null;
   decisionImportId?: string | null;
