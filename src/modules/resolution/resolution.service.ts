@@ -3,6 +3,7 @@ import {
   ApplicationStatus,
   Criterion,
   EvidenceStatus,
+  FinalStatus,
   KnowledgeDecision,
   NotificationType,
   ResolutionStatus,
@@ -17,6 +18,7 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { createNotification } from '../notifications/notifications.service';
 import type {
   ListResolutionCasesQuery,
@@ -28,6 +30,7 @@ import type {
 const resolutionInclude = {
   application: { include: { student: true } },
   evidence: { include: { evidenceCard: true, evidenceFiles: { include: { file: true } } } },
+  reviewTask: { include: { assignedOfficer: true } },
 } satisfies Prisma.ResolutionCaseInclude;
 
 type ResolutionCaseWithInclude = Prisma.ResolutionCaseGetPayload<{
@@ -36,6 +39,7 @@ type ResolutionCaseWithInclude = Prisma.ResolutionCaseGetPayload<{
 
 type ResolutionFinalDecision = ResolutionDecisionInput['decision'];
 const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
+const emailOutboxService = new EmailOutboxService();
 const demoReviewCriteria: Criterion[] = [
   Criterion.ethics,
   Criterion.academic,
@@ -213,7 +217,10 @@ export class ResolutionService {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only staff can update knowledge base');
     }
 
-    const relatedTask = await findRelatedReviewTask(resolutionCase);
+    const relatedTask = await findRelatedReviewTask(
+      resolutionCase,
+      input.evidenceDecisions.map((item) => item.evidenceId),
+    );
     const closedStatus = mapCaseStatus(input.decision);
     const committeeDecision = JSON.stringify({
       decision: input.decision,
@@ -224,8 +231,9 @@ export class ResolutionService {
       decidedAt: new Date().toISOString(),
     });
 
-    const result = await prisma.$transaction(async (tx) => {
-      await ensureResolutionOpenedAudit(tx, user, resolutionCase);
+    const result = await prisma.$transaction(
+      async (tx) => {
+        await ensureResolutionOpenedAudit(tx, user, resolutionCase);
 
       const updatedCase = await tx.resolutionCase.update({
         where: { id: resolutionCase.id },
@@ -344,13 +352,21 @@ export class ResolutionService {
         assignedOfficerId: relatedTask?.assignedOfficerId,
       });
 
-      return {
-        resolutionCase: toResolutionListItem(updatedCase),
-        relatedTask: updatedTask,
-        application: { id: resolutionCase.applicationId, status: applicationStatus },
-        knowledgeBaseItem,
-      };
-    });
+      const refreshedCase =
+        (await tx.resolutionCase.findUnique({
+          where: { id: resolutionCase.id },
+          include: resolutionInclude,
+        })) ?? updatedCase;
+
+        return {
+          resolutionCase: toResolutionListItem(refreshedCase),
+          relatedTask: updatedTask,
+          application: { id: resolutionCase.applicationId, status: applicationStatus },
+          knowledgeBaseItem,
+        };
+      },
+      { maxWait: 10_000, timeout: 20_000 },
+    );
 
     return result;
   }
@@ -558,13 +574,38 @@ async function canOfficerHandleResolutionCriterion(
 async function findRelatedReviewTask(resolutionCase: {
   applicationId: string;
   evidenceId: string | null;
-}) {
-  if (resolutionCase.evidenceId) {
-    const linked = await prisma.reviewTaskEvidence.findFirst({
-      where: { evidenceId: resolutionCase.evidenceId },
+  reviewTaskId?: string | null;
+  reviewTask?: { id: string; assignedOfficer?: unknown } | null;
+}, evidenceIds: string[] = []) {
+  if (resolutionCase.reviewTaskId) {
+    const task = await prisma.reviewTask.findFirst({
+      where: { id: resolutionCase.reviewTaskId, applicationId: resolutionCase.applicationId },
+      include: { assignedOfficer: true },
+    });
+    if (task) return task;
+  }
+
+  const candidateEvidenceIds = Array.from(
+    new Set([resolutionCase.evidenceId, ...evidenceIds].filter((id): id is string => Boolean(id))),
+  );
+
+  if (candidateEvidenceIds.length > 0) {
+    const linked = await prisma.reviewTaskEvidence.findMany({
+      where: {
+        evidenceId: { in: candidateEvidenceIds },
+        reviewTask: { applicationId: resolutionCase.applicationId },
+      },
       include: { reviewTask: { include: { assignedOfficer: true } } },
     });
-    if (linked) return linked.reviewTask;
+    const tasks = linked.map((item) => item.reviewTask);
+    tasks.sort((a, b) => {
+      if (a.status === ReviewTaskStatus.resolution_needed && b.status !== ReviewTaskStatus.resolution_needed)
+        return -1;
+      if (a.status !== ReviewTaskStatus.resolution_needed && b.status === ReviewTaskStatus.resolution_needed)
+        return 1;
+      return b.updatedAt.getTime() - a.updatedAt.getTime();
+    });
+    if (tasks[0]) return tasks[0];
   }
 
   return prisma.reviewTask.findFirst({
@@ -700,10 +741,18 @@ async function applyApplicationStatus(
   applicationId: string,
   decision: ResolutionFinalDecision,
 ) {
+  const baseData: Prisma.ApplicationUpdateInput = {
+    finalizedAt: null,
+    finalizedBy: { disconnect: true },
+    finalStatus: FinalStatus.pending,
+    finalLevel: null,
+    finalNote: null,
+  };
+
   if (decision === 'supplement_required') {
     await tx.application.update({
       where: { id: applicationId },
-      data: { status: ApplicationStatus.supplement_required },
+      data: { ...baseData, status: ApplicationStatus.supplement_required },
     });
     return ApplicationStatus.supplement_required;
   }
@@ -717,19 +766,53 @@ async function applyApplicationStatus(
   if (openCaseCount > 0) {
     await tx.application.update({
       where: { id: applicationId },
-      data: { status: ApplicationStatus.resolution_needed },
+      data: { ...baseData, status: ApplicationStatus.resolution_needed },
     });
     return ApplicationStatus.resolution_needed;
   }
 
   const tasks = await tx.reviewTask.findMany({ where: { applicationId } });
-  const nextStatus =
-    tasks.length > 0 && tasks.every((task) => task.status === ReviewTaskStatus.accepted)
-      ? ApplicationStatus.completed
-      : ApplicationStatus.under_review;
+  if (tasks.some((task) => task.status === ReviewTaskStatus.supplement_required)) {
+    await tx.application.update({
+      where: { id: applicationId },
+      data: { ...baseData, status: ApplicationStatus.supplement_required },
+    });
+    return ApplicationStatus.supplement_required;
+  }
+
+  if (tasks.some((task) => task.status === ReviewTaskStatus.resolution_needed)) {
+    await tx.application.update({
+      where: { id: applicationId },
+      data: { ...baseData, status: ApplicationStatus.resolution_needed },
+    });
+    return ApplicationStatus.resolution_needed;
+  }
+
+  if (
+    tasks.length > 0 &&
+    tasks.every(
+      (task) =>
+        task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected,
+    ) &&
+    tasks.some((task) => task.status === ReviewTaskStatus.rejected)
+  ) {
+    await tx.application.update({
+      where: { id: applicationId },
+      data: {
+        status: ApplicationStatus.rejected,
+        finalStatus: FinalStatus.failed,
+        finalLevel: null,
+        finalizedAt: new Date(),
+        finalNote: 'Auto-closed after at least one review criterion was rejected.',
+      },
+    });
+    return ApplicationStatus.rejected;
+  }
+
+  const nextStatus = ApplicationStatus.under_review;
   await tx.application.update({
     where: { id: applicationId },
-    data: { status: nextStatus },
+    data: { ...baseData, status: nextStatus },
   });
   return nextStatus;
 }
@@ -793,7 +876,7 @@ async function notifyStudentAfterResolution(
       : resolutionCase.evidenceId
         ? [resolutionCase.evidenceId]
         : [];
-  await createNotification(
+  const notification = await createNotification(
     {
       userId: resolutionCase.application.studentId,
       applicationId: resolutionCase.applicationId,
@@ -811,6 +894,36 @@ async function notifyStudentAfterResolution(
         resolutionCaseId: resolutionCase.id,
         reviewTaskId: relatedTask?.id ?? null,
       },
+    },
+    tx,
+  );
+  await emailOutboxService.enqueue(
+    {
+      recipientEmail: resolutionCase.application.student.email,
+      recipientName: resolutionCase.application.student.fullName,
+      relatedUserId: resolutionCase.application.studentId,
+      applicationId: resolutionCase.applicationId,
+      notificationId: notification.id,
+      templateKey:
+        input.decision === 'supplement_required'
+          ? 'supplement_requested'
+          : 'application_status_updated',
+      payload: {
+        recipientName: resolutionCase.application.student.fullName,
+        applicationId: resolutionCase.applicationId,
+        schoolYear: resolutionCase.application.schoolYear,
+        targetLevel: resolutionCase.application.targetLevel,
+        criterion: resolutionCase.evidence?.criterion,
+        status: applicationStatus,
+        context: input.note,
+        reason: input.note,
+      },
+      dedupeKey: buildEmailDedupeKey('resolution_student_update', {
+        resolutionCaseId: resolutionCase.id,
+        applicationId: resolutionCase.applicationId,
+        decision: input.decision,
+        applicationStatus,
+      }),
     },
     tx,
   );

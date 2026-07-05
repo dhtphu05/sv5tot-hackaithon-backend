@@ -157,6 +157,14 @@ enum NotificationType {
   result_available
 }
 
+enum EmailOutboxStatus {
+  queued
+  sending
+  sent
+  failed
+  cancelled
+}
+
 enum ResolutionStatus {
   open
   in_review
@@ -737,6 +745,7 @@ model ReviewTask {
   collectiveProfile     CollectiveProfile?   @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
   assignedOfficer       User?                @relation(fields: [assignedOfficerId], references: [id], onDelete: SetNull)
   evidences             ReviewTaskEvidence[]
+  resolutionCases       ResolutionCase[]
 
   @@index([assignedOfficerId, status])
   @@index([status])
@@ -759,6 +768,7 @@ model ResolutionCase {
   id                String           @id @default(uuid()) @db.Uuid
   applicationId     String           @db.Uuid
   evidenceId        String?          @db.Uuid
+  reviewTaskId      String?          @db.Uuid
   reason            String
   status            ResolutionStatus @default(open)
   committeeDecision String?
@@ -768,9 +778,11 @@ model ResolutionCase {
   closedAt          DateTime?
   application       Application      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   evidence          Evidence?        @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
+  reviewTask        ReviewTask?      @relation(fields: [reviewTaskId], references: [id], onDelete: SetNull)
 
   @@index([status])
   @@index([applicationId])
+  @@index([reviewTaskId])
 }
 
 model IndexingJob {
@@ -888,6 +900,34 @@ model Notification {
   @@index([evidenceId])
   @@index([reviewTaskId])
   @@index([resolutionCaseId])
+}
+
+model EmailOutbox {
+  id                String            @id @default(uuid()) @db.Uuid
+  recipientEmail    String
+  recipientName     String?
+  subject           String
+  templateKey       String
+  payloadJson       Json?
+  status            EmailOutboxStatus @default(queued)
+  attempts          Int               @default(0)
+  maxAttempts       Int               @default(3)
+  nextAttemptAt     DateTime?
+  providerMessageId String?
+  lastError         String?
+  relatedUserId     String?           @db.Uuid
+  applicationId     String?           @db.Uuid
+  notificationId    String?           @db.Uuid
+  dedupeKey         String            @unique
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  sentAt            DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([relatedUserId])
+  @@index([applicationId])
+  @@index([notificationId])
+  @@index([templateKey])
 }
 
 model CollectiveProfile {
