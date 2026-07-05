@@ -27,6 +27,7 @@ import {
   createApplicationAudit,
 } from './application.helpers';
 import { ApplicationsRepository } from './applications.repository';
+import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import type {
   AutosaveDraftInput,
   GetCurrentApplicationQuery,
@@ -50,6 +51,7 @@ export class ApplicationsService {
     private readonly applicationsRepository = new ApplicationsRepository(),
     private readonly notificationsService = new NotificationsService(),
     private readonly reviewAssignmentService = new ReviewAssignmentService(),
+    private readonly emailOutboxService = new EmailOutboxService(),
   ) {}
 
   async getCurrent(user: AuthenticatedUser, query: GetCurrentApplicationQuery) {
@@ -435,18 +437,43 @@ export class ApplicationsService {
           afterStateJson: { status: ApplicationStatus.under_review },
         });
 
-        await this.notificationsService.create(
-          {
-            userId: application.studentId,
-            applicationId: application.id,
-            type: NotificationType.system,
+      const notification = await this.notificationsService.create(
+        {
+          userId: application.studentId,
+          applicationId: application.id,
+          type: NotificationType.system,
             title: isSupplementResubmit ? 'Hồ sơ đã được nộp lại' : 'Hồ sơ đã được nộp',
             message: 'Hồ sơ Sinh viên 5 tốt của bạn đã chuyển sang trạng thái đang xét duyệt.',
+        },
+        tx,
+      );
+      await this.emailOutboxService.enqueue(
+        {
+          recipientEmail: application.student.email,
+          recipientName: application.student.fullName,
+          relatedUserId: application.studentId,
+          applicationId: application.id,
+          notificationId: notification.id,
+          templateKey: 'application_submitted',
+          payload: {
+            recipientName: application.student.fullName,
+            applicationId: application.id,
+            schoolYear: application.schoolYear,
+            targetLevel: application.targetLevel,
+            status: ApplicationStatus.under_review,
           },
-          tx,
-        );
+          dedupeKey: buildEmailDedupeKey('application_submitted', {
+            applicationId: application.id,
+            version: newVersion,
+            status: ApplicationStatus.under_review,
+          }),
+          actorId: user.id,
+          actorRole: user.role,
+        },
+        tx,
+      );
 
-        return reviewTasks;
+      return reviewTasks;
       },
       { maxWait: 10_000, timeout: 30_000 },
     );
@@ -496,7 +523,7 @@ export class ApplicationsService {
         note: input.reason,
       });
 
-      await this.notificationsService.create(
+      const notification = await this.notificationsService.create(
         {
           userId: application.studentId,
           applicationId: application.id,
@@ -508,6 +535,35 @@ export class ApplicationsService {
           type: NotificationType.supplement_required,
           title: 'Cần bổ sung hồ sơ',
           message: input.reason,
+        },
+        tx,
+      );
+      const student = await tx.user.findUniqueOrThrow({ where: { id: application.studentId } });
+      await this.emailOutboxService.enqueue(
+        {
+          recipientEmail: student.email,
+          recipientName: student.fullName,
+          relatedUserId: student.id,
+          applicationId: application.id,
+          notificationId: notification.id,
+          templateKey: 'supplement_requested',
+          payload: {
+            recipientName: student.fullName,
+            applicationId: application.id,
+            schoolYear: application.schoolYear,
+            targetLevel: application.targetLevel,
+            criterion: input.allowedCriteria?.join(', '),
+            deadline: input.deadline,
+            reason: input.reason,
+          },
+          dedupeKey: buildEmailDedupeKey('supplement_requested', {
+            applicationId: application.id,
+            reason: input.reason,
+            allowedCriteria: input.allowedCriteria ?? [],
+            deadline: input.deadline ?? null,
+          }),
+          actorId: user.id,
+          actorRole: user.role,
         },
         tx,
       );

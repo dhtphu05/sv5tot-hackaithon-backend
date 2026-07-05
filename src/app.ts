@@ -26,6 +26,7 @@ import { filesRouter } from './modules/files/files.routes';
 import { healthRouter } from './modules/health/health.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { knowledgeBaseRouter } from './modules/knowledge-base/knowledge-base.routes';
+import { mailRouter } from './modules/mail/mail.routes';
 import { managerRouter } from './modules/manager/manager.routes';
 import { committeeRouter } from './modules/committee/committee.routes';
 import { metricsRouter } from './modules/metrics/metrics.routes';
@@ -81,6 +82,7 @@ export function createApp() {
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/audit', auditRouter);
   app.use('/api/jobs', jobsRouter);
+  app.use('/api/mail', mailRouter);
   app.use('/api', aiRouter);
   app.use('/api/internal/smartreader', smartReaderRouter);
   app.use('/api/smartux', smartUxRouter);

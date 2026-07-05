@@ -18,6 +18,7 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { createNotification, NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from './review-assignment.service';
 import { getApplicationReviewProgress } from './review-progress.service';
@@ -73,6 +74,7 @@ export class ReviewService {
     private readonly reviewRepository = new ReviewRepository(),
     private readonly assignmentService = new ReviewAssignmentService(),
     private readonly notificationsService = new NotificationsService(),
+    private readonly emailOutboxService = new EmailOutboxService(),
   ) {}
 
   async getDashboard(user: AuthenticatedUser) {
@@ -645,7 +647,7 @@ export class ReviewService {
           where: { id: applicationId },
           data: { status: ApplicationStatus.supplement_required },
         });
-        await this.notificationsService.create(
+        const notification = await this.notificationsService.create(
           {
             userId: application.studentId,
             applicationId,
@@ -660,6 +662,35 @@ export class ReviewService {
             type: NotificationType.supplement_required,
             title: 'Cần bổ sung minh chứng',
             message: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
+          },
+          tx,
+        );
+        await this.emailOutboxService.enqueue(
+          {
+            recipientEmail: application.student.email,
+            recipientName: application.student.fullName,
+            relatedUserId: application.studentId,
+            applicationId,
+            notificationId: notification.id,
+            templateKey: 'supplement_requested',
+            payload: {
+              recipientName: application.student.fullName,
+              applicationId,
+              schoolYear: application.schoolYear,
+              targetLevel: application.targetLevel,
+              criterion: task.criterion,
+              deadline: readSupplementDeadline(input.supplementRequestJson),
+              reason: officerNote,
+            },
+            dedupeKey: buildEmailDedupeKey('supplement_requested', {
+              applicationId,
+              reviewTaskId: task.id,
+              criterion: task.criterion,
+              supplementRequestJson: input.supplementRequestJson ?? null,
+              officerNote,
+            }),
+            actorId: user.id,
+            actorRole: user.role,
           },
           tx,
         );
@@ -678,24 +709,31 @@ export class ReviewService {
         const existingCase = await tx.resolutionCase.findFirst({
           where: {
             applicationId,
-            status: 'open',
-            OR: primaryEvidenceId
-              ? [{ evidenceId: primaryEvidenceId }, { evidenceId: null }]
-              : [{ evidenceId: null }],
+            status: { in: ['open', 'in_review'] },
+            OR: [
+              { reviewTaskId: task.id },
+              ...(selectedEvidenceIds.length > 0
+                ? [{ evidenceId: { in: selectedEvidenceIds } }]
+                : [{ reviewTaskId: null, evidenceId: null }]),
+            ],
           },
           orderBy: { createdAt: 'desc' },
         });
         let resolutionCaseId = existingCase?.id ?? null;
-        if (existingCase && primaryEvidenceId && !existingCase.evidenceId) {
+        if (existingCase && (!existingCase.reviewTaskId || (primaryEvidenceId && !existingCase.evidenceId))) {
           await tx.resolutionCase.update({
             where: { id: existingCase.id },
-            data: { evidenceId: primaryEvidenceId },
+            data: {
+              reviewTaskId: existingCase.reviewTaskId ?? task.id,
+              evidenceId: existingCase.evidenceId ?? primaryEvidenceId,
+            },
           });
         } else if (!existingCase) {
           const createdCase = await tx.resolutionCase.create({
             data: {
               applicationId,
               evidenceId: primaryEvidenceId,
+              reviewTaskId: task.id,
               reason: officerNote ?? 'Cần hội đồng xem xét.',
               createdBy: user.id,
               status: 'open',
@@ -704,7 +742,7 @@ export class ReviewService {
           resolutionCaseId = createdCase.id;
         }
 
-        await this.notificationsService.create(
+        const notification = await this.notificationsService.create(
           {
             userId: application.studentId,
             applicationId,
@@ -720,6 +758,33 @@ export class ReviewService {
             type: NotificationType.review_updated,
             title: 'Hồ sơ được chuyển hội đồng xem xét',
             message: officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
+          },
+          tx,
+        );
+        await this.emailOutboxService.enqueue(
+          {
+            recipientEmail: application.student.email,
+            recipientName: application.student.fullName,
+            relatedUserId: application.studentId,
+            applicationId,
+            notificationId: notification.id,
+            templateKey: 'application_status_updated',
+            payload: {
+              recipientName: application.student.fullName,
+              applicationId,
+              schoolYear: application.schoolYear,
+              targetLevel: application.targetLevel,
+              status: ApplicationStatus.resolution_needed,
+              context: officerNote ?? 'Mot tieu chi can hoi dong xem xet.',
+            },
+            dedupeKey: buildEmailDedupeKey('application_status_updated', {
+              applicationId,
+              reviewTaskId: task.id,
+              status: ApplicationStatus.resolution_needed,
+              resolutionCaseId,
+            }),
+            actorId: user.id,
+            actorRole: user.role,
           },
           tx,
         );
@@ -790,7 +855,7 @@ export class ReviewService {
         input.decision !== ReviewDecision.supplement_required &&
         input.decision !== ReviewDecision.resolution_needed
       ) {
-        await this.notificationsService.create(
+        const notification = await this.notificationsService.create(
           {
             userId: application.studentId,
             applicationId,
@@ -802,6 +867,35 @@ export class ReviewService {
           },
           tx,
         );
+        if (resultStatusIsRejected(applicationOutcome?.status)) {
+          await this.emailOutboxService.enqueue(
+            {
+              recipientEmail: application.student.email,
+              recipientName: application.student.fullName,
+              relatedUserId: application.studentId,
+              applicationId,
+              notificationId: notification.id,
+              templateKey: 'application_status_updated',
+              payload: {
+                recipientName: application.student.fullName,
+                applicationId,
+                schoolYear: application.schoolYear,
+                targetLevel: application.targetLevel,
+                status: ApplicationStatus.rejected,
+                context: officerNote ?? 'Ho so co tieu chi khong dat.',
+              },
+              dedupeKey: buildEmailDedupeKey('application_status_updated', {
+                applicationId,
+                reviewTaskId: task.id,
+                status: ApplicationStatus.rejected,
+                decision: input.decision,
+              }),
+              actorId: user.id,
+              actorRole: user.role,
+            },
+            tx,
+          );
+        }
       }
 
       return { task: saved, applicationOutcome };
@@ -1855,6 +1949,18 @@ function levelSummary(level: Level, status: string) {
 
 function jsonArray(value: Prisma.JsonValue | null | undefined): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function readSupplementDeadline(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const deadline = (value as { deadline?: unknown }).deadline;
+  return typeof deadline === 'string' && deadline.trim() ? deadline : undefined;
+}
+
+function resultStatusIsRejected(status: ApplicationStatus | undefined): boolean {
+  return status === ApplicationStatus.rejected;
 }
 
 function getTaskAiConfidence(

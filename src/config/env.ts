@@ -92,6 +92,17 @@ const rawEnvSchema = z.object({
   JOB_WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   INTERNAL_WORKER_TOKEN: z.string().optional().default(''),
   SMARTBOT_MODE: z.enum(['mock', 'live']).default('mock'),
+  MAIL_ENABLED: booleanFromEnv,
+  MAIL_PROVIDER: z.enum(['smtp', 'console']).default('console'),
+  SMTP_HOST: z.string().optional().default(''),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_USER: z.string().optional().default(''),
+  SMTP_PASSWORD: z.string().optional().default(''),
+  MAIL_FROM_NAME: z.string().min(1).default('5TOT'),
+  MAIL_FROM_ADDRESS: z.string().email().default('no-reply@example.edu.vn'),
+  APP_BASE_URL: z.string().url().default('http://localhost:5173'),
+  MAIL_MAX_ATTEMPTS: z.coerce.number().int().positive().max(10).default(3),
+  MAIL_RETRY_BASE_SECONDS: z.coerce.number().int().positive().default(60),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 })
   .refine((data) => !!data.JWT_SECRET || (!!data.JWT_ACCESS_SECRET && !!data.JWT_REFRESH_SECRET), {
@@ -112,6 +123,15 @@ const rawEnvSchema = z.object({
   }, {
     message: 'R2 configurations (R2_BUCKET_NAME, R2_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY) are required when STORAGE_DRIVER is set to "r2"',
     path: ['STORAGE_DRIVER'],
+  })
+  .refine((data) => {
+    if (!data.MAIL_ENABLED || data.MAIL_PROVIDER !== 'smtp') {
+      return true;
+    }
+    return !!data.SMTP_HOST && !!data.SMTP_USER && !!data.SMTP_PASSWORD;
+  }, {
+    message: 'SMTP_HOST, SMTP_USER, and SMTP_PASSWORD are required when MAIL_ENABLED=true and MAIL_PROVIDER=smtp',
+    path: ['MAIL_PROVIDER'],
   });
 
 const envInput = {
@@ -192,6 +212,7 @@ export const env = {
     process.env.JOB_WORKER_ENABLED === undefined
       ? rawEnv.NODE_ENV === 'development'
       : rawEnv.JOB_WORKER_ENABLED,
+  MAIL_ENABLED: process.env.MAIL_ENABLED === undefined ? false : rawEnv.MAIL_ENABLED,
   VNPT_ENABLED: vnptEnabled,
   VNPT_REQUIRE_REAL_IN_PIPELINE: vnptRequireRealInPipeline,
   VNPT_ALLOW_MOCK_RUNTIME: vnptAllowMockRuntime,
