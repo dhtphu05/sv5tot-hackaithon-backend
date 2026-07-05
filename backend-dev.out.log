@@ -1,0 +1,14 @@
+
+> 5tot-backend@0.2.0 dev
+> tsx watch src/main.ts
+
+[2026-07-05 17:05:14.522 +0700] [32mINFO[39m (17312): [36mBackground job worker started[39m
+    [35mintervalMs[39m: 5000
+[2026-07-05 17:05:14.581 +0700] [32mINFO[39m (17312): [36m5TOT Backend API started[39m
+    [35mport[39m: 8080
+    [35menvironment[39m: "development"
+prisma:info Starting a postgresql pool with 5 connections in PgBouncer mode.
+prisma:query BEGIN
+prisma:query DEALLOCATE ALL
+prisma:query SELECT "public"."IndexingJob"."id", "public"."IndexingJob"."jobType"::text, "public"."IndexingJob"."targetId", "public"."IndexingJob"."status"::text, "public"."IndexingJob"."attempts", "public"."IndexingJob"."errorMessage", "public"."IndexingJob"."resultJson", "public"."IndexingJob"."createdAt", "public"."IndexingJob"."updatedAt" FROM "public"."IndexingJob" WHERE "public"."IndexingJob"."status" = CAST($1::text AS "public"."JobStatus") ORDER BY "public"."IndexingJob"."createdAt" ASC LIMIT $2 OFFSET $3
+prisma:query COMMIT

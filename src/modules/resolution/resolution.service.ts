@@ -3,6 +3,7 @@ import {
   ApplicationStatus,
   Criterion,
   EvidenceStatus,
+  FinalStatus,
   KnowledgeDecision,
   NotificationType,
   ResolutionStatus,
@@ -351,8 +352,14 @@ export class ResolutionService {
         assignedOfficerId: relatedTask?.assignedOfficerId,
       });
 
+      const refreshedCase =
+        (await tx.resolutionCase.findUnique({
+          where: { id: resolutionCase.id },
+          include: resolutionInclude,
+        })) ?? updatedCase;
+
         return {
-          resolutionCase: toResolutionListItem(updatedCase),
+          resolutionCase: toResolutionListItem(refreshedCase),
           relatedTask: updatedTask,
           application: { id: resolutionCase.applicationId, status: applicationStatus },
           knowledgeBaseItem,
@@ -734,10 +741,18 @@ async function applyApplicationStatus(
   applicationId: string,
   decision: ResolutionFinalDecision,
 ) {
+  const baseData: Prisma.ApplicationUpdateInput = {
+    finalizedAt: null,
+    finalizedBy: { disconnect: true },
+    finalStatus: FinalStatus.pending,
+    finalLevel: null,
+    finalNote: null,
+  };
+
   if (decision === 'supplement_required') {
     await tx.application.update({
       where: { id: applicationId },
-      data: { status: ApplicationStatus.supplement_required },
+      data: { ...baseData, status: ApplicationStatus.supplement_required },
     });
     return ApplicationStatus.supplement_required;
   }
@@ -751,19 +766,53 @@ async function applyApplicationStatus(
   if (openCaseCount > 0) {
     await tx.application.update({
       where: { id: applicationId },
-      data: { status: ApplicationStatus.resolution_needed },
+      data: { ...baseData, status: ApplicationStatus.resolution_needed },
     });
     return ApplicationStatus.resolution_needed;
   }
 
   const tasks = await tx.reviewTask.findMany({ where: { applicationId } });
-  const nextStatus =
-    tasks.length > 0 && tasks.every((task) => task.status === ReviewTaskStatus.accepted)
-      ? ApplicationStatus.completed
-      : ApplicationStatus.under_review;
+  if (tasks.some((task) => task.status === ReviewTaskStatus.supplement_required)) {
+    await tx.application.update({
+      where: { id: applicationId },
+      data: { ...baseData, status: ApplicationStatus.supplement_required },
+    });
+    return ApplicationStatus.supplement_required;
+  }
+
+  if (tasks.some((task) => task.status === ReviewTaskStatus.resolution_needed)) {
+    await tx.application.update({
+      where: { id: applicationId },
+      data: { ...baseData, status: ApplicationStatus.resolution_needed },
+    });
+    return ApplicationStatus.resolution_needed;
+  }
+
+  if (
+    tasks.length > 0 &&
+    tasks.every(
+      (task) =>
+        task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected,
+    ) &&
+    tasks.some((task) => task.status === ReviewTaskStatus.rejected)
+  ) {
+    await tx.application.update({
+      where: { id: applicationId },
+      data: {
+        status: ApplicationStatus.rejected,
+        finalStatus: FinalStatus.failed,
+        finalLevel: null,
+        finalizedAt: new Date(),
+        finalNote: 'Auto-closed after at least one review criterion was rejected.',
+      },
+    });
+    return ApplicationStatus.rejected;
+  }
+
+  const nextStatus = ApplicationStatus.under_review;
   await tx.application.update({
     where: { id: applicationId },
-    data: { status: nextStatus },
+    data: { ...baseData, status: nextStatus },
   });
   return nextStatus;
 }
