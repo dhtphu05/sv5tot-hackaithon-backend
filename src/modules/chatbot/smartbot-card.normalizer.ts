@@ -1,6 +1,5 @@
 import { ChatbotHandoffService } from './chatbot-handoff.service';
 import type {
-  ChatbotAction,
   NormalizedSmartbotMessage,
   NormalizedSmartbotResponse,
   SmartbotButton,

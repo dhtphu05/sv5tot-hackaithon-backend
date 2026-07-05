@@ -16,6 +16,7 @@ import {
   Role,
   RosterPreviewValidationStatus,
 } from '@prisma/client';
+import type { IndexingJob, SmartReaderJob } from '@prisma/client';
 import { env } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
@@ -53,6 +54,13 @@ import { suggestRosterColumnMapping, type DecisionColumnMapping } from './roster
 import { markDuplicateRows, normalizeRosterRow, type NormalizedRosterPreviewRow } from './roster-row.normalizer';
 
 type DecisionImportRecord = Prisma.DecisionImportGetPayload<{ include: typeof decisionImportInclude }>;
+type DecisionImportListRecord = Prisma.DecisionImportGetPayload<{
+  include: {
+    sourceFile: true;
+    documents: true;
+    _count: { select: { previewRows: true; tables: true } };
+  };
+}>;
 type UploadedDecisionFile = Express.Multer.File;
 
 const auditService = new AuditService();
@@ -64,7 +72,7 @@ export class DecisionImportsService {
   async list(_user: AuthenticatedUser, query: ListDecisionImportsQuery) {
     const { items, total } = await this.repository.list(query);
     return {
-      items: await Promise.all(items.map((item) => this.toListDto(item))),
+      items: await this.toListDtos(items),
       pagination: {
         page: query.page,
         limit: query.limit,
@@ -502,12 +510,49 @@ export class DecisionImportsService {
     return record;
   }
 
-  private async toListDto(record: Prisma.DecisionImportGetPayload<{ include: { sourceFile: true; documents: true; _count: { select: { previewRows: true; tables: true } } } }>) {
-    const [metadataJob, rosterJob, smartReaderJob] = await Promise.all([
-      record.metadataJobId ? prisma.indexingJob.findUnique({ where: { id: record.metadataJobId } }) : null,
-      record.rosterJobId ? prisma.indexingJob.findUnique({ where: { id: record.rosterJobId } }) : null,
-      prisma.smartReaderJob.findFirst({ where: { decisionImportId: record.id }, orderBy: { createdAt: 'desc' } }),
+  private async toListDtos(records: DecisionImportListRecord[]) {
+    if (!records.length) return [];
+
+    const indexingJobIds = Array.from(
+      new Set(records.flatMap((record) => [record.metadataJobId, record.rosterJobId].filter(Boolean) as string[])),
+    );
+    const decisionImportIds = records.map((record) => record.id);
+
+    const [indexingJobs, smartReaderJobs] = await Promise.all([
+      indexingJobIds.length
+        ? prisma.indexingJob.findMany({ where: { id: { in: indexingJobIds } } })
+        : Promise.resolve([]),
+      prisma.smartReaderJob.findMany({
+        where: { decisionImportId: { in: decisionImportIds } },
+        orderBy: { createdAt: 'desc' },
+      }),
     ]);
+
+    const indexingJobById = new Map(indexingJobs.map((job) => [job.id, job]));
+    const latestSmartReaderJobByImportId = new Map<string, SmartReaderJob>();
+    for (const job of smartReaderJobs) {
+      if (job.decisionImportId && !latestSmartReaderJobByImportId.has(job.decisionImportId)) {
+        latestSmartReaderJobByImportId.set(job.decisionImportId, job);
+      }
+    }
+
+    return records.map((record) =>
+      this.toListDto(record, {
+        metadataJob: record.metadataJobId ? indexingJobById.get(record.metadataJobId) ?? null : null,
+        rosterJob: record.rosterJobId ? indexingJobById.get(record.rosterJobId) ?? null : null,
+        smartReaderJob: latestSmartReaderJobByImportId.get(record.id) ?? null,
+      }),
+    );
+  }
+
+  private toListDto(
+    record: DecisionImportListRecord,
+    jobs: {
+      metadataJob: IndexingJob | null;
+      rosterJob: IndexingJob | null;
+      smartReaderJob: SmartReaderJob | null;
+    },
+  ) {
     return {
       id: record.id,
       title: record.title,
@@ -518,9 +563,9 @@ export class DecisionImportsService {
       tableCount: record._count.tables,
       uxStatus: mapDecisionImportUxStatus({
         status: record.status,
-        metadataJobStatus: metadataJob?.status,
-        rosterJobStatus: rosterJob?.status,
-        smartReaderStatus: smartReaderJob?.status,
+        metadataJobStatus: jobs.metadataJob?.status,
+        rosterJobStatus: jobs.rosterJob?.status,
+        smartReaderStatus: jobs.smartReaderJob?.status,
         previewRowCount: record._count.previewRows,
       }),
       createdAt: record.createdAt,

@@ -63,6 +63,7 @@ export const requestSupplementSchema = z.object({
 export const escalateResolutionSchema = z.object({
   reason: z.string().min(1).max(2000),
   evidenceId: z.string().uuid().optional(),
+  evidenceIds: z.array(z.string().uuid()).default([]),
 });
 
 export type ListReviewTasksQuery = z.infer<typeof listReviewTasksQuerySchema>;

@@ -350,12 +350,12 @@ export class EvidencesService {
     }
 
     // Validate MIME Type
-    const allowedMimeTypes = ['image/jpeg', 'image/png', 'application/pdf'];
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
     if (!allowedMimeTypes.includes(file.mimetype)) {
       throw new AppError(
         400,
         ErrorCodes.FILE_TYPE_NOT_ALLOWED,
-        'File type not allowed. Only JPEG, PNG, and PDF are allowed.',
+        'File type not allowed. Only JPEG, PNG, WEBP, and PDF are allowed.',
       );
     }
 
@@ -372,7 +372,8 @@ export class EvidencesService {
     // Generate Structured Object Key
     const applicationId = evidence.applicationId ?? 'unknown-app';
     const timestamp = Date.now();
-    const safeOriginalName = sanitizeFileName(file.originalname);
+    const normalizedOriginalName = normalizeUploadedFileName(file.originalname);
+    const safeOriginalName = sanitizeFileName(normalizedOriginalName);
     const objectKey = `applications/${applicationId}/evidences/${evidence.id}/${timestamp}-${safeOriginalName}`;
 
     // Upload via StorageService
@@ -383,7 +384,7 @@ export class EvidencesService {
     });
 
     const result = await prisma.$transaction(async (tx) => {
-      const originalName = body?.displayName || file.originalname;
+      const originalName = body?.displayName || normalizedOriginalName;
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
@@ -515,7 +516,7 @@ export class EvidencesService {
           nextAction: 'view_evidence',
         },
       };
-    });
+    }, { timeout: 20000 });
 
     return result;
   }
@@ -824,4 +825,14 @@ export class EvidencesService {
 function previewText(value?: string | null): string | undefined {
   if (!value?.trim()) return undefined;
   return value.trim().replace(/\s+/g, ' ').slice(0, 240);
+}
+
+function normalizeUploadedFileName(fileName: string) {
+  if (!looksLikeMojibake(fileName)) return fileName;
+  const decoded = Buffer.from(fileName, 'latin1').toString('utf8');
+  return decoded.includes('\uFFFD') ? fileName : decoded;
+}
+
+function looksLikeMojibake(value: string) {
+  return /(?:\u00C3|\u00C2|\u00C4|\u00E1\u00BA|\u00E1\u00BB|\u00C6|\u00D0)/.test(value);
 }

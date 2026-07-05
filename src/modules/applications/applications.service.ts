@@ -27,6 +27,7 @@ import {
   createApplicationAudit,
 } from './application.helpers';
 import { ApplicationsRepository } from './applications.repository';
+import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import type {
   AutosaveDraftInput,
   GetCurrentApplicationQuery,
@@ -50,6 +51,7 @@ export class ApplicationsService {
     private readonly applicationsRepository = new ApplicationsRepository(),
     private readonly notificationsService = new NotificationsService(),
     private readonly reviewAssignmentService = new ReviewAssignmentService(),
+    private readonly emailOutboxService = new EmailOutboxService(),
   ) {}
 
   async getCurrent(user: AuthenticatedUser, query: GetCurrentApplicationQuery) {
@@ -316,137 +318,165 @@ export class ApplicationsService {
       (task) => task.status === ReviewTaskStatus.supplement_required,
     );
     const supplementCriteria = Array.from(new Set(supplementTasks.map((task) => task.criterion)));
-    const result = await prisma.$transaction(async (tx) => {
-      const submittedAt = new Date();
-      const newVersion = application.currentDraftVersion + 1;
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const submittedAt = new Date();
+        const newVersion = application.currentDraftVersion + 1;
 
-      await tx.application.update({
-        where: { id: application.id },
-        data: {
-          status: ApplicationStatus.under_review,
-          submittedAt: application.submittedAt ?? submittedAt,
-          currentDraftVersion: newVersion,
-        },
-      });
+        await tx.application.update({
+          where: { id: application.id },
+          data: {
+            status: ApplicationStatus.under_review,
+            submittedAt: application.submittedAt ?? submittedAt,
+            currentDraftVersion: newVersion,
+          },
+        });
 
-      if (isSupplementResubmit && supplementTasks.length > 0) {
-        const taskEvidenceLinks = supplementTasks.flatMap((task) =>
-          application.evidences
-            .filter((evidence) => evidence.criterion === task.criterion)
-            .map((evidence) => ({
-              reviewTaskId: task.id,
-              evidenceId: evidence.id,
-            })),
-        );
-        if (taskEvidenceLinks.length > 0) {
-          await tx.reviewTaskEvidence.createMany({
-            data: taskEvidenceLinks,
-            skipDuplicates: true,
+        if (isSupplementResubmit && supplementTasks.length > 0) {
+          const taskEvidenceLinks = supplementTasks.flatMap((task) =>
+            application.evidences
+              .filter((evidence) => evidence.criterion === task.criterion)
+              .map((evidence) => ({
+                reviewTaskId: task.id,
+                evidenceId: evidence.id,
+              })),
+          );
+          if (taskEvidenceLinks.length > 0) {
+            await tx.reviewTaskEvidence.createMany({
+              data: taskEvidenceLinks,
+              skipDuplicates: true,
+            });
+          }
+
+          await tx.reviewTask.updateMany({
+            where: {
+              applicationId: application.id,
+              status: ReviewTaskStatus.supplement_required,
+            },
+            data: {
+              status: ReviewTaskStatus.waiting,
+              decision: null,
+              officerNote: null,
+              officerSuggestedLevel: null,
+              levelAssessmentJson: Prisma.JsonNull,
+              decisionReason: null,
+              supplementRequestJson: Prisma.JsonNull,
+            },
+          });
+          await tx.evidence.updateMany({
+            where: {
+              applicationId: application.id,
+              criterion: { in: supplementCriteria },
+              status: {
+                in: [
+                  EvidenceStatus.draft,
+                  EvidenceStatus.pending_indexing,
+                  EvidenceStatus.indexed,
+                  EvidenceStatus.needs_supplement,
+                ],
+              },
+            },
+            data: { status: EvidenceStatus.under_review },
           });
         }
 
-        await tx.reviewTask.updateMany({
-          where: {
-            applicationId: application.id,
-            status: ReviewTaskStatus.supplement_required,
-          },
+        await tx.applicationDraftSnapshot.create({
           data: {
-            status: ReviewTaskStatus.waiting,
-            decision: null,
-            officerNote: null,
-            officerSuggestedLevel: null,
-            levelAssessmentJson: Prisma.JsonNull,
-            decisionReason: null,
-            supplementRequestJson: Prisma.JsonNull,
-          },
-        });
-        await tx.evidence.updateMany({
-          where: {
             applicationId: application.id,
-            criterion: { in: supplementCriteria },
-            status: {
-              in: [
-                EvidenceStatus.draft,
-                EvidenceStatus.pending_indexing,
-                EvidenceStatus.indexed,
-                EvidenceStatus.needs_supplement,
-              ],
+            version: newVersion,
+            createdBy: user.id,
+            snapshotJson: {
+              submittedAt: submittedAt.toISOString(),
+              targetLevel: application.targetLevel,
+              status: ApplicationStatus.under_review,
+              submitWarnings: buildSubmitWarnings(application.readinessScore, missingItems),
+              studentNote: input.studentNote,
             },
           },
-          data: { status: EvidenceStatus.under_review },
         });
-      }
 
-      await tx.applicationDraftSnapshot.create({
-        data: {
+        const reviewTasks =
+          existingTasks.length > 0
+            ? await tx.reviewTask.findMany({
+                where: { applicationId: application.id },
+                include: { assignedOfficer: true },
+                orderBy: { criterion: 'asc' },
+              })
+            : await this.createReviewTasksForSubmit(tx, application, latestPrecheck?.resultJson);
+
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: isSupplementResubmit
+            ? auditActions.APPLICATION_RESUBMITTED_AFTER_SUPPLEMENT
+            : auditActions.APPLICATION_SUBMITTED,
+          targetType: 'application',
+          targetId: application.id,
           applicationId: application.id,
-          version: newVersion,
-          createdBy: user.id,
-          snapshotJson: {
-            submittedAt: submittedAt.toISOString(),
-            targetLevel: application.targetLevel,
+          beforeStateJson: { status: application.status },
+          afterStateJson: {
             status: ApplicationStatus.under_review,
-            submitWarnings: buildSubmitWarnings(application.readinessScore, missingItems),
-            studentNote: input.studentNote,
+            submittedAt: submittedAt.toISOString(),
+            readinessScore: application.readinessScore,
+            allowSubmitWithWarnings: input.allowSubmitWithWarnings,
+            reviewTaskCount: reviewTasks.length,
           },
-        },
-      });
+          note:
+            application.readinessScore < 60
+              ? 'Submitted with readiness warnings.'
+              : input.studentNote,
+        });
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: auditActions.APPLICATION_LOCKED,
+          targetType: 'application',
+          targetId: application.id,
+          applicationId: application.id,
+          beforeStateJson: { status: application.status },
+          afterStateJson: { status: ApplicationStatus.under_review },
+        });
 
-      const reviewTasks =
-        existingTasks.length > 0
-          ? await tx.reviewTask.findMany({
-              where: { applicationId: application.id },
-              include: { assignedOfficer: true },
-              orderBy: { criterion: 'asc' },
-            })
-          : await this.createReviewTasksForSubmit(tx, application, latestPrecheck?.resultJson);
-
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: isSupplementResubmit
-          ? auditActions.APPLICATION_RESUBMITTED_AFTER_SUPPLEMENT
-          : auditActions.APPLICATION_SUBMITTED,
-        targetType: 'application',
-        targetId: application.id,
-        applicationId: application.id,
-        beforeStateJson: { status: application.status },
-        afterStateJson: {
-          status: ApplicationStatus.under_review,
-          submittedAt: submittedAt.toISOString(),
-          readinessScore: application.readinessScore,
-          allowSubmitWithWarnings: input.allowSubmitWithWarnings,
-          reviewTaskCount: reviewTasks.length,
-        },
-        note:
-          application.readinessScore < 60
-            ? 'Submitted with readiness warnings.'
-            : input.studentNote,
-      });
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActions.APPLICATION_LOCKED,
-        targetType: 'application',
-        targetId: application.id,
-        applicationId: application.id,
-        beforeStateJson: { status: application.status },
-        afterStateJson: { status: ApplicationStatus.under_review },
-      });
-
-      await this.notificationsService.create(
+      const notification = await this.notificationsService.create(
         {
           userId: application.studentId,
           applicationId: application.id,
           type: NotificationType.system,
-          title: isSupplementResubmit ? 'Hồ sơ đã được nộp lại' : 'Hồ sơ đã được nộp',
-          message: 'Hồ sơ Sinh viên 5 tốt của bạn đã chuyển sang trạng thái đang xét duyệt.',
+            title: isSupplementResubmit ? 'Hồ sơ đã được nộp lại' : 'Hồ sơ đã được nộp',
+            message: 'Hồ sơ Sinh viên 5 tốt của bạn đã chuyển sang trạng thái đang xét duyệt.',
+        },
+        tx,
+      );
+      await this.emailOutboxService.enqueue(
+        {
+          recipientEmail: application.student.email,
+          recipientName: application.student.fullName,
+          relatedUserId: application.studentId,
+          applicationId: application.id,
+          notificationId: notification.id,
+          templateKey: 'application_submitted',
+          payload: {
+            recipientName: application.student.fullName,
+            applicationId: application.id,
+            schoolYear: application.schoolYear,
+            targetLevel: application.targetLevel,
+            status: ApplicationStatus.under_review,
+          },
+          dedupeKey: buildEmailDedupeKey('application_submitted', {
+            applicationId: application.id,
+            version: newVersion,
+            status: ApplicationStatus.under_review,
+          }),
+          actorId: user.id,
+          actorRole: user.role,
         },
         tx,
       );
 
       return reviewTasks;
-    }, { maxWait: 10_000, timeout: 30_000 });
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    );
 
     return {
       application: {
@@ -493,13 +523,47 @@ export class ApplicationsService {
         note: input.reason,
       });
 
-      await this.notificationsService.create(
+      const notification = await this.notificationsService.create(
         {
           userId: application.studentId,
           applicationId: application.id,
+          metadata: {
+            criterion: input.allowedCriteria?.length === 1 ? input.allowedCriteria[0] : null,
+            allowedCriteria: input.allowedCriteria ?? [],
+            deadline: input.deadline ?? null,
+          },
           type: NotificationType.supplement_required,
           title: 'Cần bổ sung hồ sơ',
           message: input.reason,
+        },
+        tx,
+      );
+      const student = await tx.user.findUniqueOrThrow({ where: { id: application.studentId } });
+      await this.emailOutboxService.enqueue(
+        {
+          recipientEmail: student.email,
+          recipientName: student.fullName,
+          relatedUserId: student.id,
+          applicationId: application.id,
+          notificationId: notification.id,
+          templateKey: 'supplement_requested',
+          payload: {
+            recipientName: student.fullName,
+            applicationId: application.id,
+            schoolYear: application.schoolYear,
+            targetLevel: application.targetLevel,
+            criterion: input.allowedCriteria?.join(', '),
+            deadline: input.deadline,
+            reason: input.reason,
+          },
+          dedupeKey: buildEmailDedupeKey('supplement_requested', {
+            applicationId: application.id,
+            reason: input.reason,
+            allowedCriteria: input.allowedCriteria ?? [],
+            deadline: input.deadline ?? null,
+          }),
+          actorId: user.id,
+          actorRole: user.role,
         },
         tx,
       );

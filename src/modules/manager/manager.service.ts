@@ -17,6 +17,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
+import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { toJsonValue } from '../rules/criteria.loader';
 import { buildReviewProgress } from '../review/review-progress.service';
 import type {
@@ -72,6 +73,8 @@ const applicationDetailInclude = {
 type ApplicationDetail = Prisma.ApplicationGetPayload<{ include: typeof applicationDetailInclude }>;
 
 export class ManagerService {
+  constructor(private readonly emailOutboxService = new EmailOutboxService()) {}
+
   async listApplications(query: ListManagerApplicationsQuery) {
     const where: Prisma.ApplicationWhereInput = {
       ...(query.status ? { status: query.status } : {}),
@@ -918,7 +921,8 @@ export class ManagerService {
         });
       }
       if (input.notifyStudent) {
-        await tx.notification.create({
+        const student = await tx.user.findUniqueOrThrow({ where: { id: before.studentId } });
+        const notification = await tx.notification.create({
           data: {
             userId: before.studentId,
             applicationId,
@@ -931,6 +935,33 @@ export class ManagerService {
             ),
           },
         });
+        await this.emailOutboxService.enqueue(
+          {
+            recipientEmail: student.email,
+            recipientName: student.fullName,
+            relatedUserId: student.id,
+            applicationId,
+            notificationId: notification.id,
+            templateKey: 'application_result_announced',
+            payload: {
+              recipientName: student.fullName,
+              applicationId,
+              schoolYear: before.schoolYear,
+              targetLevel: before.targetLevel,
+              finalStatus: input.finalStatus,
+              finalLevel: updated.finalLevel,
+            },
+            dedupeKey: buildEmailDedupeKey('application_result_announced', {
+              applicationId,
+              finalStatus: input.finalStatus,
+              finalLevel: updated.finalLevel,
+              finalizedAt: updated.finalizedAt?.toISOString(),
+            }),
+            actorId: user.id,
+            actorRole: user.role,
+          },
+          tx,
+        );
       }
 
       return {

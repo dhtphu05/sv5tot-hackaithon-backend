@@ -291,7 +291,7 @@ function mergeAny(parts: PartialRuleResult[]): PartialRuleResult {
     return {
       ...review,
       requiredItems: unique(parts.flatMap((part) => part.requiredItems)),
-      missingItems: unique(parts.flatMap((part) => part.missingItems)),
+      missingItems: unique(review.missingItems),
       warnings: unique(parts.flatMap((part) => part.warnings)),
     };
   }
@@ -474,16 +474,33 @@ function missingMetricMessage(metricType: MetricType): string {
     return 'Bạn cần bổ sung điểm rèn luyện hoặc minh chứng xác nhận.';
   }
   if (metricType === MetricType.volunteer_days) {
-    return 'Bạn cần bổ sung số ngày tình nguyện hoặc import từ Kho sự kiện.';
+    return 'Bạn cần bổ sung số ngày tình nguyện hoặc import từ sự kiện đã xác nhận.';
   }
-  return `Bạn cần bổ sung dữ liệu ${metricType}.`;
+  if (metricType === MetricType.physical_score) {
+    return 'Bạn cần nhập điểm hoặc thêm minh chứng thể lực.';
+  }
+  if (metricType === MetricType.foreign_language_score) {
+    return 'Bạn cần thêm chứng chỉ ngoại ngữ, điểm ngoại ngữ hoặc minh chứng hội nhập.';
+  }
+  return `Bạn cần bổ sung ${metricLabel(metricType)}.`;
 }
 
 function failedMetricMessage(metricType: MetricType, threshold: number): string {
   if (metricType === MetricType.volunteer_days) {
     return `Số ngày tình nguyện hiện chưa đạt ngưỡng ${threshold} ngày.`;
   }
-  return `${metricType} hiện chưa đạt ngưỡng ${threshold}.`;
+  return `${metricLabel(metricType)} hiện chưa đạt ngưỡng ${threshold}.`;
+}
+
+function metricLabel(metricType: MetricType): string {
+  if (metricType === MetricType.gpa) return 'GPA hoặc điểm trung bình học tập';
+  if (metricType === MetricType.conduct_score) return 'Điểm rèn luyện';
+  if (metricType === MetricType.physical_score) return 'Điểm hoặc minh chứng thể lực';
+  if (metricType === MetricType.volunteer_days) return 'Số ngày tình nguyện';
+  if (metricType === MetricType.foreign_language_score) {
+    return 'Chứng chỉ hoặc điểm ngoại ngữ';
+  }
+  return 'dữ liệu tiêu chí';
 }
 
 function missingEvidenceMessage(criterion: Criterion): string {

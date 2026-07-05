@@ -1,4 +1,4 @@
-import { IndexingStatus, JobStatus, SmartReaderJobStatus, type EvidenceStatus } from '@prisma/client';
+import type { EvidenceStatus, IndexingStatus, JobStatus } from '@prisma/client';
 
 export type EvidenceUxStep =
   | 'queued'
@@ -24,7 +24,7 @@ export function mapEvidenceUxStatus(input: {
   indexingStatus?: IndexingStatus | string | null;
   evidenceStatus?: EvidenceStatus | string | null;
   jobStatus?: JobStatus | string | null;
-  smartReaderStatus?: SmartReaderJobStatus | string | null;
+  smartReaderStatus?: string | null;
   hasCard?: boolean;
   confidence?: number | null;
   errorCode?: string | null;
@@ -42,31 +42,32 @@ export function mapEvidenceUxStatus(input: {
 function resolveStep(input: {
   indexingStatus?: IndexingStatus | string | null;
   jobStatus?: JobStatus | string | null;
-  smartReaderStatus?: SmartReaderJobStatus | string | null;
+  smartReaderStatus?: string | null;
   hasCard?: boolean;
   confidence?: number | null;
   errorCode?: string | null;
 }): EvidenceUxStep {
-  if (input.jobStatus === JobStatus.failed || input.indexingStatus === IndexingStatus.failed || input.errorCode) {
+  const jobStatus = String(input.jobStatus ?? '');
+  const indexingStatus = String(input.indexingStatus ?? '');
+  const smartReaderStatus = String(input.smartReaderStatus ?? '');
+
+  if (jobStatus === 'failed' || indexingStatus === 'failed' || input.errorCode) {
     return 'failed';
   }
-  if (input.indexingStatus === IndexingStatus.needs_manual_review || (input.confidence ?? 1) < 0.6) {
+  if (indexingStatus === 'needs_manual_review' || (input.confidence ?? 1) < 0.6) {
     return 'needs_manual_review';
   }
-  if (input.indexingStatus === IndexingStatus.indexed || input.hasCard) return 'indexed';
-  if (input.indexingStatus === IndexingStatus.checking_registry) return 'matching_registry';
-  if (input.indexingStatus === IndexingStatus.extracting) return 'extracting_fields';
-  if (
-    input.smartReaderStatus === SmartReaderJobStatus.uploading ||
-    input.smartReaderStatus === SmartReaderJobStatus.queued
-  ) {
+  if (indexingStatus === 'indexed' || input.hasCard) return 'indexed';
+  if (indexingStatus === 'checking_registry') return 'matching_registry';
+  if (indexingStatus === 'extracting') return 'extracting_fields';
+  if (smartReaderStatus === 'uploading' || smartReaderStatus === 'queued') {
     return 'uploading_to_smartreader';
   }
   if (
-    input.indexingStatus === IndexingStatus.ocr_processing ||
-    input.jobStatus === JobStatus.processing ||
-    input.smartReaderStatus === SmartReaderJobStatus.processing ||
-    input.smartReaderStatus === SmartReaderJobStatus.polling
+    indexingStatus === 'ocr_processing' ||
+    jobStatus === 'processing' ||
+    smartReaderStatus === 'processing' ||
+    smartReaderStatus === 'polling'
   ) {
     return 'ocr_processing';
   }
@@ -79,36 +80,36 @@ const copyByStep: Record<
 > = {
   queued: {
     label: 'Đã nhận minh chứng',
-    message: 'File đã được lưu, hệ thống sẽ bắt đầu số hoá.',
+    message: 'File đã được lưu, hệ thống sẽ bắt đầu đọc dữ liệu.',
     nextAction: 'wait_for_ocr',
     severity: 'info',
   },
   uploading_to_smartreader: {
-    label: 'Đang gửi đến SmartReader',
-    message: 'Hệ thống đang gửi file đến VNPT SmartReader để lấy mã xử lý.',
+    label: 'Đang gửi file để xử lý',
+    message: 'Hệ thống đang gửi file để lấy mã xử lý.',
     nextAction: 'wait',
     severity: 'info',
   },
   ocr_processing: {
-    label: 'Đang số hoá minh chứng',
-    message: 'SmartReader đang đọc nội dung trong file. Bạn có thể rời trang và quay lại sau.',
+    label: 'Đang đọc minh chứng',
+    message: 'Hệ thống đang đọc nội dung trong file. Bạn có thể rời trang và quay lại sau.',
     nextAction: 'wait',
     severity: 'info',
   },
   extracting_fields: {
-    label: 'Đang tạo Evidence Card',
+    label: 'Đang trích xuất thông tin',
     message: 'Hệ thống đang rút trích thông tin quan trọng như tên hoạt động, ngày, đơn vị tổ chức.',
     nextAction: 'wait',
     severity: 'info',
   },
   matching_registry: {
-    label: 'Đang đối chiếu kho minh chứng',
-    message: 'Hệ thống đang kiểm tra minh chứng với các danh sách/sự kiện đã xác nhận.',
+    label: 'Đang đối chiếu sự kiện đã xác nhận',
+    message: 'Hệ thống đang kiểm tra minh chứng với các danh sách hoặc sự kiện đã xác nhận.',
     nextAction: 'wait',
     severity: 'info',
   },
   indexed: {
-    label: 'Đã số hoá xong',
+    label: 'Đã đọc xong',
     message: 'Minh chứng đã sẵn sàng để cán bộ xét duyệt.',
     nextAction: 'view_card',
     severity: 'success',
@@ -120,7 +121,7 @@ const copyByStep: Record<
     severity: 'warning',
   },
   failed: {
-    label: 'Số hoá chưa thành công',
+    label: 'Chưa đọc được file',
     message: 'Hệ thống chưa đọc được file này. Vui lòng thử lại hoặc tải file rõ hơn.',
     nextAction: 'fix_file',
     severity: 'error',
@@ -148,9 +149,9 @@ function buildBadges(step: EvidenceUxStep): EvidenceUxStatus['badges'] {
   ];
   const labels: Record<EvidenceUxStep, string> = {
     queued: 'Đã nhận file',
-    uploading_to_smartreader: 'Đã gửi SmartReader',
-    ocr_processing: 'Đã số hoá',
-    extracting_fields: 'Đã tạo Evidence Card',
+    uploading_to_smartreader: 'Đã gửi xử lý',
+    ocr_processing: 'Đã đọc file',
+    extracting_fields: 'Đã trích xuất',
     matching_registry: 'Đã đối chiếu',
     indexed: 'Sẵn sàng xét duyệt',
     needs_manual_review: 'Cần kiểm tra',

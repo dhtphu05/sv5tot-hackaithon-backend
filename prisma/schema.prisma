@@ -157,6 +157,14 @@ enum NotificationType {
   result_available
 }
 
+enum EmailOutboxStatus {
+  queued
+  sending
+  sent
+  failed
+  cancelled
+}
+
 enum ResolutionStatus {
   open
   in_review
@@ -233,32 +241,32 @@ enum CollectiveStatus {
 }
 
 model User {
-  id                     String                  @id @default(uuid()) @db.Uuid
-  fullName               String
-  email                  String                  @unique
-  passwordHash           String
-  phone                  String?
-  role                   Role                    @default(student)
-  studentCode            String?                 @unique
-  className              String?
-  faculty                String?
-  avatarUrl              String?
-  isActive               Boolean                 @default(true)
-  lastLoginAt            DateTime?
-  createdAt              DateTime                @default(now())
-  updatedAt              DateTime                @updatedAt
-  refreshTokens          RefreshToken[]
-  officerSpecializations OfficerSpecialization[]
-  applications           Application[]
-  uploadedFiles          File[]                  @relation("UploadedFiles")
-  ownedFiles             File[]                  @relation("OwnedFiles")
-  createdDecisionImports DecisionImport[]        @relation("DecisionImportCreatedBy")
-  confirmedDecisionImports DecisionImport[]      @relation("DecisionImportConfirmedBy")
-  auditLogs              AuditLog[]
-  notifications          Notification[]
-  collectiveProfiles     CollectiveProfile[]
-  assignedReviewTasks    ReviewTask[]
-  finalizedApplications  Application[]             @relation("ApplicationFinalizedBy")
+  id                       String                  @id @default(uuid()) @db.Uuid
+  fullName                 String
+  email                    String                  @unique
+  passwordHash             String
+  phone                    String?
+  role                     Role                    @default(student)
+  studentCode              String?                 @unique
+  className                String?
+  faculty                  String?
+  avatarUrl                String?
+  isActive                 Boolean                 @default(true)
+  lastLoginAt              DateTime?
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
+  refreshTokens            RefreshToken[]
+  officerSpecializations   OfficerSpecialization[]
+  applications             Application[]
+  uploadedFiles            File[]                  @relation("UploadedFiles")
+  ownedFiles               File[]                  @relation("OwnedFiles")
+  createdDecisionImports   DecisionImport[]        @relation("DecisionImportCreatedBy")
+  confirmedDecisionImports DecisionImport[]        @relation("DecisionImportConfirmedBy")
+  auditLogs                AuditLog[]
+  notifications            Notification[]
+  collectiveProfiles       CollectiveProfile[]
+  assignedReviewTasks      ReviewTask[]
+  finalizedApplications    Application[]           @relation("ApplicationFinalizedBy")
 
   @@index([role])
   @@index([faculty])
@@ -378,7 +386,7 @@ model File {
   uploader                        User                @relation("UploadedFiles", fields: [uploadedBy], references: [id], onDelete: Restrict)
   evidenceFiles                   EvidenceFile[]
   eventFiles                      EventFile[]
-  decisionImports                 DecisionImport[] @relation("DecisionImportSourceFile")
+  decisionImports                 DecisionImport[]    @relation("DecisionImportSourceFile")
   sampleCertificateEvents         EventRegistry[]     @relation("EventSampleCertificate")
   sampleCertificateKnowledgeItems KnowledgeBaseItem[] @relation("KnowledgeSampleCertificate")
 
@@ -504,25 +512,25 @@ model EventFile {
 }
 
 model EventParticipant {
-  id                  String        @id @default(uuid()) @db.Uuid
-  eventId             String        @db.Uuid
-  studentCode         String
-  studentName         String
-  className           String?
-  faculty             String?
-  participationStatus String?
-  indexedRow          Int?
-  convertedValue      Float?
-  sourceFileId        String?       @db.Uuid
-  sourceDecisionDocumentId String?   @db.Uuid
-  sourcePage          Int?
-  sourceTableIndex    Int?
-  sourceRowIndex      Int?
-  ocrConfidence       Float?
-  normalizedConfidence Float?
-  rawRowJson          Json?
-  event               EventRegistry @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  sourceDecisionDocument DecisionDocument? @relation(fields: [sourceDecisionDocumentId], references: [id], onDelete: SetNull)
+  id                       String            @id @default(uuid()) @db.Uuid
+  eventId                  String            @db.Uuid
+  studentCode              String
+  studentName              String
+  className                String?
+  faculty                  String?
+  participationStatus      String?
+  indexedRow               Int?
+  convertedValue           Float?
+  sourceFileId             String?           @db.Uuid
+  sourceDecisionDocumentId String?           @db.Uuid
+  sourcePage               Int?
+  sourceTableIndex         Int?
+  sourceRowIndex           Int?
+  ocrConfidence            Float?
+  normalizedConfidence     Float?
+  rawRowJson               Json?
+  event                    EventRegistry     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sourceDecisionDocument   DecisionDocument? @relation(fields: [sourceDecisionDocumentId], references: [id], onDelete: SetNull)
 
   @@unique([eventId, studentCode])
   @@index([studentCode])
@@ -530,7 +538,7 @@ model EventParticipant {
 }
 
 model DecisionImport {
-  id                 String               @id @default(uuid()) @db.Uuid
+  id                 String                     @id @default(uuid()) @db.Uuid
   title              String
   criterion          Criterion?
   eventName          String?
@@ -541,25 +549,25 @@ model DecisionImport {
   convertedValue     Float?
   convertedUnit      String?
   eligibleLevelsJson Json?
-  status             DecisionImportStatus @default(draft)
-  sourceFileId       String?              @db.Uuid
+  status             DecisionImportStatus       @default(draft)
+  sourceFileId       String?                    @db.Uuid
   vnptHash           String?
   vnptFileType       String?
-  metadataJobId      String?              @db.Uuid
-  rosterJobId        String?              @db.Uuid
-  createdBy          String               @db.Uuid
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
+  metadataJobId      String?                    @db.Uuid
+  rosterJobId        String?                    @db.Uuid
+  createdBy          String                     @db.Uuid
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
   confirmedAt        DateTime?
-  confirmedBy        String?              @db.Uuid
+  confirmedBy        String?                    @db.Uuid
   lastErrorCode      String?
   lastErrorMessage   String?
   lastUserMessage    String?
   processingStep     String?
   columnMappingJson  Json?
-  sourceFile         File?                @relation("DecisionImportSourceFile", fields: [sourceFileId], references: [id], onDelete: SetNull)
-  creator            User                 @relation("DecisionImportCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
-  confirmer          User?                @relation("DecisionImportConfirmedBy", fields: [confirmedBy], references: [id], onDelete: SetNull)
+  sourceFile         File?                      @relation("DecisionImportSourceFile", fields: [sourceFileId], references: [id], onDelete: SetNull)
+  creator            User                       @relation("DecisionImportCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+  confirmer          User?                      @relation("DecisionImportConfirmedBy", fields: [confirmedBy], references: [id], onDelete: SetNull)
   documents          DecisionDocument[]
   tables             DecisionTable[]
   previewRows        DecisionRosterPreviewRow[]
@@ -573,21 +581,21 @@ model DecisionImport {
 }
 
 model DecisionDocument {
-  id                   String         @id @default(uuid()) @db.Uuid
-  decisionImportId      String         @db.Uuid
-  documentNo            String?
-  documentType          String?
-  issuer                String?
-  issueDate             DateTime?
-  effectiveDate         DateTime?
-  signer                String?
-  summary               String?
-  relatedDocumentsJson  Json?
-  rawAdminResponseJson  Json?
-  createdAt             DateTime       @default(now())
-  decisionImport        DecisionImport @relation(fields: [decisionImportId], references: [id], onDelete: Cascade)
-  eventRegistries       EventRegistry[]
-  eventParticipants     EventParticipant[]
+  id                   String             @id @default(uuid()) @db.Uuid
+  decisionImportId     String             @db.Uuid
+  documentNo           String?
+  documentType         String?
+  issuer               String?
+  issueDate            DateTime?
+  effectiveDate        DateTime?
+  signer               String?
+  summary              String?
+  relatedDocumentsJson Json?
+  rawAdminResponseJson Json?
+  createdAt            DateTime           @default(now())
+  decisionImport       DecisionImport     @relation(fields: [decisionImportId], references: [id], onDelete: Cascade)
+  eventRegistries      EventRegistry[]
+  eventParticipants    EventParticipant[]
 
   @@unique([decisionImportId])
   @@index([documentNo])
@@ -718,25 +726,26 @@ model CascadeReview {
 }
 
 model ReviewTask {
-  id                  String               @id @default(uuid()) @db.Uuid
-  applicationId       String?              @db.Uuid
-  collectiveProfileId String?              @db.Uuid
-  criterion           Criterion
-  assignedOfficerId   String?              @db.Uuid
-  status              ReviewTaskStatus     @default(waiting)
-  decision            ReviewDecision?
-  officerNote         String?
+  id                    String               @id @default(uuid()) @db.Uuid
+  applicationId         String?              @db.Uuid
+  collectiveProfileId   String?              @db.Uuid
+  criterion             Criterion
+  assignedOfficerId     String?              @db.Uuid
+  status                ReviewTaskStatus     @default(waiting)
+  decision              ReviewDecision?
+  officerNote           String?
   officerSuggestedLevel Level?
-  levelAssessmentJson Json?
-  decisionReason      String?
+  levelAssessmentJson   Json?
+  decisionReason        String?
   supplementRequestJson Json?
-  dueDate             DateTime?
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
-  application         Application?         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  collectiveProfile   CollectiveProfile?   @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
-  assignedOfficer     User?                @relation(fields: [assignedOfficerId], references: [id], onDelete: SetNull)
-  evidences           ReviewTaskEvidence[]
+  dueDate               DateTime?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+  application           Application?         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  collectiveProfile     CollectiveProfile?   @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+  assignedOfficer       User?                @relation(fields: [assignedOfficerId], references: [id], onDelete: SetNull)
+  evidences             ReviewTaskEvidence[]
+  resolutionCases       ResolutionCase[]
 
   @@index([assignedOfficerId, status])
   @@index([status])
@@ -759,6 +768,7 @@ model ResolutionCase {
   id                String           @id @default(uuid()) @db.Uuid
   applicationId     String           @db.Uuid
   evidenceId        String?          @db.Uuid
+  reviewTaskId      String?          @db.Uuid
   reason            String
   status            ResolutionStatus @default(open)
   committeeDecision String?
@@ -768,9 +778,11 @@ model ResolutionCase {
   closedAt          DateTime?
   application       Application      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   evidence          Evidence?        @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
+  reviewTask        ReviewTask?      @relation(fields: [reviewTaskId], references: [id], onDelete: SetNull)
 
   @@index([status])
   @@index([applicationId])
+  @@index([reviewTaskId])
 }
 
 model IndexingJob {
@@ -789,34 +801,34 @@ model IndexingJob {
 }
 
 model SmartReaderJob {
-  id                      String               @id @default(uuid()) @db.Uuid
-  jobType                 SmartReaderJobType   @map("job_type")
-  provider                String               @default("vnpt_smartreader")
-  fileId                  String?              @map("file_id") @db.Uuid
-  evidenceId              String?              @map("evidence_id") @db.Uuid
-  eventId                 String?              @map("event_id") @db.Uuid
-  decisionImportId        String?              @map("decision_import_id") @db.Uuid
-  vnptHash                String?              @map("vnpt_hash")
-  vnptFileType            String?              @map("vnpt_file_type")
-  endpoint                String?
-  sessionId               String?              @map("session_id")
-  status                  SmartReaderJobStatus @default(queued)
-  progressProcessedPages  Int?                 @map("progress_processed_pages")
-  progressRemainingPages  Int?                 @map("progress_remaining_pages")
-  resultLink              String?              @map("result_link")
-  requestPayloadJson      Json?                @map("request_payload_json")
-  rawResponseJson         Json?                @map("raw_response_json")
-  redactedErrorJson       Json?                @map("redacted_error_json")
-  vnptMessage             String?              @map("vnpt_message")
-  vnptStatus              String?              @map("vnpt_status")
-  vnptStatusCode          Int?                 @map("vnpt_status_code")
-  vnptLogId               String?              @map("vnpt_log_id")
-  attemptCount            Int                  @default(0) @map("attempt_count")
-  lockedAt                DateTime?            @map("locked_at")
-  lockedBy                String?              @map("locked_by")
-  createdAt               DateTime             @default(now()) @map("created_at")
-  updatedAt               DateTime             @updatedAt @map("updated_at")
-  completedAt             DateTime?            @map("completed_at")
+  id                     String               @id @default(uuid()) @db.Uuid
+  jobType                SmartReaderJobType   @map("job_type")
+  provider               String               @default("vnpt_smartreader")
+  fileId                 String?              @map("file_id") @db.Uuid
+  evidenceId             String?              @map("evidence_id") @db.Uuid
+  eventId                String?              @map("event_id") @db.Uuid
+  decisionImportId       String?              @map("decision_import_id") @db.Uuid
+  vnptHash               String?              @map("vnpt_hash")
+  vnptFileType           String?              @map("vnpt_file_type")
+  endpoint               String?
+  sessionId              String?              @map("session_id")
+  status                 SmartReaderJobStatus @default(queued)
+  progressProcessedPages Int?                 @map("progress_processed_pages")
+  progressRemainingPages Int?                 @map("progress_remaining_pages")
+  resultLink             String?              @map("result_link")
+  requestPayloadJson     Json?                @map("request_payload_json")
+  rawResponseJson        Json?                @map("raw_response_json")
+  redactedErrorJson      Json?                @map("redacted_error_json")
+  vnptMessage            String?              @map("vnpt_message")
+  vnptStatus             String?              @map("vnpt_status")
+  vnptStatusCode         Int?                 @map("vnpt_status_code")
+  vnptLogId              String?              @map("vnpt_log_id")
+  attemptCount           Int                  @default(0) @map("attempt_count")
+  lockedAt               DateTime?            @map("locked_at")
+  lockedBy               String?              @map("locked_by")
+  createdAt              DateTime             @default(now()) @map("created_at")
+  updatedAt              DateTime             @updatedAt @map("updated_at")
+  completedAt            DateTime?            @map("completed_at")
 
   @@index([jobType, status])
   @@index([fileId])
@@ -868,6 +880,10 @@ model Notification {
   userId              String             @db.Uuid
   applicationId       String?            @db.Uuid
   collectiveProfileId String?            @db.Uuid
+  evidenceId          String?            @db.Uuid
+  reviewTaskId        String?            @db.Uuid
+  resolutionCaseId    String?            @db.Uuid
+  metadata            Json?
   type                NotificationType
   title               String
   message             String
@@ -881,6 +897,37 @@ model Notification {
   @@index([userId, readAt, createdAt])
   @@index([applicationId])
   @@index([collectiveProfileId])
+  @@index([evidenceId])
+  @@index([reviewTaskId])
+  @@index([resolutionCaseId])
+}
+
+model EmailOutbox {
+  id                String            @id @default(uuid()) @db.Uuid
+  recipientEmail    String
+  recipientName     String?
+  subject           String
+  templateKey       String
+  payloadJson       Json?
+  status            EmailOutboxStatus @default(queued)
+  attempts          Int               @default(0)
+  maxAttempts       Int               @default(3)
+  nextAttemptAt     DateTime?
+  providerMessageId String?
+  lastError         String?
+  relatedUserId     String?           @db.Uuid
+  applicationId     String?           @db.Uuid
+  notificationId    String?           @db.Uuid
+  dedupeKey         String            @unique
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  sentAt            DateTime?
+
+  @@index([status, nextAttemptAt])
+  @@index([relatedUserId])
+  @@index([applicationId])
+  @@index([notificationId])
+  @@index([templateKey])
 }
 
 model CollectiveProfile {
