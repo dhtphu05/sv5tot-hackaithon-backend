@@ -1,4 +1,10 @@
-import type { Criterion, EvidenceSourceType, EvidenceStatus, IndexingStatus, Prisma } from '@prisma/client';
+import type {
+  Criterion,
+  EvidenceSourceType,
+  EvidenceStatus,
+  IndexingStatus,
+  Prisma,
+} from '@prisma/client';
 
 export type EvidenceStudentStatusCode =
   | 'official_match_found'
@@ -32,6 +38,8 @@ export type EvidenceWarning = {
   code: string;
   label: string;
   message: string;
+  severity?: 'info' | 'neutral' | 'warning' | 'error';
+  userMessage?: string;
 };
 
 export type EvidenceMissingField = {
@@ -91,7 +99,8 @@ export const evidenceStudentStatuses: Record<EvidenceStudentStatusCode, Evidence
   similar_name_found: {
     code: 'similar_name_found',
     label: 'Có hoạt động tương tự',
-    message: 'Hệ thống tìm thấy hoạt động có tên gần giống. Vui lòng kiểm tra trước khi thêm vào hồ sơ.',
+    message:
+      'Hệ thống tìm thấy hoạt động có tên gần giống. Vui lòng kiểm tra trước khi thêm vào hồ sơ.',
     nextAction: 'add_to_application',
     severity: 'info',
     source: 'official_matching',
@@ -200,7 +209,9 @@ export function buildReadableSummary(fields: unknown): EvidenceReadableSummary {
     convertedValue: numberValue(value.convertedValue),
     convertedUnit: stringValue(value.convertedUnit),
     volunteerDays: numberValue(value.volunteerDays ?? value.volunteer_days),
-    certificateType: stringValue(value.certificateType ?? value.certificate_type ?? value.document_type),
+    certificateType: stringValue(
+      value.certificateType ?? value.certificate_type ?? value.document_type,
+    ),
     languageScore: stringValue(value.languageScore ?? value.language_score),
     gpa: numberValue(value.gpa),
     conductScore: numberValue(value.conductScore ?? value.conduct_score),
@@ -212,13 +223,26 @@ export function mapWarning(input: unknown): EvidenceWarning {
   const rawCode = normalizeWarningCode(isRecord(input) ? input.code : input);
   const code = rawCode === 'not_matched_registry' ? 'official_match_not_found' : rawCode;
   const configured = warningCopy[code] ?? warningCopy[legacyWarningAliases[code] ?? ''];
-  if (configured) return { code, ...configured };
+  const severity = isRecord(input) ? stringValue(input.severity) : undefined;
+  const userMessage = isRecord(input)
+    ? stringValue(input.userMessage ?? input.user_message)
+    : undefined;
+  if (configured) {
+    return {
+      code,
+      ...configured,
+      ...(isWarningSeverity(severity) ? { severity } : {}),
+      ...(userMessage ? { userMessage } : {}),
+    };
+  }
 
   const fallbackMessage = isRecord(input) ? stringValue(input.message) : undefined;
   return {
     code,
     label: 'Cần kiểm tra',
     message: fallbackMessage ?? 'Minh chứng cần cán bộ kiểm tra thêm.',
+    ...(isWarningSeverity(severity) ? { severity } : {}),
+    ...(userMessage ? { userMessage } : {}),
   };
 }
 
@@ -227,12 +251,18 @@ export function mapWarnings(input: unknown): EvidenceWarning[] {
   return input.map(mapWarning);
 }
 
-export function buildMissingFields(criterion: Criterion | string, fields: unknown, warnings: unknown): EvidenceMissingField[] {
+export function buildMissingFields(
+  criterion: Criterion | string,
+  fields: unknown,
+  warnings: unknown,
+): EvidenceMissingField[] {
   const readableSummary = buildReadableSummary(fields);
   const detected = new Set<string>();
 
   for (const warning of mapWarnings(warnings)) {
-    const field = warningToMissingField[warning.code] ?? warningToMissingField[legacyWarningAliases[warning.code] ?? ''];
+    const field =
+      warningToMissingField[warning.code] ??
+      warningToMissingField[legacyWarningAliases[warning.code] ?? ''];
     if (field) detected.add(field);
   }
 
@@ -264,14 +294,21 @@ export function resolveStudentStatusForCard(input: {
     return evidenceStudentStatuses.unreadable_file;
   }
 
-  if (!input.ocrText?.trim() && input.indexingStatus !== 'not_started' && input.indexingStatus !== 'pending_indexing') {
+  if (
+    !input.ocrText?.trim() &&
+    input.indexingStatus !== 'not_started' &&
+    input.indexingStatus !== 'pending_indexing'
+  ) {
     return evidenceStudentStatuses.unreadable_file;
   }
 
   const missingFields = buildMissingFields(input.criterion, input.fields, input.warnings);
   const warningCodes = new Set(mapWarnings(input.warnings).map((warning) => warning.code));
 
-  if (warningCodes.has('POSSIBLE_STUDENT_MISMATCH') || input.indexingStatus === 'needs_manual_review') {
+  if (
+    warningCodes.has('POSSIBLE_STUDENT_MISMATCH') ||
+    input.indexingStatus === 'needs_manual_review'
+  ) {
     return evidenceStudentStatuses.needs_human_verification;
   }
 
@@ -341,12 +378,53 @@ const warningCopy: Record<string, Omit<EvidenceWarning, 'code'>> = {
     message: 'Minh chứng chưa thể hiện rõ số ngày tham gia.',
   },
   official_match_not_found: {
-    label: 'Chưa tìm thấy trong danh sách chính thức',
-    message: 'Bạn vẫn có thể upload minh chứng để cán bộ xác minh.',
+    label: 'Minh chứng tự tải lên',
+    message: 'Minh chứng tự tải lên, chưa đối chiếu được với danh sách chính thức.',
+    severity: 'info',
+    userMessage: 'Minh chứng tự tải lên, chưa đối chiếu được với danh sách chính thức.',
+  },
+  event_name_mismatch_with_user_input: {
+    label: 'Tên OCR khác tên đã nhập',
+    message:
+      'Tên hoạt động hệ thống đọc được khác tên minh chứng bạn đã nhập. Cán bộ sẽ kiểm tra thêm.',
+    severity: 'info',
+  },
+  needs_human_verification: {
+    label: 'Cần cán bộ kiểm tra',
+    message: 'Độ chắc chắn chưa cao, cán bộ sẽ kiểm tra thêm.',
+    severity: 'info',
+  },
+  field_low_confidence: {
+    label: 'OCR chưa chắc chắn',
+    message: 'Một số thông tin OCR chưa chắc chắn.',
+    severity: 'info',
+  },
+  ocr_text_low_quality: {
+    label: 'Nội dung OCR có thể sai',
+    message:
+      'Nội dung đọc được có thể chưa chính xác do chất lượng file hoặc định dạng giấy chứng nhận.',
+    severity: 'info',
+  },
+  ocr_student_name_conflict: {
+    label: 'Tên chưa khớp hồ sơ',
+    message: 'Tên sinh viên trong file chưa khớp rõ với hồ sơ.',
+    severity: 'warning',
+    userMessage: 'Tên sinh viên trong file chưa khớp rõ với hồ sơ.',
+  },
+  ocr_class_conflict: {
+    label: 'Lớp chưa khớp hồ sơ',
+    message: 'Lớp trong file chưa khớp rõ với hồ sơ.',
+    severity: 'info',
+  },
+  ocr_faculty_conflict: {
+    label: 'Khoa chưa khớp hồ sơ',
+    message: 'Khoa trong file chưa khớp rõ với hồ sơ.',
+    severity: 'info',
   },
   participant_name_duplicate: {
     label: 'Trùng họ tên trong danh sách',
-    message: 'Có nhiều sinh viên cùng họ tên trong danh sách chính thức. Cán bộ cần kiểm tra thủ công.',
+    message:
+      'Có nhiều sinh viên cùng họ tên trong danh sách chính thức. Cán bộ cần kiểm tra thủ công.',
   },
   participant_name_not_matched: {
     label: 'Chưa khớp họ tên',
@@ -384,6 +462,12 @@ const legacyWarningAliases: Record<string, string> = {
   OCR_FAILED: 'ocr_empty_text',
   OCR_EMPTY_TEXT: 'ocr_empty_text',
   LOW_CONFIDENCE: 'needs_human_verification',
+  event_name_mismatch_with_user_input: 'event_name_mismatch_with_user_input',
+  field_low_confidence: 'field_low_confidence',
+  ocr_text_low_quality: 'ocr_text_low_quality',
+  ocr_student_name_conflict: 'ocr_student_name_conflict',
+  ocr_class_conflict: 'ocr_class_conflict',
+  ocr_faculty_conflict: 'ocr_faculty_conflict',
 };
 
 const warningToMissingField: Record<string, string> = {
@@ -464,6 +548,12 @@ function normalizeWarningCode(value: unknown): string {
   return String(value || 'unknown_warning').trim();
 }
 
+function isWarningSeverity(
+  value: string | undefined,
+): value is NonNullable<EvidenceWarning['severity']> {
+  return value === 'info' || value === 'neutral' || value === 'warning' || value === 'error';
+}
+
 function stringValue(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
@@ -481,7 +571,9 @@ function numberValue(value: unknown): number | undefined {
 
 function removeEmpty<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
-    Object.entries(value).filter(([, nested]) => nested !== undefined && nested !== null && nested !== ''),
+    Object.entries(value).filter(
+      ([, nested]) => nested !== undefined && nested !== null && nested !== '',
+    ),
   ) as T;
 }
 
