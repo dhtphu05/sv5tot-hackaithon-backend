@@ -1,4 +1,4 @@
-import { Criterion, Level, Prisma, ReviewTaskStatus, Role } from '@prisma/client';
+import { Criterion, Level, Prisma, Role } from '@prisma/client';
 import { env } from '../src/config/env';
 import { logger } from '../src/config/logger';
 import { prisma } from '../src/infrastructure/database/prisma';
@@ -6,15 +6,6 @@ import { PasswordService } from '../src/modules/auth/password.service';
 import { fallbackRulesByLevel } from '../src/modules/rules/criteria.constants';
 
 const passwordService = new PasswordService();
-const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
-const demoReviewCriteria: Criterion[] = [
-  Criterion.ethics,
-  Criterion.academic,
-  Criterion.physical,
-  Criterion.volunteer,
-  Criterion.integration,
-];
-
 type SeedUser = {
   email: string;
   role: Role;
@@ -67,11 +58,11 @@ const demoUsers: SeedUser[] = [
     specializations: [Criterion.academic, Criterion.ethics, Criterion.volunteer],
   },
   {
-    email: demoAllCriteriaOfficerEmail,
+    email: 'officer.academic@dut.udn.vn',
     role: Role.officer,
-    fullName: 'Cán bộ xét duyệt demo',
+    fullName: 'Cán bộ Học tập',
     faculty: 'Khoa Công nghệ Thông tin',
-    specializations: demoReviewCriteria,
+    specialization: Criterion.academic,
   },
   {
     email: 'officer.volunteer@dut.udn.vn',
@@ -149,25 +140,40 @@ async function seedUsers(): Promise<void> {
     });
 
     const specializations = seedUser.specializations ?? (seedUser.specialization ? [seedUser.specialization] : []);
-    for (const specialization of specializations) {
-      await prisma.officerSpecialization.upsert({
+    if (seedUser.role === Role.officer) {
+      await prisma.officerSpecialization.updateMany({
         where: {
-          officerId_criterion_facultyScope: {
+          officerId: user.id,
+          OR: [
+            { criterion: { notIn: specializations } },
+            { facultyScope: { not: null } },
+          ],
+        },
+        data: { isActive: false },
+      });
+    }
+
+    for (const specialization of specializations) {
+      const existing = await prisma.officerSpecialization.findFirst({
+        where: { officerId: user.id, criterion: specialization, facultyScope: null },
+        select: { id: true },
+      });
+
+      if (existing) {
+        await prisma.officerSpecialization.update({
+          where: { id: existing.id },
+          data: { isActive: true },
+        });
+      } else {
+        await prisma.officerSpecialization.create({
+          data: {
             officerId: user.id,
             criterion: specialization,
-            facultyScope: seedUser.faculty ?? '',
+            facultyScope: null,
+            isActive: true,
           },
-        },
-        update: {
-          isActive: true,
-        },
-        create: {
-          officerId: user.id,
-          criterion: specialization,
-          facultyScope: seedUser.faculty ?? '',
-          isActive: true,
-        },
-      });
+        });
+      }
     }
   }
 }
@@ -242,39 +248,9 @@ function toSeedJson(value: unknown): Prisma.InputJsonValue | undefined {
   return value === null || value === undefined ? undefined : (value as Prisma.InputJsonValue);
 }
 
-async function seedDemoOfficerAssignments(): Promise<void> {
-  if (process.env.NODE_ENV === 'production') {
-    return;
-  }
-
-  const officer = await prisma.user.findUnique({
-    where: { email: demoAllCriteriaOfficerEmail },
-    select: { id: true },
-  });
-  if (!officer) {
-    return;
-  }
-
-  await prisma.reviewTask.updateMany({
-    where: {
-      applicationId: { not: null },
-      criterion: { in: demoReviewCriteria },
-      status: {
-        in: [
-          ReviewTaskStatus.waiting,
-          ReviewTaskStatus.reviewing,
-          ReviewTaskStatus.supplement_required,
-        ],
-      },
-    },
-    data: { assignedOfficerId: officer.id },
-  });
-}
-
 async function main(): Promise<void> {
   await seedUsers();
   await seedCriteriaRules();
-  await seedDemoOfficerAssignments();
   logger.info({ userCount: demoUsers.length }, 'Seed completed');
 }
 

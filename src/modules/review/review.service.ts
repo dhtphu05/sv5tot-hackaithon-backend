@@ -60,14 +60,7 @@ type ReviewTaskPriorityReason =
   | 'unassigned_claimable'
   | null;
 
-const demoAllCriteriaOfficerEmail = 'officer.academic@dut.udn.vn';
-const demoReviewCriteria = [
-  Criterion.ethics,
-  Criterion.academic,
-  Criterion.physical,
-  Criterion.volunteer,
-  Criterion.integration,
-];
+type OfficerCriterionAccessCache = Map<string, Promise<boolean>>;
 
 export class ReviewService {
   constructor(
@@ -94,9 +87,10 @@ export class ReviewService {
       page: 1,
       limit: 100,
     });
+    const permissionCache: OfficerCriterionAccessCache = new Map();
     const accessible = [];
     for (const task of data.items) {
-      if (await this.canAccessTask(user, task, false)) {
+      if (await this.canAccessTask(user, task, false, permissionCache)) {
         accessible.push(task);
       }
     }
@@ -107,7 +101,7 @@ export class ReviewService {
       await Promise.all(
         accessible.map(async (task) => {
           const item = toTaskListItem(task);
-          const permissions = await this.getTaskPermissions(user, task);
+          const permissions = await this.getTaskPermissions(user, task, permissionCache);
           return {
             ...item,
             permissions,
@@ -160,17 +154,8 @@ export class ReviewService {
         ? {
             id: officer.id,
             fullName: officer.fullName,
-            specializations:
-              officer.email === demoAllCriteriaOfficerEmail
-                ? demoReviewCriteria
-                : officer.officerSpecializations.map((item) => item.criterion),
-            specializationScopes:
-              officer.email === demoAllCriteriaOfficerEmail
-                ? demoReviewCriteria.map((criterion) => ({
-                    criterion,
-                    facultyScope: officer.faculty,
-                  }))
-                : officer.officerSpecializations,
+            specializations: officer.officerSpecializations.map((item) => item.criterion),
+            specializationScopes: officer.officerSpecializations,
           }
         : {
             id: user.id,
@@ -205,10 +190,11 @@ export class ReviewService {
   async listTasks(user: AuthenticatedUser, query: ListReviewTasksQuery) {
     const data = await this.reviewRepository.list(user, query);
     const items = [];
+    const permissionCache: OfficerCriterionAccessCache = new Map();
     for (const task of data.items) {
-      if (await this.canAccessTask(user, task, false)) {
+      if (await this.canAccessTask(user, task, false, permissionCache)) {
         const item = toTaskListItem(task);
-        const permissions = await this.getTaskPermissions(user, task);
+        const permissions = await this.getTaskPermissions(user, task, permissionCache);
         items.push({
           ...item,
           permissions,
@@ -954,8 +940,9 @@ export class ReviewService {
       collectiveProfile: { representative: { faculty: string | null } } | null;
     },
     decision: boolean,
+    permissionCache?: OfficerCriterionAccessCache,
   ): Promise<boolean> {
-    const permissions = await this.getTaskPermissions(user, task);
+    const permissions = await this.getTaskPermissions(user, task, permissionCache);
     return decision ? permissions.canAct : permissions.canView;
   }
 
@@ -968,6 +955,7 @@ export class ReviewService {
       application: { student: { faculty: string | null } } | null;
       collectiveProfile: { representative: { faculty: string | null } } | null;
     },
+    permissionCache?: OfficerCriterionAccessCache,
   ): Promise<ReviewTaskPermissions> {
     const final = isFinalReviewTaskStatus(task.status);
 
@@ -1004,9 +992,12 @@ export class ReviewService {
 
     const faculty =
       task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty;
-    const specialized =
-      user.email === demoAllCriteriaOfficerEmail ||
-      (await this.assignmentService.canOfficerHandleCriterion(user.id, task.criterion, faculty));
+    const specialized = await this.canOfficerHandleCriterion(
+      user,
+      task.criterion,
+      faculty,
+      permissionCache,
+    );
 
     if (task.assignedOfficerId === user.id) {
       return buildTaskPermissions({
@@ -1045,6 +1036,25 @@ export class ReviewService {
       canRequestSupport: false,
       reason: 'out_of_scope',
     });
+  }
+
+  private async canOfficerHandleCriterion(
+    user: AuthenticatedUser,
+    criterion: Criterion,
+    faculty: string | null | undefined,
+    permissionCache?: OfficerCriterionAccessCache,
+  ): Promise<boolean> {
+    if (!permissionCache) {
+      return this.assignmentService.canOfficerHandleCriterion(user.id, criterion, faculty);
+    }
+
+    const key = `${user.id}:${criterion}:${faculty ?? ''}`;
+    const cached = permissionCache.get(key);
+    if (cached) return cached;
+
+    const result = this.assignmentService.canOfficerHandleCriterion(user.id, criterion, faculty);
+    permissionCache.set(key, result);
+    return result;
   }
 
   private async markTaskStarted(
