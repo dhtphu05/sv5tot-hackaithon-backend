@@ -104,7 +104,15 @@ const rawEnvSchema = z.object({
   path: ['STORAGE_DRIVER'],
 });
 
-const parsedEnv = rawEnvSchema.safeParse(process.env);
+const envInput = {
+  ...process.env,
+  JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET ?? process.env.JWT_SECRET,
+  JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET ?? process.env.JWT_SECRET,
+  JWT_ACCESS_EXPIRES_IN: process.env.JWT_ACCESS_EXPIRES_IN ?? process.env.JWT_EXPIRES_IN,
+  BCRYPT_SALT_ROUNDS: process.env.BCRYPT_SALT_ROUNDS ?? process.env.BCRYPT_ROUNDS,
+};
+
+const parsedEnv = rawEnvSchema.safeParse(envInput);
 
 if (!parsedEnv.success) {
   const details = parsedEnv.error.flatten().fieldErrors;
@@ -112,8 +120,8 @@ if (!parsedEnv.success) {
 }
 
 const rawEnv = parsedEnv.data;
-const jwtAccessSecret = rawEnv.JWT_ACCESS_SECRET ?? rawEnv.JWT_SECRET;
-const jwtRefreshSecret = rawEnv.JWT_REFRESH_SECRET ?? rawEnv.JWT_SECRET;
+const jwtAccessSecret = rawEnv.JWT_ACCESS_SECRET;
+const jwtRefreshSecret = rawEnv.JWT_REFRESH_SECRET;
 
 if (!jwtAccessSecret || !jwtRefreshSecret) {
   throw new Error('Invalid environment configuration: JWT_SECRET or both JWT_ACCESS_SECRET/JWT_REFRESH_SECRET are required');
@@ -154,8 +162,8 @@ export const env = {
   ...rawEnv,
   JWT_ACCESS_SECRET: jwtAccessSecret,
   JWT_REFRESH_SECRET: jwtRefreshSecret,
-  JWT_ACCESS_EXPIRES_IN: rawEnv.JWT_ACCESS_EXPIRES_IN ?? rawEnv.JWT_EXPIRES_IN,
-  BCRYPT_SALT_ROUNDS: rawEnv.BCRYPT_SALT_ROUNDS ?? rawEnv.BCRYPT_ROUNDS ?? 12,
+  JWT_ACCESS_EXPIRES_IN: rawEnv.JWT_ACCESS_EXPIRES_IN,
+  BCRYPT_SALT_ROUNDS: rawEnv.BCRYPT_SALT_ROUNDS,
   UPLOAD_DIR: rawEnv.UPLOAD_DIR ?? rawEnv.LOCAL_UPLOAD_DIR ?? './uploads',
   LOCAL_UPLOAD_DIR: rawEnv.LOCAL_UPLOAD_DIR ?? rawEnv.UPLOAD_DIR ?? './uploads',
   VNPT_SAVE_RAW_RESPONSE:
