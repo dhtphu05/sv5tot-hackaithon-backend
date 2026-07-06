@@ -13,7 +13,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     const targetPath = path.resolve(this.uploadDir, params.key);
     const root = path.resolve(this.uploadDir);
 
-    if (!targetPath.startsWith(root)) {
+    if (!isInsideRoot(root, targetPath)) {
       throw new AppError(400, ErrorCodes.STORAGE_ERROR, 'Invalid storage path');
     }
 
@@ -26,7 +26,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     const targetPath = path.resolve(this.uploadDir, key);
     const root = path.resolve(this.uploadDir);
 
-    if (!targetPath.startsWith(root)) {
+    if (!isInsideRoot(root, targetPath)) {
       throw new AppError(400, ErrorCodes.STORAGE_ERROR, 'Invalid storage path');
     }
 
@@ -38,4 +38,9 @@ export class LocalStorageAdapter implements StorageAdapter {
     const token = jwt.sign({ key }, env.JWT_ACCESS_SECRET, { expiresIn: expiresInSeconds });
     return `http://localhost:${env.PORT}/api/files/download?token=${token}`;
   }
+}
+
+function isInsideRoot(root: string, targetPath: string): boolean {
+  const relativePath = path.relative(root, targetPath);
+  return !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
 }

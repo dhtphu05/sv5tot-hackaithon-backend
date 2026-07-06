@@ -1,4 +1,5 @@
 // Owns reviewed evidence knowledge, reusable criteria references, and search.
+import { Role, type Criterion } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -6,6 +7,7 @@ import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { KnowledgeBaseRepository } from './knowledge-base.repository';
 import type {
+  ApprovedEvidenceNamesQuery,
   CreateFromReviewedEvidenceInput,
   KnowledgeBaseSearchQuery,
   UpdateKnowledgeBaseItemInput,
@@ -24,6 +26,42 @@ export class KnowledgeBaseService {
 
     return {
       items: processedItems,
+      pagination: {
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalPages: Math.ceil(total / query.limit),
+      },
+    };
+  }
+
+  async searchApprovedEvidenceNames(user: AuthenticatedUser, query: ApprovedEvidenceNamesQuery) {
+    const allowedCriteria =
+      user.role === Role.officer ? await this.getOfficerActiveCriteria(user.id) : undefined;
+    const { items, total } = await this.repository.searchApprovedEvidenceNames(
+      query,
+      allowedCriteria,
+    );
+    const isStudent = user.role === Role.student || user.role === Role.class_representative;
+
+    return {
+      items: items.map((item) => {
+        const base = {
+          id: item.id,
+          title: item.evidenceName ?? item.eventName ?? 'Minh chứng đã duyệt',
+          criterion: item.criterion,
+        };
+
+        if (isStudent) return base;
+
+        return {
+          ...base,
+          eventName: item.eventName,
+          level: item.level,
+          usageCount: item.usageCount,
+          updatedAt: item.updatedAt,
+        };
+      }),
       pagination: {
         page: query.page,
         limit: query.limit,
@@ -189,6 +227,15 @@ export class KnowledgeBaseService {
       eventName: item.eventName ? anonymizeText(item.eventName) : null,
       reason: item.reason ? anonymizeText(item.reason) : null,
     };
+  }
+
+  private async getOfficerActiveCriteria(officerId: string): Promise<Criterion[]> {
+    const specializations = await prisma.officerSpecialization.findMany({
+      where: { officerId, isActive: true },
+      select: { criterion: true },
+    });
+
+    return Array.from(new Set(specializations.map((item) => item.criterion)));
   }
 }
 

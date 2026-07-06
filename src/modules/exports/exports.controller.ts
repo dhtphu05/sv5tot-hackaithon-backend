@@ -27,7 +27,13 @@ export async function exportReviewResults(req: Request, res: Response): Promise<
 
 export async function downloadExportFile(req: Request, res: Response): Promise<void> {
   const data = await service.getDownloadFile(req.user!, String(req.params.fileId));
-  res.download(data.absolutePath, data.file.originalName);
+  if ('signedUrl' in data && data.signedUrl) {
+    res.redirect(data.signedUrl);
+    return;
+  }
+  if ('absolutePath' in data && data.absolutePath) {
+    res.download(data.absolutePath, data.file.originalName);
+  }
 }
 
 function sendCsv(res: Response, csv: string, filename: string) {

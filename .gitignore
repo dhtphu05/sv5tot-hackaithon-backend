@@ -4,6 +4,7 @@ coverage/
 .env
 .env.*
 !.env.example
+cloudrun.env.yaml
 uploads/**
 !uploads/.gitkeep
 !uploads/evidences/.gitkeep
@@ -11,3 +12,5 @@ uploads/**
 !uploads/certificates/.gitkeep
 !uploads/exports/.gitkeep
 tmp/
+cloudrun.env.yaml
+.env.cloudrun

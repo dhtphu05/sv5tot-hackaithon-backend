@@ -7,11 +7,13 @@ import { asyncHandler } from '../../shared/utils/async-handler';
 import {
   createKnowledgeBaseFromEvidence,
   getKnowledgeBaseItem,
+  searchApprovedEvidenceNames,
   searchKnowledgeBase,
   updateKnowledgeBaseItem,
   useKnowledgeBaseItem,
 } from './knowledge-base.controller';
 import {
+  approvedEvidenceNamesQuerySchema,
   createFromReviewedEvidenceSchema,
   knowledgeBaseSearchQuerySchema,
   updateKnowledgeBaseItemSchema,
@@ -32,6 +34,20 @@ knowledgeBaseRouter.get(
   ),
   validate({ query: knowledgeBaseSearchQuerySchema }),
   asyncHandler(searchKnowledgeBase),
+);
+knowledgeBaseRouter.get(
+  '/approved-evidence-names',
+  requireAuth,
+  requireRole(
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.admin,
+  ),
+  validate({ query: approvedEvidenceNamesQuerySchema }),
+  asyncHandler(searchApprovedEvidenceNames),
 );
 knowledgeBaseRouter.get(
   '/:id',

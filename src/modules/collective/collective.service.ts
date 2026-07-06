@@ -14,8 +14,8 @@ import {
   type Prisma,
 } from '@prisma/client';
 import { readSheet } from 'read-excel-file/node';
+import { env } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
-import { LocalStorageService } from '../../infrastructure/storage/local-storage.service';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -25,6 +25,7 @@ import { createApplicationAudit } from '../applications/application.helpers';
 import { JobsService, runIndexingJob } from '../jobs/jobs.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from '../review/review-assignment.service';
+import { StorageService } from '../storage/storage.service';
 import { buildCollectiveMemberSummary } from './collective-member-summary';
 import { runCollectivePrecheck } from './collective-precheck.service';
 import type {
@@ -113,7 +114,7 @@ function collectiveBlockingReason(status: ReviewTaskStatus, count: number): stri
 
 export class CollectiveService {
   constructor(
-    private readonly storageService = new LocalStorageService(),
+    private readonly storageService = new StorageService(),
     private readonly jobsService = new JobsService(),
     private readonly assignmentService = new ReviewAssignmentService(),
     private readonly notificationsService = new NotificationsService(),
@@ -389,7 +390,7 @@ export class CollectiveService {
       const sourceFile = await tx.file.create({
         data: {
           ownerId: user.id,
-          storageType: FileStorageType.local,
+          storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
           filePath: storedRoster.filePath,
           publicUrl: storedRoster.publicUrl,
           originalName: file.originalname,
@@ -523,7 +524,7 @@ export class CollectiveService {
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
-          storageType: FileStorageType.local,
+          storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
           filePath: stored.filePath,
           publicUrl: stored.publicUrl,
           originalName: file.originalname,

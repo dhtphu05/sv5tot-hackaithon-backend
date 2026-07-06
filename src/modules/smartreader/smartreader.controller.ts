@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { Prisma, Role } from '@prisma/client';
+import { FileStorageType, Prisma, Role, type File } from '@prisma/client';
 import type { Request, Response } from 'express';
 import { AuditService } from '../audit/audit.service';
 import { env } from '../../config/env';
@@ -9,6 +10,7 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { sendSuccess } from '../../shared/responses/api-response';
+import { StorageService } from '../storage/storage.service';
 import { getSmartReaderAdapter } from './smartreader.adapter';
 import type {
   AdministrativeDocResult,
@@ -20,6 +22,7 @@ import { smartReaderDebugQuerySchema, smartReaderFileInputSchema } from './smart
 
 const adapter = getSmartReaderAdapter();
 const auditService = new AuditService();
+const storageService = new StorageService();
 
 export async function uploadTest(req: Request, res: Response): Promise<void> {
   const input = await resolveInputFile(req);
@@ -169,33 +172,29 @@ async function resolveSmartReaderSource(req: Request): Promise<{
       };
     }
 
-    if (file.storageType !== 'local') {
-      throw new AppError(
-        400,
-        ErrorCodes.VALIDATION_ERROR,
-        'fileId without VNPT metadata is only supported for local storage files',
-      );
+    const input = await prepareSmartReaderUploadInput(file);
+    try {
+      const upload = await adapter.uploadFile({
+        filePath: input.filePath,
+        originalName: file.originalName,
+        title: body.title ?? file.originalName,
+        description: body.description,
+      });
+      await prisma.file.update({
+        where: { id: file.id },
+        data: {
+          vnptHash: upload.hash,
+          vnptFileType: upload.fileType,
+          vnptUploadedAt: new Date(),
+          vnptUploadRawJson: env.VNPT_SAVE_RAW_RESPONSE
+            ? (upload.raw as Prisma.InputJsonValue)
+            : undefined,
+        },
+      });
+      return { upload, cleanup: async () => undefined };
+    } finally {
+      await input.cleanup();
     }
-
-    const upload = await adapter.uploadFile({
-      filePath: path.resolve(env.UPLOAD_DIR, file.filePath),
-      originalName: file.originalName,
-      title: body.title ?? file.originalName,
-      description: body.description,
-    });
-    await prisma.file.update({
-      where: { id: file.id },
-      data: {
-        vnptHash: upload.hash,
-        vnptFileType: upload.fileType,
-        vnptUploadedAt: new Date(),
-        vnptUploadRawJson: env.VNPT_SAVE_RAW_RESPONSE
-          ? (upload.raw as Prisma.InputJsonValue)
-          : undefined,
-      },
-    });
-
-    return { upload, cleanup: async () => undefined };
   }
 
   const input = await resolveInputFile(req);
@@ -216,8 +215,7 @@ async function resolveInputFile(req: Request): Promise<{
   const body = smartReaderFileInputSchema.parse(req.body);
 
   if (req.file) {
-    const tempDirectory = path.resolve(process.cwd(), 'tmp/smartreader-internal');
-    await fs.mkdir(tempDirectory, { recursive: true });
+    const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), '5tot-smartreader-debug-'));
     const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
     const filePath = path.join(tempDirectory, `${req.requestId ?? Date.now()}-${safeName}`);
     await fs.writeFile(filePath, req.file.buffer);
@@ -227,7 +225,7 @@ async function resolveInputFile(req: Request): Promise<{
       title: body.title,
       description: body.description,
       cleanup: async () => {
-        await fs.unlink(filePath).catch(() => undefined);
+        await fs.rm(tempDirectory, { recursive: true, force: true });
       },
     };
   }
@@ -242,6 +240,38 @@ async function resolveInputFile(req: Request): Promise<{
     title: body.title,
     description: body.description,
     cleanup: async () => undefined,
+  };
+}
+
+async function prepareSmartReaderUploadInput(file: File): Promise<{
+  filePath: string;
+  cleanup: () => Promise<void>;
+}> {
+  if (file.storageType === FileStorageType.local) {
+    return {
+      filePath: path.resolve(env.UPLOAD_DIR, file.filePath),
+      cleanup: async () => undefined,
+    };
+  }
+
+  const signedUrl = await storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
+  const response = await fetch(signedUrl);
+  if (!response.ok) {
+    throw new AppError(
+      502,
+      ErrorCodes.STORAGE_ERROR,
+      `SmartReader source download failed with HTTP ${response.status}`,
+    );
+  }
+
+  const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), '5tot-smartreader-'));
+  const safeName = (file.originalName || file.filePath || file.id).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const filePath = path.join(tempDirectory, safeName);
+  await fs.writeFile(filePath, Buffer.from(await response.arrayBuffer()));
+
+  return {
+    filePath,
+    cleanup: () => fs.rm(tempDirectory, { recursive: true, force: true }),
   };
 }
 
