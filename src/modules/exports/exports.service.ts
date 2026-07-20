@@ -2,15 +2,16 @@
 import { FileStorageType, Level, ReviewTaskStatus, Role, type Prisma } from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { env } from '../../config/env';
 import { uploadConfig } from '../../config/upload';
 import { prisma } from '../../infrastructure/database/prisma';
-import { LocalStorageService } from '../../infrastructure/storage/local-storage.service';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { StorageService } from '../storage/storage.service';
 import type {
   ExportApplicationsQuery,
   ExportReviewResultsInput,
@@ -18,7 +19,7 @@ import type {
 } from './exports.validation';
 
 export class ExportsService {
-  constructor(private readonly storage = new LocalStorageService()) {}
+  constructor(private readonly storage = new StorageService()) {}
 
   async exportApplicationsJson(user: AuthenticatedUser, query: ExportApplicationsQuery) {
     const items = await this.buildApplicationRows(user, query);
@@ -96,7 +97,7 @@ export class ExportsService {
         ownerId: user.id,
         workspaceId: user.role === Role.admin ? null : user.workspaceId,
         uploadedBy: user.id,
-        storageType: FileStorageType.local,
+        storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
         filePath: stored.filePath,
         publicUrl: stored.publicUrl,
         originalName: path.basename(stored.filePath),

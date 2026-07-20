@@ -14,6 +14,11 @@ const booleanFromEnv = z
     return false;
   });
 
+const optionalUrlFromEnv = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  z.string().url().optional(),
+);
+
 const rawEnvSchema = z.object({
   NODE_ENV: nodeEnvSchema,
   PORT: z.coerce.number().int().positive().default(8080),
@@ -45,9 +50,12 @@ const rawEnvSchema = z.object({
   UPLOAD_DIR: z.string().min(1).optional(),
   MAX_FILE_SIZE_MB: z.coerce.number().int().positive().default(20),
   STORAGE_DRIVER: z.enum(['local', 'r2']).default('local'),
+  R2_BUCKET: z.string().optional(),
   R2_BUCKET_NAME: z.string().optional(),
   R2_ACCOUNT_ID: z.string().optional(),
   R2_ENDPOINT: z.string().optional(),
+  R2_REGION: z.string().min(1).default('auto'),
+  R2_PUBLIC_BASE_URL: optionalUrlFromEnv,
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
   VNPT_MODE: z.enum(['mock', 'live']).default('mock'),
@@ -128,7 +136,6 @@ const rawEnvSchema = z.object({
     if (data.STORAGE_DRIVER === 'r2') {
       return (
         !!data.R2_BUCKET_NAME &&
-        !!data.R2_ACCOUNT_ID &&
         !!data.R2_ENDPOINT &&
         !!data.R2_ACCESS_KEY_ID &&
         !!data.R2_SECRET_ACCESS_KEY
@@ -136,7 +143,7 @@ const rawEnvSchema = z.object({
     }
     return true;
   }, {
-    message: 'R2 configurations (R2_BUCKET_NAME, R2_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY) are required when STORAGE_DRIVER is set to "r2"',
+    message: 'R2 configurations (R2_BUCKET or R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY) are required when STORAGE_DRIVER is set to "r2"',
     path: ['STORAGE_DRIVER'],
   })
   .refine((data) => {
@@ -155,6 +162,7 @@ const envInput = {
   JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET ?? process.env.JWT_SECRET,
   JWT_ACCESS_EXPIRES_IN: process.env.JWT_ACCESS_EXPIRES_IN ?? process.env.JWT_EXPIRES_IN,
   BCRYPT_SALT_ROUNDS: process.env.BCRYPT_SALT_ROUNDS ?? process.env.BCRYPT_ROUNDS,
+  R2_BUCKET_NAME: process.env.R2_BUCKET_NAME ?? process.env.R2_BUCKET,
 };
 
 const parsedEnv = rawEnvSchema.safeParse(envInput);
@@ -173,10 +181,10 @@ if (!jwtAccessSecret || !jwtRefreshSecret) {
 }
 
 const vnptEnabled =
-  process.env.VNPT_ENABLED === undefined ? true : rawEnv.VNPT_ENABLED;
+  process.env.VNPT_ENABLED === undefined ? rawEnv.VNPT_MODE !== 'mock' : rawEnv.VNPT_ENABLED;
 const vnptRequireRealInPipeline =
   process.env.VNPT_REQUIRE_REAL_IN_PIPELINE === undefined
-    ? true
+    ? rawEnv.VNPT_MODE !== 'mock'
     : rawEnv.VNPT_REQUIRE_REAL_IN_PIPELINE;
 const vnptAllowMockRuntime =
   process.env.VNPT_ALLOW_MOCK_RUNTIME === undefined ? false : rawEnv.VNPT_ALLOW_MOCK_RUNTIME;
@@ -209,7 +217,11 @@ if (
   throw new Error('JWT secrets must be changed in production');
 }
 
-if (rawEnv.NODE_ENV === 'production' && !rawEnv.SMARTBOT_WEBHOOK_TOKEN) {
+if (
+  rawEnv.NODE_ENV === 'production' &&
+  rawEnv.SMARTBOT_MODE !== 'mock' &&
+  !rawEnv.SMARTBOT_WEBHOOK_TOKEN
+) {
   throw new Error('Invalid environment configuration: SMARTBOT_WEBHOOK_TOKEN is required in production');
 }
 

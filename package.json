@@ -12,6 +12,7 @@
     "format": "prettier --write .",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "seed": "tsx prisma/seed.ts",
     "backfill:evidence-knowledge": "tsx scripts/backfill-approved-evidence-precedents.ts",
@@ -19,6 +20,7 @@
     "create-admin": "tsx scripts/create-admin.ts",
     "smartreader:smoke": "tsx scripts/smoke-smartreader.ts",
     "smoke:smartbot": "tsx scripts/smoke-smartbot.ts",
+    "smoke:cloud-run": "tsx scripts/smoke-cloud-run-readiness.ts",
     "worker:tick": "tsx scripts/worker-tick.ts",
     "test": "vitest run"
   },

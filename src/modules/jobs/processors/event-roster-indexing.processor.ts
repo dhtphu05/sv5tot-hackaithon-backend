@@ -1,11 +1,13 @@
 // Owns roster indexing jobs for event registry files.
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { IndexingStatus, type IndexingJob, type Prisma } from '@prisma/client';
+import { FileStorageType, IndexingStatus, type File, type IndexingJob, type Prisma } from '@prisma/client';
 import { env } from '../../../config/env';
 import { prisma } from '../../../infrastructure/database/prisma';
 import { auditActions } from '../../../shared/constants/application';
 import { createApplicationAudit } from '../../applications/application.helpers';
+import { StorageService } from '../../storage/storage.service';
 
 export type RosterPreviewResult = {
   columns: string[];
@@ -35,6 +37,7 @@ const defaultMapping = {
   participationStatus: 'Trạng thái',
   convertedValue: 'Số ngày',
 };
+const storageService = new StorageService();
 
 export async function processEventRosterIndexingJob(
   job: IndexingJob,
@@ -56,12 +59,18 @@ export async function processEventRosterIndexingJob(
     data: { indexingStatus: IndexingStatus.ocr_processing },
   });
 
-  const preview = await extractRosterPreview({
-    filePath: path.resolve(env.UPLOAD_DIR, eventFile.file.filePath),
-    originalName: eventFile.file.originalName,
-    mimeType: eventFile.file.mimeType,
-    fallbackConvertedValue: eventFile.event.convertedValue,
-  });
+  const source = await prepareRosterPreviewSource(eventFile.file);
+  let preview: RosterPreviewResult;
+  try {
+    preview = await extractRosterPreview({
+      filePath: source.filePath,
+      originalName: eventFile.file.originalName,
+      mimeType: eventFile.file.mimeType,
+      fallbackConvertedValue: eventFile.event.convertedValue,
+    });
+  } finally {
+    await source.cleanup?.();
+  }
 
   const indexingStatus =
     preview.quality.rowCount === 0 ||
@@ -95,6 +104,30 @@ export async function processEventRosterIndexingJob(
   });
 
   return preview as Prisma.InputJsonObject;
+}
+
+async function prepareRosterPreviewSource(file: File): Promise<{
+  filePath: string;
+  cleanup?: () => Promise<void>;
+}> {
+  if (file.storageType === FileStorageType.local) {
+    return { filePath: path.resolve(env.UPLOAD_DIR, file.filePath) };
+  }
+
+  const signedUrl = await storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
+  const response = await fetch(signedUrl);
+  if (!response.ok) {
+    throw new Error(`Roster preview source download failed with HTTP ${response.status}`);
+  }
+
+  const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), '5tot-roster-'));
+  const tempPath = path.join(tempDirectory, path.basename(file.originalName || file.filePath));
+  await fs.writeFile(tempPath, Buffer.from(await response.arrayBuffer()));
+
+  return {
+    filePath: tempPath,
+    cleanup: () => fs.rm(tempDirectory, { recursive: true, force: true }),
+  };
 }
 
 async function extractRosterPreview(input: {

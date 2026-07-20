@@ -10,6 +10,11 @@ export async function searchKnowledgeBase(req: Request, res: Response): Promise<
   sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
 }
 
+export async function searchApprovedEvidenceNames(req: Request, res: Response): Promise<void> {
+  const data = await service.searchApprovedEvidenceNames(req.user!, req.query as never);
+  sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
+}
+
 export async function getKnowledgeBaseItem(req: Request, res: Response): Promise<void> {
   const data = await service.getItem(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });

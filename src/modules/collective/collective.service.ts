@@ -15,7 +15,6 @@ import {
 } from '@prisma/client';
 import { readSheet } from 'read-excel-file/node';
 import { prisma } from '../../infrastructure/database/prisma';
-import { LocalStorageService } from '../../infrastructure/storage/local-storage.service';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -30,6 +29,7 @@ import { createApplicationAudit } from '../applications/application.helpers';
 import { JobsService, runIndexingJob } from '../jobs/jobs.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from '../review/review-assignment.service';
+import { StorageService } from '../storage/storage.service';
 import { buildCollectiveMemberSummary } from './collective-member-summary';
 import { runCollectivePrecheck } from './collective-precheck.service';
 import type {
@@ -118,7 +118,7 @@ function collectiveBlockingReason(status: ReviewTaskStatus, count: number): stri
 
 export class CollectiveService {
   constructor(
-    private readonly storageService = new LocalStorageService(),
+    private readonly storageService = new StorageService(),
     private readonly jobsService = new JobsService(),
     private readonly assignmentService = new ReviewAssignmentService(),
     private readonly notificationsService = new NotificationsService(),

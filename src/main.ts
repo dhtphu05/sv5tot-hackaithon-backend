@@ -6,8 +6,8 @@ import { startJobWorkerLoop } from './modules/jobs/worker-runner';
 
 const app = createApp();
 
-const server = app.listen(env.PORT, () => {
-  logger.info({ port: env.PORT, environment: env.NODE_ENV }, '5TOT Backend API started');
+const server = app.listen(env.PORT, '0.0.0.0', () => {
+  logger.info({ port: env.PORT, host: '0.0.0.0', environment: env.NODE_ENV }, '5TOT Backend API started');
 });
 
 const jobWorker = startJobWorkerLoop({

@@ -128,7 +128,7 @@ describe('ChatbotService', () => {
       },
     );
 
-    expect(result.answer).toContain('Mình đã kiểm tra dữ liệu demo của hồ sơ cấp Trường');
+    expect(result.answer).toContain('Mình đã kiểm tra dữ liệu hồ sơ cấp Trường');
     expect(result.answer).toContain('Hệ thống chỉ hỗ trợ tiền kiểm và giải thích.');
     expect(result.answer).not.toContain('Mình chưa thể kết nối trợ lý hội thoại');
     expect(result.messages[0]).toMatchObject({
@@ -272,7 +272,7 @@ describe('ChatbotService', () => {
       target_level: 'school',
       application_status: 'prechecked',
       missing_summary: 'Thiếu minh chứng Thể lực tốt; Tình nguyện mới ghi nhận 1/2 ngày',
-      deadline_summary: 'Hạn nộp/bổ sung demo: 30/10',
+      deadline_summary: 'Hạn nộp/bổ sung: 30/10',
       next_action: 'Tìm minh chứng tình nguyện hoặc upload minh chứng thể lực',
     });
     expect(JSON.stringify(variables)).not.toContain('student@example.com');
@@ -300,7 +300,7 @@ describe('ChatbotService', () => {
       },
     );
 
-    expect(result.answer).toContain('Trong bản demo cấp Trường, hồ sơ Sinh viên 5 tốt cần đáp ứng 5 nhóm tiêu chí');
+    expect(result.answer).toContain('Ở cấp Trường, hồ sơ Sinh viên 5 tốt cần đáp ứng 5 nhóm tiêu chí');
     expect(result.answer).toContain('Hệ thống chỉ hỗ trợ tiền kiểm và giải thích.');
     expect(result.answer).not.toContain('Mình chưa thể kết nối trợ lý hội thoại ngay lúc này');
   });

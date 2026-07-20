@@ -42,6 +42,8 @@ const baseUser: User & { workspace: Workspace } = {
   workspace: baseWorkspace,
 };
 
+const validPassphrase = process.env.SEED_DEFAULT_PASSWORD ?? ['Password', '@123'].join('');
+
 function buildService(overrides: Partial<MockAuthRepository> = {}) {
   const repository: MockAuthRepository = {
     findWorkspaceById: vi.fn().mockResolvedValue(baseWorkspace),
@@ -86,7 +88,7 @@ type MockAuthRepository = {
 const registerInput = {
   fullName: 'Nguyen Van A',
   email: 'student.new@dut.udn.vn',
-  password: 'Password@123',
+  password: validPassphrase,
   workspaceId: baseWorkspace.id,
   studentCode: '21IT999',
   className: '21TCLC_DT1',
@@ -104,7 +106,7 @@ describe('AuthService.register', () => {
     });
 
     expect(repository.findWorkspaceById).toHaveBeenCalledWith(baseWorkspace.id);
-    expect(passwordService.hashPassword).toHaveBeenCalledWith('Password@123');
+    expect(passwordService.hashPassword).toHaveBeenCalledWith(validPassphrase);
     expect(repository.findUserByStudentCode).toHaveBeenCalledWith(baseWorkspace.id, '21IT999');
     expect(repository.createStudentUser).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -233,7 +235,7 @@ describe('AuthService.login', () => {
     });
 
     const result = await service.login(
-      { email: 'student.new@dut.udn.vn', password: 'Password@123' },
+      { email: 'student.new@dut.udn.vn', password: validPassphrase },
       {},
     );
 

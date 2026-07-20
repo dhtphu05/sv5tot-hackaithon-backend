@@ -11,6 +11,13 @@ export const knowledgeBaseSearchQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
+export const approvedEvidenceNamesQuerySchema = z.object({
+  q: z.string().trim().optional(),
+  criterion: z.nativeEnum(Criterion).optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
 export const createFromReviewedEvidenceSchema = z.object({
   evidenceId: z.string().uuid(),
   decision: z.enum(['accepted', 'rejected', 'needs_supplement', 'resolution_needed', 'reference_only']),
@@ -38,5 +45,6 @@ export const updateKnowledgeBaseItemSchema = z.object({
 });
 
 export type KnowledgeBaseSearchQuery = z.infer<typeof knowledgeBaseSearchQuerySchema>;
+export type ApprovedEvidenceNamesQuery = z.infer<typeof approvedEvidenceNamesQuerySchema>;
 export type CreateFromReviewedEvidenceInput = z.infer<typeof createFromReviewedEvidenceSchema>;
 export type UpdateKnowledgeBaseItemInput = z.infer<typeof updateKnowledgeBaseItemSchema>;

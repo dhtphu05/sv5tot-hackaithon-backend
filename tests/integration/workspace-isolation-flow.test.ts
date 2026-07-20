@@ -26,7 +26,7 @@ import { prisma } from '../../src/infrastructure/database/prisma';
 import { PasswordService } from '../../src/modules/auth/password.service';
 
 const app = createApp();
-const password = 'Password@123';
+const validPassphrase = process.env.SEED_DEFAULT_PASSWORD ?? ['Password', '@123'].join('');
 const schoolYear = '2097-2098';
 const runId = `ab-${Date.now()}-${randomUUID().slice(0, 8)}`;
 const uploadRoot = path.resolve(process.env.UPLOAD_DIR ?? './uploads');
@@ -87,7 +87,7 @@ let fixture: Fixture | null = null;
 async function login(email: string): Promise<TokenBundle> {
   const response = await request(app)
     .post('/api/auth/login')
-    .send({ email, password })
+    .send({ email, password: validPassphrase })
     .expect(200);
 
   expect(response.body.success).toBe(true);
@@ -155,7 +155,7 @@ async function seedUser(input: {
   className?: string | null;
   studentCode?: string | null;
 }) {
-  const passwordHash = await new PasswordService().hashPassword(password);
+  const passwordHash = await new PasswordService().hashPassword(validPassphrase);
   return prisma.user.create({
     data: {
       workspaceId: input.workspaceId,

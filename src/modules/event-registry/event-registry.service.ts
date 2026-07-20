@@ -7,8 +7,8 @@ import {
   Role,
   type EventRegistry,
 } from '@prisma/client';
+import { env } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
-import { LocalStorageService } from '../../infrastructure/storage/local-storage.service';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -19,6 +19,7 @@ import {
 } from '../applications/application.helpers';
 import { runIndexingJob } from '../jobs/jobs.service';
 import type { RosterPreviewResult } from '../jobs/processors/event-roster-indexing.processor';
+import { StorageService } from '../storage/storage.service';
 import {
   applyColumnMapping,
   type NormalizedParticipantInput,
@@ -46,7 +47,7 @@ type UploadedRosterFile = Express.Multer.File;
 export class EventRegistryService {
   constructor(
     private readonly repository = new EventRegistryRepository(),
-    private readonly storageService = new LocalStorageService(),
+    private readonly storageService = new StorageService(),
     private readonly evidenceMatchingService = new EvidenceMatchingService(),
   ) {}
 
@@ -225,7 +226,7 @@ export class EventRegistryService {
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
-          storageType: FileStorageType.local,
+          storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
           filePath: storedFile.filePath,
           publicUrl: storedFile.publicUrl,
           originalName: file.originalname,

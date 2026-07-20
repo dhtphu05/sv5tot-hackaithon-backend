@@ -1,5 +1,7 @@
 import { env } from '../../config/env';
-import type { StorageAdapter, UploadObjectParams } from './storage.types';
+import path from 'node:path';
+import type { SaveFileParams, StorageAdapter, StoredObject, UploadObjectParams } from './storage.types';
+import { sanitizeFileName } from './storage.types';
 import { R2StorageAdapter } from './adapters/r2-storage.adapter';
 import { LocalStorageAdapter } from './adapters/local-storage.adapter';
 
@@ -21,6 +23,33 @@ export class StorageService implements StorageAdapter {
 
   async uploadObject(params: UploadObjectParams): Promise<void> {
     return this.defaultAdapter.uploadObject(params);
+  }
+
+  async saveFile(input: SaveFileParams): Promise<StoredObject> {
+    const directory =
+      input.directory ??
+      (input.applicationId && input.evidenceId
+        ? path.posix.join('evidences', input.applicationId, input.evidenceId)
+        : 'misc');
+    const safeFileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${sanitizeFileName(
+      input.originalName,
+    )}`;
+    const storageDirectory = normalizeStoragePath(directory);
+    const key = normalizeStoragePath(path.posix.join(storageDirectory, safeFileName));
+
+    await this.uploadObject({
+      key,
+      buffer: input.buffer,
+      contentType: input.mimeType,
+    });
+
+    return {
+      key,
+      filePath: key,
+      size: input.buffer.byteLength,
+      mimeType: input.mimeType,
+      publicUrl: this.getPublicUrl(key),
+    };
   }
 
   /**
@@ -56,4 +85,16 @@ export class StorageService implements StorageAdapter {
       return this.defaultAdapter.getSignedReadUrl(key, expiresInSeconds);
     }
   }
+
+  private getPublicUrl(key: string): string | null {
+    if (env.STORAGE_DRIVER !== 'r2' || !env.R2_PUBLIC_BASE_URL) {
+      return null;
+    }
+
+    return `${env.R2_PUBLIC_BASE_URL.replace(/\/$/, '')}/${key}`;
+  }
+}
+
+function normalizeStoragePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/').replace(/^\/+/, '');
 }

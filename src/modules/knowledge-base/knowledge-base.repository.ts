@@ -1,9 +1,12 @@
 // Owns reviewed evidence knowledge, reusable criteria references, and search.
-import type { Prisma, PrismaClient } from '@prisma/client';
+import { KnowledgeDecision, type Criterion, type Prisma, type PrismaClient } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
-import type { KnowledgeBaseSearchQuery } from './knowledge-base.validation';
+import type {
+  ApprovedEvidenceNamesQuery,
+  KnowledgeBaseSearchQuery,
+} from './knowledge-base.validation';
 
 export class KnowledgeBaseRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
@@ -52,5 +55,56 @@ export class KnowledgeBaseRepository {
     const paginatedItems = items.slice(skip, skip + query.limit);
 
     return { items: paginatedItems, total };
+  }
+
+  async searchApprovedEvidenceNames(
+    query: ApprovedEvidenceNamesQuery,
+    allowedCriteria?: Criterion[],
+  ) {
+    if (allowedCriteria && allowedCriteria.length === 0) {
+      return { items: [], total: 0 };
+    }
+    if (query.criterion && allowedCriteria && !allowedCriteria.includes(query.criterion)) {
+      return { items: [], total: 0 };
+    }
+
+    const where: Prisma.KnowledgeBaseItemWhereInput = {
+      decision: KnowledgeDecision.accepted,
+      ...(query.criterion
+        ? { criterion: query.criterion }
+        : allowedCriteria
+          ? { criterion: { in: allowedCriteria } }
+          : {}),
+      ...(query.q
+        ? {
+            OR: [
+              { evidenceName: { contains: query.q, mode: 'insensitive' } },
+              { eventName: { contains: query.q, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+    const skip = (query.page - 1) * query.limit;
+
+    const [items, total] = await this.db.$transaction([
+      this.db.knowledgeBaseItem.findMany({
+        where,
+        select: {
+          id: true,
+          evidenceName: true,
+          eventName: true,
+          criterion: true,
+          level: true,
+          usageCount: true,
+          updatedAt: true,
+        },
+        orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }],
+        skip,
+        take: query.limit,
+      }),
+      this.db.knowledgeBaseItem.count({ where }),
+    ]);
+
+    return { items, total };
   }
 }

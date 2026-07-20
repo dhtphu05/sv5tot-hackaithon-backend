@@ -7,6 +7,23 @@ export interface UploadObjectParams {
   metadata?: Record<string, string>;
 }
 
+export interface SaveFileParams {
+  buffer: Buffer;
+  originalName: string;
+  mimeType?: string;
+  applicationId?: string;
+  evidenceId?: string;
+  directory?: string;
+}
+
+export interface StoredObject {
+  key: string;
+  filePath: string;
+  size: number;
+  mimeType?: string;
+  publicUrl: string | null;
+}
+
 export interface StorageAdapter {
   uploadObject(params: UploadObjectParams): Promise<void>;
   deleteObject(key: string): Promise<void>;
