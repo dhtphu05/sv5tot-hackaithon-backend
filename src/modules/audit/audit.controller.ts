@@ -8,6 +8,6 @@ const service = new AuditService();
 
 export async function listAuditLogs(req: Request, res: Response): Promise<void> {
   const query = listAuditLogsQuerySchema.parse(req.query);
-  const data = await service.listLogs(query);
+  const data = await service.listLogs({ ...query, user: req.user! });
   sendSuccess(res, data, { requestId: req.requestId, count: data.length });
 }

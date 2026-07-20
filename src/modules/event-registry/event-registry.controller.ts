@@ -25,6 +25,11 @@ export async function getEvent(req: Request, res: Response): Promise<void> {
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function getStaffEventWorkspace(req: Request, res: Response): Promise<void> {
+  const data = await service.getStaffWorkspace(req.user!, String(req.params.eventId));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function updateEvent(req: Request, res: Response): Promise<void> {
   const data = await service.update(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });

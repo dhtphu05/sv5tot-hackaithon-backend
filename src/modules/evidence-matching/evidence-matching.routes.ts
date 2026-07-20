@@ -4,10 +4,26 @@ import { requireAuth } from '../../middlewares/auth.middleware';
 import { requireRole } from '../../middlewares/require-role.middleware';
 import { validate } from '../../middlewares/validate.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
-import { importEvidenceMatching, searchEvidenceMatching } from './evidence-matching.controller';
-import { evidenceMatchingSearchQuerySchema, importEvidenceMatchingSchema } from './evidence-matching.validation';
+import {
+  importEvidenceMatching,
+  listOfficialEvidenceLibrary,
+  searchEvidenceMatching,
+} from './evidence-matching.controller';
+import {
+  evidenceMatchingLibraryQuerySchema,
+  evidenceMatchingSearchQuerySchema,
+  importEvidenceMatchingSchema,
+} from './evidence-matching.validation';
 
 export const evidenceMatchingRouter = Router();
+
+evidenceMatchingRouter.get(
+  '/library',
+  requireAuth,
+  requireRole(Role.student),
+  validate({ query: evidenceMatchingLibraryQuerySchema }),
+  asyncHandler(listOfficialEvidenceLibrary),
+);
 
 evidenceMatchingRouter.get(
   '/search',

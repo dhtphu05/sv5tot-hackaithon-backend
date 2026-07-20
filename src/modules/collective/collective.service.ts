@@ -21,6 +21,11 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { normalizeSchoolYear } from '../../shared/utils/school-year';
+import {
+  assertSameWorkspace,
+  workspaceFilterFor,
+  workspaceIdForWrite,
+} from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { JobsService, runIndexingJob } from '../jobs/jobs.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -142,6 +147,7 @@ export class CollectiveService {
   async start(user: AuthenticatedUser, input: StartCollectiveProfileInput) {
     const schoolYear = normalizeSchoolYear(input.schoolYear);
     const className = this.resolveClassName(user, input.className);
+    const workspaceId = workspaceIdForWrite(user);
     const existing = await prisma.collectiveProfile.findUnique({
       where: {
         representativeId_schoolYear_className: {
@@ -158,6 +164,7 @@ export class CollectiveService {
       const created = await tx.collectiveProfile.create({
         data: {
           representativeId: user.id,
+          workspaceId,
           className,
           schoolYear,
           targetLevel: input.targetLevel,
@@ -389,6 +396,7 @@ export class CollectiveService {
       const sourceFile = await tx.file.create({
         data: {
           ownerId: user.id,
+          workspaceId: profile.workspaceId,
           storageType: FileStorageType.local,
           filePath: storedRoster.filePath,
           publicUrl: storedRoster.publicUrl,
@@ -523,6 +531,7 @@ export class CollectiveService {
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
+          workspaceId: profile.workspaceId,
           storageType: FileStorageType.local,
           filePath: stored.filePath,
           publicUrl: stored.publicUrl,
@@ -544,7 +553,11 @@ export class CollectiveService {
         },
       });
       const job = await tx.indexingJob.create({
-        data: { jobType: JobType.evidence_ocr, targetId: evidenceId },
+        data: {
+          jobType: JobType.evidence_ocr,
+          workspaceId: profile.workspaceId,
+          targetId: evidenceId,
+        },
       });
       await this.audit(tx, user, profile.id, auditActions.COLLECTIVE_EVIDENCE_FILE_UPLOADED, {
         evidenceId,
@@ -577,7 +590,13 @@ export class CollectiveService {
     if (link.evidence.indexingStatus === IndexingStatus.indexed && !input.force) {
       return { job: null, evidence: link.evidence };
     }
-    const job = (await this.jobsService.enqueueIndexingJob(evidenceId, JobType.evidence_ocr)).job;
+    const job = (
+      await this.jobsService.enqueueIndexingJob(
+        evidenceId,
+        JobType.evidence_ocr,
+        profile.workspaceId,
+      )
+    ).job;
     await prisma.evidence.update({
       where: { id: evidenceId },
       data: { indexingStatus: IndexingStatus.pending_indexing },
@@ -762,6 +781,7 @@ export class CollectiveService {
         (await tx.reviewTask.create({
           data: {
             collectiveProfileId: profile.id,
+            workspaceId: profile.workspaceId,
             criterion: Criterion.collective,
             assignedOfficerId: officer?.id,
           },
@@ -802,6 +822,7 @@ export class CollectiveService {
         await this.notificationsService.create(
           {
             userId: officer.id,
+            workspaceId: profile.workspaceId,
             collectiveProfileId: profile.id,
             type: NotificationType.review_updated,
             title: 'Collective review task assigned',
@@ -815,8 +836,9 @@ export class CollectiveService {
     return { profile: await this.getDetail(user, profile.id), reviewTask };
   }
 
-  async listForManager(query: ListManagerCollectivesQuery) {
+  async listForManager(user: AuthenticatedUser, query: ListManagerCollectivesQuery) {
     const where: Prisma.CollectiveProfileWhereInput = {
+      ...workspaceFilterFor(user),
       ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
       ...(query.targetLevel ? { targetLevel: query.targetLevel } : {}),
       ...(query.status ? { status: query.status } : {}),
@@ -954,6 +976,7 @@ export class CollectiveService {
         await this.notificationsService.create(
           {
             userId: aggregation.profile.representativeId,
+            workspaceId: aggregation.profile.workspaceId,
             collectiveProfileId: profileId,
             type: NotificationType.result_available,
             title: 'Collective result available',
@@ -1008,6 +1031,7 @@ export class CollectiveService {
   }
 
   private assertCanView(user: AuthenticatedUser, profile: CollectiveProfile): void {
+    assertSameWorkspace(user, profile, 'Collective profile not found');
     if (profile.representativeId === user.id) return;
     const privilegedRoles: Role[] = [Role.manager, Role.committee, Role.admin, Role.officer];
     if (privilegedRoles.includes(user.role)) return;
@@ -1015,6 +1039,7 @@ export class CollectiveService {
   }
 
   private assertOwner(user: AuthenticatedUser, profile: CollectiveProfile): void {
+    assertSameWorkspace(user, profile, 'Collective profile not found');
     if (profile.representativeId === user.id || user.role === Role.admin) return;
     throw new AppError(
       403,

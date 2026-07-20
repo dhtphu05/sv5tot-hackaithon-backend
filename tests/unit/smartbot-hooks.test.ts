@@ -2,7 +2,8 @@ import { Level } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
-  application: { findUnique: vi.fn() },
+  application: { findFirst: vi.fn() },
+  user: { findUnique: vi.fn() },
 }));
 
 vi.mock('../../src/infrastructure/database/prisma', () => ({
@@ -17,7 +18,10 @@ describe('SmartbotHooksService', () => {
   });
 
   it('returns string-only Smartbot set_variables without raw student PII', async () => {
-    prismaMock.application.findUnique.mockResolvedValue({
+    prismaMock.user.findUnique.mockResolvedValue({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+    });
+    prismaMock.application.findFirst.mockResolvedValue({
       id: '9a493741-8f06-43a2-8625-90c9a41f9df3',
       status: 'under_review',
       targetLevel: Level.city,
@@ -28,6 +32,7 @@ describe('SmartbotHooksService', () => {
     const service = new SmartbotHooksService();
 
     const result = await service.applicationStatus({
+      user_id: '2e2031e8-bd75-4d93-9b7a-78a8f31f4e22',
       application_id: '9a493741-8f06-43a2-8625-90c9a41f9df3',
     });
 

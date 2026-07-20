@@ -164,6 +164,7 @@ export class ChatbotService {
       ? await callChatbotTool(
           {
             userId: user.id,
+            workspaceId: user.workspaceId,
             role: user.role as ChatbotToolRole,
             studentCode: user.studentCode ?? undefined,
             sessionId,
@@ -200,6 +201,7 @@ export class ChatbotService {
     await this.conversationRepository.ensureSession({
       sessionId,
       userId: user.id,
+      workspaceId: user.workspaceId,
       role: user.role,
       applicationId: input.applicationId,
       reviewTaskId: input.pageContext?.taskId,
@@ -275,6 +277,7 @@ export class ChatbotService {
     const savedActions = await this.actionRepository.saveActions({
       sessionId: prepared.sessionId,
       userId: prepared.user.id,
+      workspaceId: prepared.user.workspaceId,
       actions: unsavedResponse.actions,
     });
     const response = replaceEmbeddedActionReferences(
@@ -286,6 +289,7 @@ export class ChatbotService {
       await this.handoffRepository.createHandoff({
         sessionId: prepared.sessionId,
         userId: prepared.user.id,
+        workspaceId: prepared.user.workspaceId,
         applicationId: prepared.input.applicationId,
         reviewTaskId: prepared.input.pageContext?.taskId,
         resolutionCaseId: prepared.input.pageContext?.resolutionCaseId,

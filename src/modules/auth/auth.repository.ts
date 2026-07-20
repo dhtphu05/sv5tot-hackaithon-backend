@@ -4,19 +4,49 @@ import { prisma } from '../../infrastructure/database/prisma';
 export class AuthRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
 
+  private readonly userWithWorkspaceInclude = {
+    workspace: {
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        shortName: true,
+      },
+    },
+  } as const;
+
   findUserByEmail(email: string) {
-    return this.db.user.findUnique({ where: { email } });
+    return this.db.user.findUnique({
+      where: { email },
+      include: this.userWithWorkspaceInclude,
+    });
   }
 
-  findUserByStudentCode(studentCode: string) {
-    return this.db.user.findUnique({ where: { studentCode } });
+  findUserByStudentCode(workspaceId: string, studentCode: string) {
+    return this.db.user.findUnique({
+      where: {
+        workspaceId_studentCode: {
+          workspaceId,
+          studentCode,
+        },
+      },
+      include: this.userWithWorkspaceInclude,
+    });
   }
 
   findUserById(id: string) {
-    return this.db.user.findUnique({ where: { id } });
+    return this.db.user.findUnique({
+      where: { id },
+      include: this.userWithWorkspaceInclude,
+    });
+  }
+
+  findWorkspaceById(id: string) {
+    return this.db.workspace.findUnique({ where: { id } });
   }
 
   createStudentUser(input: {
+    workspaceId: string;
     fullName: string;
     email: string;
     passwordHash: string;
@@ -31,6 +61,7 @@ export class AuthRepository {
         ...input,
         role: 'student',
       },
+      include: this.userWithWorkspaceInclude,
     });
   }
 

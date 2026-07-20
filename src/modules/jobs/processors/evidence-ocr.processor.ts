@@ -74,9 +74,14 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
   });
 
   const actor = evidence.application?.student ?? evidence.collectiveProfile?.representative;
+  const workspaceId = evidence.application?.workspaceId ?? evidence.collectiveProfile?.workspaceId;
+  if (!workspaceId) {
+    throw new Error('Evidence workspace not found for OCR job');
+  }
 
   const smartreaderJob = await prisma.smartReaderJob.create({
     data: {
+      workspaceId,
       jobType: SmartReaderJobType.evidence_ocr,
       fileId: primaryFile.id,
       evidenceId: evidence.id,
@@ -141,7 +146,7 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       data: { indexingStatus: IndexingStatus.checking_registry },
     });
 
-    const matched = await matchEvidenceRegistry(evidence.criterion, normalizedFields);
+    const matched = await matchEvidenceRegistry(evidence.criterion, normalizedFields, workspaceId);
     const semanticWarningCodes = [
       ...(hasEventNameMismatchWithUserInput({
         evidenceName: evidence.evidenceName,

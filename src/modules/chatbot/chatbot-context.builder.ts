@@ -17,6 +17,7 @@ export async function buildSafeChatbotContext(input: {
         where: { id: input.applicationId },
         select: {
           id: true,
+          workspaceId: true,
           studentId: true,
           targetLevel: true,
           status: true,
@@ -35,6 +36,9 @@ export async function buildSafeChatbotContext(input: {
 
   if (application && input.user.role === Role.student && application.studentId !== input.user.id) {
     throw new AppError(403, ErrorCodes.APPLICATION_OWNER_REQUIRED, 'You can only use your own application context');
+  }
+  if (application && input.user.role !== Role.admin && application.workspaceId !== input.user.workspaceId) {
+    throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
   }
 
   const taskSummary = input.pageContext?.taskId
@@ -110,6 +114,7 @@ async function findCurrentStudentApplication(user: AuthenticatedUser) {
     orderBy: { updatedAt: 'desc' },
     select: {
       id: true,
+      workspaceId: true,
       studentId: true,
       targetLevel: true,
       status: true,
@@ -129,10 +134,14 @@ async function buildTaskSummary(user: AuthenticatedUser, taskId: string): Promis
       criterion: true,
       status: true,
       assignedOfficerId: true,
+      workspaceId: true,
       application: { select: { student: { select: { faculty: true } } } },
     },
   });
   if (!task) return undefined;
+  if (user.role !== Role.admin && task.workspaceId !== user.workspaceId) {
+    return undefined;
+  }
   if (user.role === Role.officer && task.assignedOfficerId && task.assignedOfficerId !== user.id) {
     return undefined;
   }

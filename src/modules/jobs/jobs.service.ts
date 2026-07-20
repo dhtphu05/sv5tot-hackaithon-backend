@@ -5,6 +5,7 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { mapEvidenceUxStatus } from '../evidences/evidence-ux-status.mapper';
 import { JobsRepository } from './jobs.repository';
@@ -16,13 +17,13 @@ import { processEvidenceOcrJob } from './processors/evidence-ocr.processor';
 export class JobsService {
   constructor(private readonly jobsRepository = new JobsRepository()) {}
 
-  async enqueueIndexingJob(targetId: string, jobType: JobType) {
-    const existing = await this.jobsRepository.getActiveJobForTarget(targetId, jobType);
+  async enqueueIndexingJob(targetId: string, jobType: JobType, workspaceId?: string | null) {
+    const existing = await this.jobsRepository.getActiveJobForTarget(targetId, jobType, workspaceId);
     if (existing) {
       return { job: existing, reused: true };
     }
 
-    const job = await this.jobsRepository.enqueueIndexingJob(targetId, jobType);
+    const job = await this.jobsRepository.enqueueIndexingJob(targetId, jobType, workspaceId);
     return { job, reused: false };
   }
 
@@ -38,8 +39,9 @@ export class JobsService {
 
   async runJob(user: AuthenticatedUser, jobId: string) {
     const job = await this.getRequiredJob(jobId);
+    await this.assertCanViewJob(user, job);
 
-    if (user.role !== Role.manager && user.role !== Role.admin && user.role !== Role.student) {
+    if (user.role !== Role.manager && user.role !== Role.admin) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Role cannot run this job');
     }
 
@@ -83,6 +85,7 @@ export class JobsService {
         await createApplicationAudit(tx, {
           actorId: user.id,
           actorRole: user.role,
+          workspaceId: evidence.application?.workspaceId ?? evidence.collectiveProfile?.workspaceId,
           action: auditActions.EVIDENCE_INDEXING_RETRIED,
           targetType: 'indexing_job',
           targetId: updated.id,
@@ -122,12 +125,7 @@ export class JobsService {
   }
 
   private async assertCanViewJob(user: AuthenticatedUser, job: IndexingJob): Promise<void> {
-    if (
-      user.role === Role.manager ||
-      user.role === Role.admin ||
-      user.role === Role.officer ||
-      user.role === Role.committee
-    ) {
+    if (user.role === Role.admin) {
       return;
     }
 
@@ -137,8 +135,19 @@ export class JobsService {
     });
 
     const decisionImport = await prisma.decisionImport.findUnique({ where: { id: job.targetId } });
-    if (decisionImport) {
+    const targetWorkspaceId = resolveTargetWorkspaceId(evidence, decisionImport);
+    assertJobWorkspaceMatchesTarget(job, targetWorkspaceId);
+    const resolvedWorkspaceId = targetWorkspaceId ?? job.workspaceId ?? null;
+    if (
+      user.role === Role.manager ||
+      user.role === Role.officer ||
+      user.role === Role.committee
+    ) {
+      assertSameWorkspace(user, { workspaceId: resolvedWorkspaceId }, 'Job not found');
       return;
+    }
+    if (decisionImport) {
+      throw new AppError(404, ErrorCodes.JOB_NOT_FOUND, 'Job not found');
     }
 
     const ownerId =
@@ -146,6 +155,7 @@ export class JobsService {
     if (!evidence || ownerId !== user.id) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Job belongs to another user');
     }
+    assertSameWorkspace(user, { workspaceId: resolvedWorkspaceId }, 'Job not found');
   }
 
   private async toJobDto(job: IndexingJob) {
@@ -197,6 +207,16 @@ export async function runIndexingJob(jobId: string) {
     throw new AppError(404, ErrorCodes.JOB_NOT_FOUND, 'Job not found');
   }
 
+  const evidence = await prisma.evidence.findUnique({
+    where: { id: job.targetId },
+    include: {
+      application: { include: { student: true } },
+      collectiveProfile: { include: { representative: true } },
+    },
+  });
+  const decisionImport = await prisma.decisionImport.findUnique({ where: { id: job.targetId } });
+  assertJobWorkspaceMatchesTarget(job, resolveTargetWorkspaceId(evidence, decisionImport));
+
   if (job.status === JobStatus.processing) {
     throw new AppError(409, ErrorCodes.JOB_ALREADY_RUNNING, 'Job is already running');
   }
@@ -210,19 +230,12 @@ export async function runIndexingJob(jobId: string) {
     },
   });
 
-  const evidence = await prisma.evidence.findUnique({
-    where: { id: job.targetId },
-    include: {
-      application: { include: { student: true } },
-      collectiveProfile: { include: { representative: true } },
-    },
-  });
-
   if (evidence) {
     const actor = evidence.application?.student ?? evidence.collectiveProfile?.representative;
     await createApplicationAudit(prisma, {
       actorId: actor?.id,
       actorRole: actor?.role,
+      workspaceId: evidence.application?.workspaceId ?? evidence.collectiveProfile?.workspaceId,
       action: auditActions.OCR_JOB_PROCESSING,
       targetType: 'indexing_job',
       targetId: processingJob.id,
@@ -237,6 +250,7 @@ export async function runIndexingJob(jobId: string) {
     await createApplicationAudit(prisma, {
       actorId: actor?.id,
       actorRole: actor?.role,
+      workspaceId: evidence.application?.workspaceId ?? evidence.collectiveProfile?.workspaceId,
       action: auditActions.EVIDENCE_INDEXING_STARTED,
       targetType: 'evidence',
       targetId: evidence.id,
@@ -270,6 +284,7 @@ export async function runIndexingJob(jobId: string) {
       await createApplicationAudit(prisma, {
         actorId: actor?.id,
         actorRole: actor?.role,
+        workspaceId: evidence.application?.workspaceId ?? evidence.collectiveProfile?.workspaceId,
         action: auditActions.EVIDENCE_INDEXING_COMPLETED,
         targetType: 'evidence',
         targetId: evidence.id,
@@ -318,6 +333,7 @@ export async function runIndexingJob(jobId: string) {
       await createApplicationAudit(prisma, {
         actorId: actor?.id,
         actorRole: actor?.role,
+        workspaceId: evidence.application?.workspaceId ?? evidence.collectiveProfile?.workspaceId,
         action: auditActions.EVIDENCE_INDEXING_FAILED,
         targetType: 'evidence',
         targetId: evidence.id,
@@ -358,5 +374,31 @@ export async function runIndexingJob(jobId: string) {
     }
 
     return failed;
+  }
+}
+
+function resolveTargetWorkspaceId(
+  evidence:
+    | {
+        application?: { workspaceId: string } | null;
+        collectiveProfile?: { workspaceId: string } | null;
+      }
+    | null,
+  decisionImport: { workspaceId: string } | null,
+) {
+  return (
+    evidence?.application?.workspaceId ??
+    evidence?.collectiveProfile?.workspaceId ??
+    decisionImport?.workspaceId ??
+    null
+  );
+}
+
+function assertJobWorkspaceMatchesTarget(
+  job: Pick<IndexingJob, 'workspaceId'>,
+  targetWorkspaceId: string | null,
+) {
+  if (job.workspaceId && targetWorkspaceId && job.workspaceId !== targetWorkspaceId) {
+    throw new AppError(404, ErrorCodes.JOB_NOT_FOUND, 'Job not found');
   }
 }

@@ -1,9 +1,15 @@
 import { z } from 'zod';
 
 export const safeIdSchema = z.string().uuid().optional();
+const webhookUserContextSchema = {
+  userId: safeIdSchema,
+  user_id: safeIdSchema,
+  sender_id: z.string().trim().max(120).optional(),
+};
 
 export const applicationToolSchema = z
   .object({
+    ...webhookUserContextSchema,
     applicationId: safeIdSchema,
     application_id: safeIdSchema,
   })
@@ -11,6 +17,7 @@ export const applicationToolSchema = z
 
 export const evidenceToolSchema = z
   .object({
+    ...webhookUserContextSchema,
     evidenceId: safeIdSchema,
     evidence_id: safeIdSchema,
   })
@@ -18,6 +25,7 @@ export const evidenceToolSchema = z
 
 export const eventSearchToolSchema = z
   .object({
+    ...webhookUserContextSchema,
     query: z.string().trim().max(200).optional(),
     criterion: z.string().trim().max(40).optional(),
   })
@@ -25,6 +33,7 @@ export const eventSearchToolSchema = z
 
 export const reviewerDraftToolSchema = z
   .object({
+    ...webhookUserContextSchema,
     taskId: safeIdSchema,
     task_id: safeIdSchema,
     reason: z.string().trim().max(1000).optional(),

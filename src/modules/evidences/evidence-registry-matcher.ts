@@ -12,6 +12,7 @@ export type EvidenceRegistryMatch = {
 export async function matchEvidenceRegistry(
   criterion: Criterion,
   fields: EvidenceExtractedFields,
+  workspaceId: string,
 ): Promise<EvidenceRegistryMatch> {
   if (fields.document_type === 'transcript') {
     return { eventId: null, participantId: null, warnings: [] };
@@ -21,6 +22,7 @@ export async function matchEvidenceRegistry(
   const event = eventName
     ? await prisma.eventRegistry.findFirst({
         where: {
+          workspaceId,
           criterion,
           eventName: { contains: eventName.slice(0, 80), mode: 'insensitive' },
         },

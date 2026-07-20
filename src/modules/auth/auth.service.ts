@@ -15,13 +15,34 @@ export class AuthService {
   ) {}
 
   async register(input: RegisterInput, context: { userAgent?: string; ipAddress?: string }) {
+    const workspace = await this.authRepository.findWorkspaceById(input.workspaceId);
+
+    if (!workspace) {
+      throw new AppError(404, ErrorCodes.WORKSPACE_NOT_FOUND, 'Workspace not found');
+    }
+
+    if (!workspace.isActive) {
+      throw new AppError(403, ErrorCodes.WORKSPACE_INACTIVE, 'Workspace is inactive');
+    }
+
+    if (!workspace.registrationEnabled) {
+      throw new AppError(
+        403,
+        ErrorCodes.WORKSPACE_REGISTRATION_CLOSED,
+        'Workspace registration is closed',
+      );
+    }
+
     const existingEmail = await this.authRepository.findUserByEmail(input.email);
 
     if (existingEmail) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Email is already registered');
     }
 
-    const existingStudentCode = await this.authRepository.findUserByStudentCode(input.studentCode);
+    const existingStudentCode = await this.authRepository.findUserByStudentCode(
+      input.workspaceId,
+      input.studentCode,
+    );
 
     if (existingStudentCode) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Student code is already registered');
@@ -29,6 +50,7 @@ export class AuthService {
 
     const passwordHash = await this.passwordService.hashPassword(input.password);
     const user = await this.authRepository.createStudentUser({
+      workspaceId: input.workspaceId,
       fullName: input.fullName,
       email: input.email,
       passwordHash,

@@ -43,6 +43,7 @@ export async function processDecisionRosterOcrJob(job: IndexingJob): Promise<Pri
 
   const smartreaderJob = await prisma.smartReaderJob.create({
     data: {
+      workspaceId: decisionImport.workspaceId,
       jobType: SmartReaderJobType.decision_roster_ocr,
       fileId: decisionImport.sourceFileId,
       decisionImportId: decisionImport.id,

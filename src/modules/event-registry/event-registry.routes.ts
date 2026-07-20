@@ -11,6 +11,7 @@ import {
   createEvent,
   deleteEvent,
   getEvent,
+  getStaffEventWorkspace,
   importEventAsEvidence,
   importEventToApplication,
   importParticipants,
@@ -71,6 +72,12 @@ eventRegistryRouter.post(
   requireRole(Role.officer, Role.manager, Role.admin),
   validate({ body: createEventSchema }),
   asyncHandler(createEvent),
+);
+eventRegistryRouter.get(
+  '/:eventId/staff-workspace',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  asyncHandler(getStaffEventWorkspace),
 );
 eventRegistryRouter.get(
   '/:id',

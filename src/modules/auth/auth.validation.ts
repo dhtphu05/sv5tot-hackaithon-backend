@@ -7,6 +7,7 @@ export const registerSchema = z.object({
     .email()
     .transform((value) => value.toLowerCase()),
   password: z.string().min(8).max(128),
+  workspaceId: z.string().uuid(),
   studentCode: z
     .string()
     .trim()

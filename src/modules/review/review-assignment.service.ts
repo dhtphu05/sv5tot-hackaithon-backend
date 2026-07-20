@@ -1,5 +1,6 @@
 import { Criterion, Role, ReviewTaskStatus, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
+import { facultyMatches } from '../../shared/utils/faculty';
 
 const activeTaskStatuses = [
   ReviewTaskStatus.waiting,
@@ -35,7 +36,7 @@ export class ReviewAssignmentService {
       if (!item.facultyScope) {
         return true;
       }
-      return input.faculty ? item.facultyScope === input.faculty : false;
+      return facultyMatches(item.facultyScope, input.faculty);
     });
 
     const eligible = scopedEligible.length > 0 ? scopedEligible : specializations;
@@ -52,8 +53,8 @@ export class ReviewAssignmentService {
     );
 
     const sorted = [...filtered].sort((a, b) => {
-      const aFacultyRank = a.facultyScope === input.faculty ? 0 : 1;
-      const bFacultyRank = b.facultyScope === input.faculty ? 0 : 1;
+      const aFacultyRank = facultyMatches(a.facultyScope, input.faculty) ? 0 : 1;
+      const bFacultyRank = facultyMatches(b.facultyScope, input.faculty) ? 0 : 1;
       if (aFacultyRank !== bFacultyRank) {
         return aFacultyRank - bFacultyRank;
       }

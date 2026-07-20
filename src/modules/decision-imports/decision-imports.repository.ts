@@ -1,5 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
+import type { AuthenticatedUser } from '../../shared/types/auth';
+import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import type { ListDecisionImportsQuery } from './decision-imports.validation';
 
 export const decisionImportInclude = {
@@ -16,8 +18,9 @@ export class DecisionImportsRepository {
     return this.db.decisionImport.findUnique({ where: { id }, include: decisionImportInclude });
   }
 
-  async list(query: ListDecisionImportsQuery) {
+  async list(user: AuthenticatedUser, query: ListDecisionImportsQuery) {
     const where: Prisma.DecisionImportWhereInput = {
+      ...workspaceFilterFor(user),
       ...(query.status ? { status: query.status as never } : {}),
       ...(query.q
         ? {

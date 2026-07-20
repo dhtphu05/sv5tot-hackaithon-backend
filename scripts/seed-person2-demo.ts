@@ -19,9 +19,13 @@ async function main() {
   if (!creator) {
     throw new Error('No active manager/admin/committee/officer user found. Run the main seed first.');
   }
+  const workspace =
+    (creator.workspaceId ? await prisma.workspace.findUnique({ where: { id: creator.workspaceId } }) : null) ??
+    (await prisma.workspace.findUniqueOrThrow({ where: { code: 'DHBK-DHDN' } }));
 
   const existingEvent = await prisma.eventRegistry.findFirst({
     where: {
+      workspaceId: workspace.id,
       eventName: 'Mùa hè xanh 2025',
       organizer: 'Đoàn Trường Đại học Bách khoa - ĐHĐN',
       startDate: new Date('2025-07-01T00:00:00.000Z'),
@@ -42,6 +46,7 @@ async function main() {
       })
     : await prisma.eventRegistry.create({
         data: {
+      workspaceId: workspace.id,
       eventName: 'Mùa hè xanh 2025',
       organizer: 'Đoàn Trường Đại học Bách khoa - ĐHĐN',
       organizerLevel: Level.school,
@@ -109,6 +114,7 @@ async function main() {
     decision: KnowledgeDecision.accepted,
     reason: 'Minh chứng event_import được chấp nhận khi sinh viên có trong danh sách tham gia đã xác nhận.',
     createdBy: creator.id,
+    workspaceId: workspace.id,
     requiredFieldsJson: { sourceType: 'event_import', schoolYear },
     commonErrorsJson: [],
   });
@@ -121,6 +127,7 @@ async function main() {
     decision: KnowledgeDecision.rejected,
     reason: 'manual_upload bị từ chối nếu giấy chứng nhận thiếu đơn vị xác nhận hoặc dấu/chữ ký hợp lệ.',
     createdBy: creator.id,
+    workspaceId: workspace.id,
     requiredFieldsJson: { sourceType: 'manual_upload', required: ['organizer_confirmation'] },
     commonErrorsJson: ['missing_organizer_confirmation'],
   });
@@ -147,12 +154,14 @@ async function upsertKnowledgeBaseItem(input: {
   decision: KnowledgeDecision;
   reason: string;
   createdBy: string;
+  workspaceId: string;
   requiredFieldsJson: unknown;
   commonErrorsJson: unknown;
 }) {
   const existing = await prisma.knowledgeBaseItem.findFirst({
     where: {
       evidenceName: input.evidenceName,
+      workspaceId: input.workspaceId,
       criterion: input.criterion,
       decision: input.decision,
     },
@@ -174,6 +183,7 @@ async function upsertKnowledgeBaseItem(input: {
   return prisma.knowledgeBaseItem.create({
     data: {
       evidenceName: input.evidenceName,
+      workspaceId: input.workspaceId,
       eventName: input.eventName,
       criterion: input.criterion,
       level: input.level,

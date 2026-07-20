@@ -3,6 +3,7 @@ import type { Prisma, Role } from '@prisma/client';
 export type AuditLogInput = {
   actorId?: string | null;
   actorRole?: Role | null;
+  workspaceId?: string | null;
   action: string;
   entityType: string;
   entityId?: string | null;
@@ -14,6 +15,7 @@ export type AuditLogInput = {
   before?: unknown;
   after?: unknown;
   metadata?: unknown;
+  note?: string | null;
   requestId?: string | null;
   ipAddress?: string | null;
   userAgent?: string | null;

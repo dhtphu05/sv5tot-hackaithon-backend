@@ -99,7 +99,11 @@ export class CascadeService {
     application: NonNullable<Awaited<ReturnType<CascadeRepository['findApplicationContext']>>>,
     level: Level,
   ): Promise<PrecheckEngineResult> {
-    const criteria = await loadCriteriaRules({ schoolYear: application.schoolYear, level });
+    const criteria = await loadCriteriaRules({
+      workspaceId: application.workspaceId,
+      schoolYear: application.schoolYear,
+      level,
+    });
     const context: RuleContext = {
       ...buildRuleContext(application, criteria.rules),
       targetLevel: level,
@@ -160,7 +164,11 @@ export async function computeActiveCascadeSnapshot(
   let stoppedAtLevel: Level | null = null;
 
   for (const level of levels) {
-    const criteria = await loadCriteriaRules({ schoolYear: application.schoolYear, level });
+    const criteria = await loadCriteriaRules({
+      workspaceId: application.workspaceId,
+      schoolYear: application.schoolYear,
+      level,
+    });
     const context: RuleContext = {
       ...buildRuleContext(application, criteria.rules),
       targetLevel: level,

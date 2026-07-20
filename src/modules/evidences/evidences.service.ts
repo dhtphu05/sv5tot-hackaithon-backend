@@ -27,6 +27,7 @@ import {
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace } from '../../shared/utils/workspace-scope';
 import {
   assertApplicationEditable,
   assertApplicationOwner,
@@ -56,6 +57,7 @@ export class EvidencesService {
 
   async list(user: AuthenticatedUser, applicationId: string, query: ListEvidencesQuery) {
     const application = await this.getRequiredApplication(applicationId);
+    assertSameWorkspace(user, application, 'Application not found');
     this.assertCanViewApplication(user, application);
 
     const { items, total } = await this.evidencesRepository.list(applicationId, query);
@@ -72,6 +74,7 @@ export class EvidencesService {
 
   async create(user: AuthenticatedUser, applicationId: string, input: CreateEvidenceInput) {
     const application = await this.getRequiredApplication(applicationId);
+    assertSameWorkspace(user, application, 'Application not found');
     if (user.role === Role.student || user.role === Role.class_representative) {
       assertApplicationOwner(application, user);
     } else if (
@@ -131,6 +134,7 @@ export class EvidencesService {
         targetType: 'evidence',
         targetId: created.id,
         applicationId,
+        workspaceId: application.workspaceId,
         afterStateJson: {
           evidenceName: created.evidenceName,
           criterion: created.criterion,
@@ -175,6 +179,7 @@ export class EvidencesService {
         targetType: 'evidence',
         targetId: evidence.id,
         applicationId: evidence.applicationId,
+        workspaceId: evidence.application!.workspaceId,
         beforeStateJson: {
           evidenceName: evidence.evidenceName,
           criterion: evidence.criterion,
@@ -255,6 +260,7 @@ export class EvidencesService {
         targetType: 'evidence',
         targetId: evidence.id,
         applicationId: evidence.applicationId,
+        workspaceId: evidence.application!.workspaceId,
         beforeStateJson: {
           evidenceName: evidence.evidenceName,
           fileCount: evidence.evidenceFiles.length,
@@ -388,6 +394,7 @@ export class EvidencesService {
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
+          workspaceId: evidence.application!.workspaceId,
           storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
           filePath: objectKey,
           publicUrl: null,
@@ -427,6 +434,7 @@ export class EvidencesService {
         existingJob ??
         (await tx.indexingJob.create({
           data: {
+            workspaceId: evidence.application!.workspaceId,
             targetId: evidence.id,
             jobType: JobType.evidence_ocr,
             status: JobStatus.queued,
@@ -461,6 +469,7 @@ export class EvidencesService {
         targetType: 'file',
         targetId: fileRecord.id,
         applicationId: evidence.applicationId,
+        workspaceId: evidence.application!.workspaceId,
         afterStateJson: { filePath: fileRecord.filePath, mimeType: fileRecord.mimeType },
       });
 
@@ -472,6 +481,7 @@ export class EvidencesService {
         entityId: fileRecord.id,
         applicationId: evidence.applicationId,
         evidenceId: evidence.id,
+        workspaceId: evidence.application!.workspaceId,
         after: { fileId: fileRecord.id, fileRole, displayName: originalName },
         metadata: { note: body?.note ?? null },
         tx,
@@ -485,6 +495,7 @@ export class EvidencesService {
         entityId: job.id,
         applicationId: evidence.applicationId,
         evidenceId: evidence.id,
+        workspaceId: evidence.application!.workspaceId,
         after: {
           jobId: job.id,
           jobType: job.jobType,
@@ -528,6 +539,7 @@ export class EvidencesService {
     const { job, reused } = await this.jobsService.enqueueIndexingJob(
       evidence.id,
       JobType.evidence_ocr,
+      evidence.application!.workspaceId,
     );
     await prisma.evidence.update({
       where: { id: evidence.id },
@@ -626,6 +638,7 @@ export class EvidencesService {
     if (!evidence.application) {
       throw new AppError(404, ErrorCodes.EVIDENCE_NOT_FOUND, 'Application evidence not found');
     }
+    assertSameWorkspace(user, evidence.application, 'Evidence not found');
     this.assertCanViewApplication(user, evidence.application);
   }
 

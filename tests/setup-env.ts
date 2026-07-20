@@ -18,6 +18,7 @@ process.env.VNPT_ENABLED = process.env.VNPT_ENABLED ?? 'false';
 process.env.VNPT_REQUIRE_REAL_IN_PIPELINE = process.env.VNPT_REQUIRE_REAL_IN_PIPELINE ?? 'false';
 process.env.VNPT_ALLOW_MOCK_RUNTIME = process.env.VNPT_ALLOW_MOCK_RUNTIME ?? 'true';
 process.env.SMARTBOT_MODE = process.env.SMARTBOT_MODE ?? 'mock';
+process.env.SMARTBOT_WEBHOOK_TOKEN = process.env.SMARTBOT_WEBHOOK_TOKEN ?? 'test-smartbot-webhook-token';
 process.env.MAIL_ENABLED = process.env.MAIL_ENABLED ?? 'true';
 process.env.MAIL_PROVIDER = process.env.MAIL_PROVIDER ?? 'console';
 process.env.MAIL_FROM_NAME = process.env.MAIL_FROM_NAME ?? '5TOT';

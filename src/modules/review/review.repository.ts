@@ -2,6 +2,7 @@
 import { Role, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import type { ListReviewTasksQuery } from './review.validation';
 
 export const reviewTaskListInclude = {
@@ -68,6 +69,7 @@ export class ReviewRepository {
     dueSoonLimit.setDate(dueSoonLimit.getDate() + 3);
 
     const andFilters: Prisma.ReviewTaskWhereInput[] = [];
+    andFilters.push(workspaceFilterFor(user));
     if (query.status) andFilters.push({ status: query.status });
     if (query.supplementRequired) andFilters.push({ status: 'supplement_required' });
     if (query.resolutionNeeded) andFilters.push({ status: 'resolution_needed' });

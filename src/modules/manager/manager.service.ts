@@ -15,6 +15,8 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { facultyMatches } from '../../shared/utils/faculty';
+import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
@@ -40,6 +42,7 @@ const applicationSummaryInclude = {
 const applicationDetailInclude = {
   student: true,
   metrics: true,
+  requirementResponses: true,
   evidences: {
     include: {
       evidenceFiles: { include: { file: true } },
@@ -75,8 +78,9 @@ type ApplicationDetail = Prisma.ApplicationGetPayload<{ include: typeof applicat
 export class ManagerService {
   constructor(private readonly emailOutboxService = new EmailOutboxService()) {}
 
-  async listApplications(query: ListManagerApplicationsQuery) {
+  async listApplications(user: AuthenticatedUser, query: ListManagerApplicationsQuery) {
     const where: Prisma.ApplicationWhereInput = {
+      ...workspaceFilterFor(user),
       ...(query.status ? { status: query.status } : {}),
       ...(query.targetLevel ? { targetLevel: query.targetLevel } : {}),
       ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
@@ -113,7 +117,11 @@ export class ManagerService {
     };
   }
 
-  async getDashboardSummary() {
+  async getDashboardSummary(user: AuthenticatedUser) {
+    const applicationScope = workspaceFilterFor(user);
+    const taskScope = workspaceFilterFor(user);
+    const resolutionScope = workspaceFilterFor(user);
+    const userScope = workspaceFilterFor(user);
     const [
       applicationStatusGroups,
       targetLevelGroups,
@@ -131,38 +139,43 @@ export class ManagerService {
     ] = await prisma.$transaction([
       prisma.application.groupBy({
         by: ['status'],
+        where: applicationScope,
         orderBy: { status: 'asc' },
         _count: { _all: true },
       }),
       prisma.application.groupBy({
         by: ['targetLevel'],
+        where: applicationScope,
         orderBy: { targetLevel: 'asc' },
         _count: { _all: true },
       }),
       prisma.application.groupBy({
         by: ['finalStatus'],
+        where: applicationScope,
         orderBy: { finalStatus: 'asc' },
         _count: { _all: true },
       }),
       prisma.application.groupBy({
         by: ['finalLevel'],
+        where: { ...applicationScope, finalLevel: { not: null } },
         orderBy: { finalLevel: 'asc' },
-        where: { finalLevel: { not: null } },
         _count: { _all: true },
       }),
       prisma.reviewTask.groupBy({
         by: ['status'],
+        where: taskScope,
         orderBy: { status: 'asc' },
         _count: { _all: true },
       }),
       prisma.resolutionCase.groupBy({
         by: ['status'],
+        where: resolutionScope,
         orderBy: { status: 'asc' },
         _count: { _all: true },
       }),
-      prisma.resolutionCase.count({ where: { closedAt: { not: null } } }),
+      prisma.resolutionCase.count({ where: { ...resolutionScope, closedAt: { not: null } } }),
       prisma.user.findMany({
-        where: { role: Role.officer, isActive: true },
+        where: { ...userScope, role: Role.officer, isActive: true },
         include: {
           officerSpecializations: { where: { isActive: true } },
           assignedReviewTasks: { select: { status: true } },
@@ -170,6 +183,7 @@ export class ManagerService {
         orderBy: { fullName: 'asc' },
       }),
       prisma.application.findMany({
+        where: applicationScope,
         include: {
           student: true,
           reviewTasks: { select: { status: true, dueDate: true, updatedAt: true } },
@@ -180,6 +194,7 @@ export class ManagerService {
       }),
       prisma.application.findMany({
         where: {
+          ...applicationScope,
           OR: [
             { finalizedAt: { not: null } },
             { finalStatus: { in: [FinalStatus.passed, FinalStatus.failed, FinalStatus.partially_passed] } },
@@ -194,13 +209,15 @@ export class ManagerService {
         orderBy: [{ finalizedAt: 'desc' }, { updatedAt: 'desc' }],
         take: 8,
       }),
-      prisma.application.count(),
+      prisma.application.count({ where: applicationScope }),
       prisma.application.count({
         where: {
+          ...applicationScope,
           OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }],
         },
       }),
       prisma.application.findMany({
+        where: applicationScope,
         select: {
           id: true,
           targetLevel: true,
@@ -295,8 +312,11 @@ export class ManagerService {
     };
   }
 
-  async listResults(query: ListManagerResultsQuery) {
-    const where = buildResultsWhere(query);
+  async listResults(user: AuthenticatedUser, query: ListManagerResultsQuery) {
+    const where: Prisma.ApplicationWhereInput = {
+      ...buildResultsWhere(query),
+      ...workspaceFilterFor(user),
+    };
     const allCandidates = await prisma.application.findMany({
       where,
       select: {
@@ -320,7 +340,7 @@ export class ManagerService {
     const pageIds = sortedCandidates.slice(skip, skip + query.pageSize).map((item) => item.id);
     const applications = pageIds.length
       ? await prisma.application.findMany({
-          where: { id: { in: pageIds } },
+          where: { id: { in: pageIds }, ...workspaceFilterFor(user) },
           include: {
             student: true,
             finalizedBy: true,
@@ -360,12 +380,12 @@ export class ManagerService {
     };
   }
 
-  async getCommitteeInbox(query: CommitteeInboxQuery) {
+  async getCommitteeInbox(user: AuthenticatedUser, query: CommitteeInboxQuery) {
     const page = query.page;
     const limit = query.limit;
     const now = new Date();
     const applications = await prisma.application.findMany({
-      where: buildCommitteeInboxWhere(query),
+      where: { ...buildCommitteeInboxWhere(query), ...workspaceFilterFor(user) },
       include: {
         student: true,
         finalizedBy: true,
@@ -428,9 +448,10 @@ export class ManagerService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
+    assertSameWorkspace(user, application, 'Application not found');
 
     const auditTimeline = await prisma.auditLog.findMany({
-      where: { applicationId },
+      where: { applicationId, ...workspaceFilterFor(user) },
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
@@ -502,11 +523,12 @@ export class ManagerService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
+    assertSameWorkspace(user, application, 'Application not found');
 
     const [notificationCount, auditTimeline] = await Promise.all([
-      prisma.notification.count({ where: { applicationId } }),
+      prisma.notification.count({ where: { applicationId, ...workspaceFilterFor(user) } }),
       prisma.auditLog.findMany({
-        where: { applicationId },
+        where: { applicationId, ...workspaceFilterFor(user) },
         orderBy: { createdAt: 'desc' },
         take: 20,
       }),
@@ -549,10 +571,11 @@ export class ManagerService {
     };
   }
 
-  async getWorkloads() {
+  async getWorkloads(user: AuthenticatedUser) {
+    const scope = workspaceFilterFor(user);
     const [officers, unassignedTasks] = await Promise.all([
       prisma.user.findMany({
-        where: { role: Role.officer, isActive: true },
+        where: { ...scope, role: Role.officer, isActive: true },
         include: {
           officerSpecializations: { where: { isActive: true } },
           assignedReviewTasks: {
@@ -562,7 +585,7 @@ export class ManagerService {
         orderBy: { fullName: 'asc' },
       }),
       prisma.reviewTask.findMany({
-        where: { assignedOfficerId: null },
+        where: { ...scope, assignedOfficerId: null },
         select: { criterion: true, status: true, dueDate: true },
       }),
     ]);
@@ -633,7 +656,11 @@ export class ManagerService {
     if (!task) {
       throw new AppError(404, ErrorCodes.REVIEW_TASK_NOT_FOUND, 'Review task not found');
     }
+    assertSameWorkspace(user, task, 'Review task not found');
     if (!officer || !officer.isActive) {
+      throw new AppError(404, ErrorCodes.OFFICER_NOT_FOUND, 'Officer not found');
+    }
+    if (user.role !== Role.admin && officer.workspaceId !== task.workspaceId) {
       throw new AppError(404, ErrorCodes.OFFICER_NOT_FOUND, 'Officer not found');
     }
     if (
@@ -686,6 +713,7 @@ export class ManagerService {
       await tx.notification.create({
         data: {
           userId: officer.id,
+          workspaceId: task.workspaceId,
           applicationId: task.applicationId,
           collectiveProfileId: task.collectiveProfileId,
           type: NotificationType.review_updated,
@@ -702,7 +730,7 @@ export class ManagerService {
   }
 
   async getAggregation(user: AuthenticatedUser, applicationId: string) {
-    const application = await this.getApplicationForAggregation(applicationId);
+    const application = await this.getApplicationForAggregation(user, applicationId);
     const aggregation = buildAggregation(application);
     await createApplicationAudit(prisma, {
       actorId: user.id,
@@ -727,7 +755,7 @@ export class ManagerService {
     applicationId: string,
     input: AggregateApplicationInput,
   ) {
-    const application = await this.getApplicationForAggregation(applicationId);
+    const application = await this.getApplicationForAggregation(user, applicationId);
     const aggregation = buildAggregation(application);
     const updated = await prisma.$transaction(async (tx) => {
       const saved = await tx.application.update({
@@ -798,10 +826,7 @@ export class ManagerService {
         throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only admin can override finalize blockers');
       }
     }
-    if (
-      aggregation.application.status === ApplicationStatus.completed ||
-      aggregation.application.status === ApplicationStatus.rejected
-    ) {
+    if (isFinalizedApplication(aggregation.application)) {
       throw new AppError(
         409,
         ErrorCodes.FINAL_RESULT_ALREADY_EXISTS,
@@ -818,6 +843,10 @@ export class ManagerService {
     }
     const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
     if (!overrideRecommendation) {
+      const allReviewTasksAccepted =
+        aggregation.reviewProgress.totalTasks > 0 &&
+        aggregation.reviewProgress.accepted === aggregation.reviewProgress.totalTasks &&
+        aggregation.resolutionSummary.open === 0;
       try {
         assertFinalizeMatchesCascade(input, freshCascade);
       } catch (error) {
@@ -826,9 +855,21 @@ export class ManagerService {
           (error.code === ErrorCodes.FINAL_LEVEL_MISMATCH ||
             error.code === ErrorCodes.FINAL_STATUS_MISMATCH)
         ) {
-          await persistFinalizeMismatchSnapshot(user, applicationId, input, aggregation, freshCascade, error);
+          await persistFinalizeMismatchSnapshot(
+            user,
+            applicationId,
+            input,
+            aggregation,
+            freshCascade,
+            error,
+            !allReviewTasksAccepted,
+          );
+          if (!allReviewTasksAccepted) throw error;
+          // Human review decisions are authoritative at finalization time; keep the
+          // stale cascade mismatch as audit evidence but do not block finalization.
+        } else {
+          throw error;
         }
-        throw error;
       }
     }
 
@@ -988,6 +1029,7 @@ export class ManagerService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
+    assertSameWorkspace(user, application, 'Application not found');
     if (
       application.status !== ApplicationStatus.completed &&
       application.status !== ApplicationStatus.rejected
@@ -1025,6 +1067,7 @@ export class ManagerService {
       await tx.notification.create({
         data: {
           userId: application.studentId,
+          workspaceId: application.workspaceId,
           applicationId,
           type: NotificationType.review_updated,
           title: 'Kết quả hồ sơ được mở lại',
@@ -1035,7 +1078,7 @@ export class ManagerService {
     });
   }
 
-  private async getApplicationForAggregation(applicationId: string) {
+  private async getApplicationForAggregation(user: AuthenticatedUser, applicationId: string) {
     const application = await prisma.application.findUnique({
       where: { id: applicationId },
       include: applicationDetailInclude,
@@ -1043,6 +1086,7 @@ export class ManagerService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
+    assertSameWorkspace(user, application, 'Application not found');
     return application;
   }
 }
@@ -1077,6 +1121,7 @@ export function buildAggregation(application: ApplicationDetail) {
       status: application.status,
       finalStatus: application.finalStatus,
       finalLevel: application.finalLevel,
+      finalizedAt: application.finalizedAt,
       readinessScore: application.readinessScore,
     },
     student: pickStudent(application.student),
@@ -1143,6 +1188,7 @@ async function persistFinalizeMismatchSnapshot(
   aggregation: Awaited<ReturnType<ManagerService['getAggregation']>>,
   freshCascade: Awaited<ReturnType<typeof computeActiveCascadeSnapshot>>,
   error: AppError,
+  blocked: boolean,
 ) {
   await prisma.$transaction(async (tx) => {
     const cascadeReview = await tx.cascadeReview.create({
@@ -1176,8 +1222,11 @@ async function persistFinalizeMismatchSnapshot(
         cascadeReviewId: cascadeReview.id,
         requestedFinalStatus: input.finalStatus,
         requestedFinalLevel: input.finalLevel ?? null,
+        blocked,
       },
-      note: 'Finalization rejected because recomputed cascade no longer matched the submitted final result.',
+      note: blocked
+        ? 'Finalization rejected because recomputed cascade no longer matched the submitted final result.'
+        : 'Finalization continued after human review accepted all criteria despite a legacy cascade mismatch.',
     });
   });
 }
@@ -2109,7 +2158,7 @@ function isSpecializedForTask(
 ) {
   return specializations.some(
     (item) =>
-      item.criterion === criterion && (!item.facultyScope || item.facultyScope === faculty),
+      item.criterion === criterion && (!item.facultyScope || facultyMatches(item.facultyScope, faculty)),
   );
 }
 

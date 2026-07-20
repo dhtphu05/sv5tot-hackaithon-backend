@@ -227,6 +227,16 @@ export function mapWarning(input: unknown): EvidenceWarning {
   const userMessage = isRecord(input)
     ? stringValue(input.userMessage ?? input.user_message)
     : undefined;
+  if (code === 'official_match_not_found') {
+    const status = evidenceStudentStatuses.official_match_not_found;
+    return {
+      code,
+      label: status.label,
+      message: status.message,
+      severity: 'info',
+      userMessage: userMessage ?? status.message,
+    };
+  }
   if (configured) {
     return {
       code,

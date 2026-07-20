@@ -12,6 +12,8 @@ const demoUser = {
   className: null,
   faculty: null,
   avatarUrl: null,
+  workspaceId: null,
+  workspace: null,
 };
 
 describe('ChatbotService streaming', () => {

@@ -77,6 +77,8 @@ async function internalSmartReaderAuth(
       className: user.className,
       faculty: user.faculty,
       avatarUrl: user.avatarUrl,
+      workspaceId: user.workspaceId,
+      workspace: null,
     };
     next();
   } catch (error) {

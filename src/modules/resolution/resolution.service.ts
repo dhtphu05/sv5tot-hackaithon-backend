@@ -1,5 +1,6 @@
 // Owns committee resolution cases and final dispute decisions.
 import {
+  ApprovedEvidenceApprovalSource,
   ApplicationStatus,
   Criterion,
   EvidenceStatus,
@@ -17,7 +18,9 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { EvidenceKnowledgePublisher } from '../evidence-knowledge/evidence-knowledge.publisher';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { createNotification } from '../notifications/notifications.service';
 import type {
@@ -39,6 +42,7 @@ type ResolutionCaseWithInclude = Prisma.ResolutionCaseGetPayload<{
 
 type ResolutionFinalDecision = ResolutionDecisionInput['decision'];
 const emailOutboxService = new EmailOutboxService();
+const evidenceKnowledgePublisher = new EvidenceKnowledgePublisher();
 
 export class ResolutionService {
   async listCases(user: AuthenticatedUser, query: ListResolutionCasesQuery) {
@@ -111,6 +115,7 @@ export class ResolutionService {
       resolutionCase.evidence
         ? prisma.knowledgeBaseItem.findMany({
             where: {
+              ...workspaceFilterFor(user),
               criterion: resolutionCase.evidence.criterion,
               OR: [
                 {
@@ -133,6 +138,7 @@ export class ResolutionService {
         : [],
       prisma.auditLog.findMany({
         where: {
+          ...workspaceFilterFor(user),
           OR: [
             { targetType: 'resolution_case', targetId: resolutionCase.id },
             { applicationId: resolutionCase.applicationId },
@@ -192,6 +198,7 @@ export class ResolutionService {
 
   async resolveCase(user: AuthenticatedUser, caseId: string, input: ResolutionDecisionInput) {
     const resolutionCase = await this.getCase(caseId);
+    await this.assertCanViewCase(user, resolutionCase);
     if (
       resolutionCase.status === ResolutionStatus.resolved ||
       resolutionCase.status === ResolutionStatus.rejected
@@ -227,128 +234,147 @@ export class ResolutionService {
       async (tx) => {
         await ensureResolutionOpenedAudit(tx, user, resolutionCase);
 
-      const updatedCase = await tx.resolutionCase.update({
-        where: { id: resolutionCase.id },
-        data: {
-          status: closedStatus,
-          committeeDecision,
-          closedBy: user.id,
-          closedAt: new Date(),
-        },
-        include: resolutionInclude,
-      });
+        const updatedCase = await tx.resolutionCase.update({
+          where: { id: resolutionCase.id },
+          data: {
+            status: closedStatus,
+            committeeDecision,
+            closedBy: user.id,
+            closedAt: new Date(),
+          },
+          include: resolutionInclude,
+        });
 
-      const updatedEvidenceIds = await applyEvidenceDecisions(tx, resolutionCase, input);
-      const updatedTask = relatedTask
-        ? await tx.reviewTask.update({
-            where: { id: relatedTask.id },
-            data: mapTaskUpdate(input.decision, input.note, relatedTask.status),
-          })
-        : null;
-
-      const applicationStatus = await applyApplicationStatus(
-        tx,
-        resolutionCase.applicationId,
-        input.decision,
-      );
-
-      const knowledgeBaseItem =
-        input.updateKnowledgeBase && resolutionCase.evidence
-          ? await tx.knowledgeBaseItem.create({
-              data: {
-                evidenceName:
-                  input.knowledgeBaseTitle ??
-                  anonymizeEvidenceName(resolutionCase.evidence.evidenceName),
-                eventName: resolutionCase.evidence.eventId ? 'Verified event evidence' : null,
-                criterion: resolutionCase.evidence.criterion,
-                level: resolutionCase.application.targetLevel,
-                decision: mapKnowledgeDecision(input.decision),
-                reason: input.note,
-                requiredFieldsJson: {
-                  source: 'resolution',
-                  resolutionCaseId: resolutionCase.id,
-                } as Prisma.InputJsonValue,
-                commonErrorsJson: [] as Prisma.InputJsonValue,
-                createdBy: user.id,
-              },
+        const updatedEvidenceIds = await applyEvidenceDecisions(tx, resolutionCase, input);
+        if (updatedEvidenceIds.length > 0) {
+          const acceptedEvidenceIds = input.evidenceDecisions.length
+            ? input.evidenceDecisions
+                .filter((item) => item.decision === 'accepted')
+                .map((item) => item.evidenceId)
+            : input.decision === 'accepted'
+              ? updatedEvidenceIds
+              : [];
+          for (const evidenceId of acceptedEvidenceIds) {
+            await evidenceKnowledgePublisher.publishAcceptedEvidence(tx, user, {
+              evidenceId,
+              resolutionCaseId: resolutionCase.id,
+              reviewTaskId: relatedTask?.id ?? resolutionCase.reviewTaskId,
+              approvalSource: ApprovedEvidenceApprovalSource.resolution,
+              note: input.note,
+            });
+          }
+        }
+        const updatedTask = relatedTask
+          ? await tx.reviewTask.update({
+              where: { id: relatedTask.id },
+              data: mapTaskUpdate(input.decision, input.note, relatedTask.status),
             })
           : null;
 
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: 'RESOLUTION_CASE_RESOLVED',
-        targetType: 'resolution_case',
-        targetId: resolutionCase.id,
-        applicationId: resolutionCase.applicationId,
-        beforeStateJson: {
-          status: resolutionCase.status,
-          committeeDecision: resolutionCase.committeeDecision,
-        },
-        afterStateJson: {
-          status: closedStatus,
-          decision: input.decision,
-          updatedEvidenceIds,
-        },
-        note: input.note,
-      });
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: 'RESOLUTION_DECISION_APPLIED',
-        targetType: relatedTask ? 'review_task' : 'resolution_case',
-        targetId: relatedTask?.id ?? resolutionCase.id,
-        applicationId: resolutionCase.applicationId,
-        afterStateJson: {
-          decision: input.decision,
-          taskStatus: updatedTask?.status,
-          applicationStatus,
-        },
-        note: input.note,
-      });
-      if (knowledgeBaseItem) {
+        const applicationStatus = await applyApplicationStatus(
+          tx,
+          resolutionCase.applicationId,
+          input.decision,
+        );
+
+        const knowledgeBaseItem =
+          input.updateKnowledgeBase && resolutionCase.evidence
+            ? await tx.knowledgeBaseItem.create({
+                data: {
+                  evidenceName:
+                    input.knowledgeBaseTitle ??
+                    anonymizeEvidenceName(resolutionCase.evidence.evidenceName),
+                  eventName: resolutionCase.evidence.eventId ? 'Verified event evidence' : null,
+                  criterion: resolutionCase.evidence.criterion,
+                  level: resolutionCase.application.targetLevel,
+                  workspaceId: resolutionCase.application.workspaceId,
+                  decision: mapKnowledgeDecision(input.decision),
+                  reason: input.note,
+                  requiredFieldsJson: {
+                    source: 'resolution',
+                    resolutionCaseId: resolutionCase.id,
+                  } as Prisma.InputJsonValue,
+                  commonErrorsJson: [] as Prisma.InputJsonValue,
+                  createdBy: user.id,
+                },
+              })
+            : null;
+
         await createApplicationAudit(tx, {
           actorId: user.id,
           actorRole: user.role,
-          action: 'KNOWLEDGE_BASE_ITEM_CREATED_FROM_RESOLUTION',
-          targetType: 'knowledge_base_item',
-          targetId: knowledgeBaseItem.id,
+          action: 'RESOLUTION_CASE_RESOLVED',
+          targetType: 'resolution_case',
+          targetId: resolutionCase.id,
           applicationId: resolutionCase.applicationId,
+          beforeStateJson: {
+            status: resolutionCase.status,
+            committeeDecision: resolutionCase.committeeDecision,
+          },
           afterStateJson: {
-            decision: knowledgeBaseItem.decision,
-            criterion: knowledgeBaseItem.criterion,
-            resolutionCaseId: resolutionCase.id,
+            status: closedStatus,
+            decision: input.decision,
+            updatedEvidenceIds,
           },
           note: input.note,
         });
-      }
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'RESOLUTION_DECISION_APPLIED',
+          targetType: relatedTask ? 'review_task' : 'resolution_case',
+          targetId: relatedTask?.id ?? resolutionCase.id,
+          applicationId: resolutionCase.applicationId,
+          afterStateJson: {
+            decision: input.decision,
+            taskStatus: updatedTask?.status,
+            applicationStatus,
+          },
+          note: input.note,
+        });
+        if (knowledgeBaseItem) {
+          await createApplicationAudit(tx, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: 'KNOWLEDGE_BASE_ITEM_CREATED_FROM_RESOLUTION',
+            targetType: 'knowledge_base_item',
+            targetId: knowledgeBaseItem.id,
+            applicationId: resolutionCase.applicationId,
+            afterStateJson: {
+              decision: knowledgeBaseItem.decision,
+              criterion: knowledgeBaseItem.criterion,
+              resolutionCaseId: resolutionCase.id,
+            },
+            note: input.note,
+          });
+        }
 
-      await notifyStudentAfterResolution(tx, {
-        resolutionCase,
-        input,
-        applicationStatus,
-        relatedTask,
-        updatedEvidenceIds,
-      });
-      await notifyResolutionWatchers(tx, {
-        actorId: user.id,
-        applicationId: resolutionCase.applicationId,
-        evidenceId: updatedEvidenceIds[0] ?? resolutionCase.evidenceId,
-        reviewTaskId: relatedTask?.id,
-        resolutionCaseId: resolutionCase.id,
-        criterion: resolutionCase.evidence?.criterion ?? relatedTask?.criterion ?? null,
-        decision: input.decision,
-        status: closedStatus,
-        title: 'Kết luận hội đồng đã cập nhật',
-        message: input.note,
-        assignedOfficerId: relatedTask?.assignedOfficerId,
-      });
+        await notifyStudentAfterResolution(tx, {
+          resolutionCase,
+          input,
+          applicationStatus,
+          relatedTask,
+          updatedEvidenceIds,
+        });
+        await notifyResolutionWatchers(tx, {
+          actorId: user.id,
+          applicationId: resolutionCase.applicationId,
+          evidenceId: updatedEvidenceIds[0] ?? resolutionCase.evidenceId,
+          reviewTaskId: relatedTask?.id,
+          resolutionCaseId: resolutionCase.id,
+          criterion: resolutionCase.evidence?.criterion ?? relatedTask?.criterion ?? null,
+          decision: input.decision,
+          status: closedStatus,
+          title: 'Kết luận hội đồng đã cập nhật',
+          message: input.note,
+          assignedOfficerId: relatedTask?.assignedOfficerId,
+        });
 
-      const refreshedCase =
-        (await tx.resolutionCase.findUnique({
-          where: { id: resolutionCase.id },
-          include: resolutionInclude,
-        })) ?? updatedCase;
+        const refreshedCase =
+          (await tx.resolutionCase.findUnique({
+            where: { id: resolutionCase.id },
+            include: resolutionInclude,
+          })) ?? updatedCase;
 
         return {
           resolutionCase: toResolutionListItem(refreshedCase),
@@ -460,6 +486,7 @@ export class ResolutionService {
     user: AuthenticatedUser,
     resolutionCase: ResolutionCaseWithInclude,
   ) {
+    assertSameWorkspace(user, resolutionCase, 'Resolution case not found');
     if (canManageResolution(user)) return;
     if (user.role !== Role.officer) {
       throw new AppError(
@@ -482,6 +509,7 @@ async function buildListWhere(
   query: ListResolutionCasesQuery,
 ): Promise<Prisma.ResolutionCaseWhereInput> {
   const filters: Prisma.ResolutionCaseWhereInput[] = [];
+  filters.push(workspaceFilterFor(user));
   const statusFilter = statusWhere(query.status);
   if (statusFilter) filters.push(statusFilter);
   if (query.applicationId) filters.push({ applicationId: query.applicationId });
@@ -551,12 +579,15 @@ async function canOfficerHandleResolutionCriterion(
   return !!spec;
 }
 
-async function findRelatedReviewTask(resolutionCase: {
-  applicationId: string;
-  evidenceId: string | null;
-  reviewTaskId?: string | null;
-  reviewTask?: { id: string; assignedOfficer?: unknown } | null;
-}, evidenceIds: string[] = []) {
+async function findRelatedReviewTask(
+  resolutionCase: {
+    applicationId: string;
+    evidenceId: string | null;
+    reviewTaskId?: string | null;
+    reviewTask?: { id: string; assignedOfficer?: unknown } | null;
+  },
+  evidenceIds: string[] = [],
+) {
   if (resolutionCase.reviewTaskId) {
     const task = await prisma.reviewTask.findFirst({
       where: { id: resolutionCase.reviewTaskId, applicationId: resolutionCase.applicationId },
@@ -579,9 +610,15 @@ async function findRelatedReviewTask(resolutionCase: {
     });
     const tasks = linked.map((item) => item.reviewTask);
     tasks.sort((a, b) => {
-      if (a.status === ReviewTaskStatus.resolution_needed && b.status !== ReviewTaskStatus.resolution_needed)
+      if (
+        a.status === ReviewTaskStatus.resolution_needed &&
+        b.status !== ReviewTaskStatus.resolution_needed
+      )
         return -1;
-      if (a.status !== ReviewTaskStatus.resolution_needed && b.status === ReviewTaskStatus.resolution_needed)
+      if (
+        a.status !== ReviewTaskStatus.resolution_needed &&
+        b.status === ReviewTaskStatus.resolution_needed
+      )
         return 1;
       return b.updatedAt.getTime() - a.updatedAt.getTime();
     });
@@ -859,6 +896,7 @@ async function notifyStudentAfterResolution(
   const notification = await createNotification(
     {
       userId: resolutionCase.application.studentId,
+      workspaceId: resolutionCase.application.workspaceId,
       applicationId: resolutionCase.applicationId,
       evidenceId: evidenceIds[0] ?? null,
       reviewTaskId: relatedTask?.id ?? null,
@@ -888,9 +926,7 @@ async function notifyStudentAfterResolution(
       applicationId: resolutionCase.applicationId,
       notificationId: notification.id,
       templateKey:
-        input.decision === 'supplement_required'
-          ? 'supplement_requested'
-          : 'application_rejected',
+        input.decision === 'supplement_required' ? 'supplement_requested' : 'application_rejected',
       payload: {
         studentName: resolutionCase.application.student.fullName,
         recipientName: resolutionCase.application.student.fullName,

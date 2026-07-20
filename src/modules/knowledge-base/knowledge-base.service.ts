@@ -3,6 +3,7 @@ import { prisma } from '../../infrastructure/database/prisma';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { KnowledgeBaseRepository } from './knowledge-base.repository';
 import type {
@@ -15,7 +16,7 @@ export class KnowledgeBaseService {
   constructor(private readonly repository = new KnowledgeBaseRepository()) {}
 
   async search(user: AuthenticatedUser, query: KnowledgeBaseSearchQuery) {
-    const { items, total } = await this.repository.search(query);
+    const { items, total } = await this.repository.search(user, query);
 
     const isStudent = user.role === 'student' || user.role === 'class_representative';
     const processedItems = isStudent
@@ -39,7 +40,11 @@ export class KnowledgeBaseService {
   ) {
     const evidence = await prisma.evidence.findUnique({
       where: { id: input.evidenceId },
-      include: { event: true },
+      include: {
+        event: true,
+        application: { select: { workspaceId: true } },
+        collectiveProfile: { select: { workspaceId: true } },
+      },
     });
     if (!evidence) {
       throw new AppError(404, ErrorCodes.EVIDENCE_NOT_FOUND, 'Evidence not found');
@@ -57,6 +62,12 @@ export class KnowledgeBaseService {
       : '';
     const finalReason = tagsString + (input.summary || input.reason || '');
     const cleanReason = input.anonymize ? anonymizeText(finalReason) : finalReason;
+    const workspaceId =
+      evidence.application?.workspaceId ??
+      evidence.collectiveProfile?.workspaceId ??
+      evidence.event?.workspaceId ??
+      workspaceIdForWrite(user);
+    assertSameWorkspace(user, { workspaceId }, 'Evidence not found');
 
     const item = await prisma.$transaction(async (tx) => {
       const metadata = {
@@ -68,6 +79,7 @@ export class KnowledgeBaseService {
       const created = await tx.knowledgeBaseItem.create({
         data: {
           evidenceName: title,
+          workspaceId,
           eventName: evidence.event?.eventName ? (input.anonymize ? anonymizeText(evidence.event.eventName) : evidence.event.eventName) : null,
           criterion: evidence.criterion,
           level: input.level || evidence.event?.organizerLevel || null,
@@ -108,6 +120,7 @@ export class KnowledgeBaseService {
         'Knowledge base item not found',
       );
     }
+    assertSameWorkspace(user, item, 'Knowledge base item not found');
     const isStudent = user.role === 'student' || user.role === 'class_representative';
     return isStudent ? this.anonymizeItem(item) : item;
   }
@@ -121,6 +134,7 @@ export class KnowledgeBaseService {
         'Knowledge base item not found',
       );
     }
+    assertSameWorkspace(user, existing, 'Knowledge base item not found');
 
     let dbDecision = input.decision;
     if (dbDecision === 'resolution_needed') {
@@ -164,6 +178,7 @@ export class KnowledgeBaseService {
         'Knowledge base item not found',
       );
     }
+    assertSameWorkspace(user, existing, 'Knowledge base item not found');
 
     const updated = await prisma.knowledgeBaseItem.update({
       where: { id: itemId },

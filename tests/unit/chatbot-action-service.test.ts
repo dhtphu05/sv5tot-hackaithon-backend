@@ -26,6 +26,8 @@ const user: AuthenticatedUser = {
   className: null,
   faculty: null,
   avatarUrl: null,
+  workspaceId: null,
+  workspace: null,
 };
 
 describe('ChatbotActionService', () => {
@@ -91,6 +93,7 @@ function fakeRepository(initial: PersistedChatbotAction): ChatbotActionRepositor
 function baseAction(): PersistedChatbotAction {
   return {
     id: 'action-1',
+    workspaceId: null,
     sessionId: '5f3f86d3-3028-4e29-9220-7f09d7a8ab05',
     userId: user.id,
     actionType: 'navigate',

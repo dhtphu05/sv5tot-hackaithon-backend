@@ -6,6 +6,7 @@ import { normalizeSchoolYear } from '../../src/shared/utils/school-year';
 
 const baseApplication = {
   id: 'app-id',
+  workspaceId: '11111111-1111-1111-1111-111111111111',
   studentId: 'student-id',
   schoolYear: '2025-2026',
   applicationType: ApplicationType.individual,
