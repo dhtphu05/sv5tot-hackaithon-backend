@@ -10,6 +10,16 @@ export type EvidenceKnowledgeDbClient = Prisma.TransactionClient | typeof prisma
 
 export const approvedPrecedentSearchInclude = {
   event: { include: { aliases: true } },
+  sourceEvidence: {
+    select: {
+      applicationId: true,
+      application: {
+        select: {
+          studentId: true,
+        },
+      },
+    },
+  },
 } satisfies Prisma.ApprovedEvidencePrecedentInclude;
 
 export const approvedPrecedentDetailInclude = {

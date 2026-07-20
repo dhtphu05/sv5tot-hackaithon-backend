@@ -395,12 +395,93 @@ describe('EvidenceMatchingService', () => {
         limit: 20,
       });
 
-      expect(result.items, search).toEqual([{ eventId: 'event-1', title: 'Mùa hè xanh 2025' }]);
+      expect(result.items, search).toEqual([
+        {
+          eventId: 'event-1',
+          title: 'Mùa hè xanh 2025',
+          criterion: 'volunteer',
+          approvedUsageCount: 0,
+        },
+      ]);
       expect(result.total, search).toBe(1);
       expect(JSON.stringify(result)).not.toMatch(
-        /organizer|organizerLevel|criterion|state|participant|studentCode|file|ocr|reviewer|confidence|acceptedCount/i,
+        /organizer|organizerLevel|state|participant|studentCode|file|ocr|reviewer|confidence|acceptedCount/i,
       );
     }
+  });
+
+  it('lists resolution-approved reference events without requiring official roster indexing', async () => {
+    const applicationId = '22222222-2222-4222-8222-222222222222';
+    const eventRows = [
+      event({
+        id: 'resolution-event-1',
+        eventName: 'Giải nghiên cứu khoa học sinh viên 2025',
+        criterion: Criterion.academic,
+        rosterIndexed: false,
+      }),
+    ];
+    const db = {
+      application: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: applicationId,
+          studentId: baseUser.id,
+          workspaceId,
+        }),
+      },
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue(eventRows),
+        count: vi.fn().mockResolvedValue(1),
+      },
+      approvedEvidencePrecedent: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            eventId: 'resolution-event-1',
+            sourceEvidence: {
+              applicationId: applicationId,
+              application: { studentId: baseUser.id },
+            },
+          },
+        ]),
+      },
+      $transaction: vi.fn((queries: Array<Promise<unknown>>) => Promise.all(queries)),
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.library(baseUser, {
+      applicationId,
+      criterion: Criterion.academic,
+      projection: 'reference',
+      page: 1,
+      limit: 20,
+    });
+
+    expect(db.eventRegistry.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId,
+          status: EventStatus.active,
+          criterion: Criterion.academic,
+          approvedEvidencePrecedents: {
+            some: {
+              workspaceId,
+              status: 'active',
+            },
+          },
+        }),
+      }),
+    );
+    expect(db.eventRegistry.findMany.mock.calls[0][0].where).not.toHaveProperty('rosterIndexed');
+    expect(result.items).toEqual([
+      {
+        eventId: 'resolution-event-1',
+        title: 'Giải nghiên cứu khoa học sinh viên 2025',
+        criterion: 'academic',
+        approvedUsageCount: 1,
+      },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(
+      /organizer|organizerLevel|state|participant|studentCode|file|ocr|reviewer|confidence|acceptedCount/i,
+    );
   });
 
   it('rejects official event library access for non-owner applications', async () => {

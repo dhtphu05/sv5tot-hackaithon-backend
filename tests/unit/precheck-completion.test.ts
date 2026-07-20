@@ -88,6 +88,159 @@ describe('precheck completion integration', () => {
     });
   });
 
+  it('does not treat reviewer-owned ethics verification as student missing work across all criteria', () => {
+    const result = buildPrecheckFromCompletion({
+      application: application(),
+      level: Level.school,
+      criteriaWarnings: [],
+      completion: [
+        completion({
+          criterion: Criterion.ethics,
+          status: 'ready_for_precheck',
+          requirementGroups: [
+            {
+              key: 'ethics_foundation',
+              title: 'Ethics foundation',
+              operator: 'all_of',
+              optional: false,
+              requirements: [
+                {
+                  key: 'conduct_score',
+                  title: 'Conduct score',
+                  type: 'metric',
+                  status: 'verified',
+                  optional: false,
+                  acceptedSources: ['system_data'],
+                  currentResponses: [],
+                  responsibility: 'student',
+                  blocksSubmission: true,
+                  verificationStage: 'draft',
+                },
+                {
+                  key: 'no_violation',
+                  title: 'No violation',
+                  type: 'system_confirmation',
+                  status: 'not_started',
+                  optional: false,
+                  acceptedSources: ['system_data'],
+                  currentResponses: [],
+                  responsibility: 'reviewer',
+                  blocksSubmission: false,
+                  verificationStage: 'review',
+                },
+              ],
+            },
+          ],
+        }),
+        completion({
+          criterion: Criterion.academic,
+          status: 'in_progress',
+          requirementGroups: [
+            {
+              key: 'academic_foundation',
+              title: 'Academic foundation',
+              operator: 'all_of',
+              optional: false,
+              requirements: [
+                {
+                  key: 'academic_gpa',
+                  title: 'GPA',
+                  type: 'metric',
+                  status: 'verified',
+                  optional: false,
+                  acceptedSources: ['system_data'],
+                  currentResponses: [],
+                },
+                {
+                  key: 'no_f_grade',
+                  title: 'No F grade',
+                  type: 'system_confirmation',
+                  status: 'not_started',
+                  optional: false,
+                  acceptedSources: ['system_data'],
+                  currentResponses: [],
+                },
+              ],
+            },
+          ],
+        }),
+        completion({
+          criterion: Criterion.physical,
+          status: 'not_started',
+          nextAction: {
+            type: 'choose_physical_path',
+            label: 'Chon cach chung minh The luc tot',
+            requirementKey: 'physical_path',
+          },
+        }),
+        completion({
+          criterion: Criterion.volunteer,
+          status: 'needs_verification',
+          requirementGroups: [
+            {
+              key: 'volunteer_path',
+              title: 'Volunteer path',
+              operator: 'one_of',
+              optional: false,
+              requirements: [
+                {
+                  key: 'accumulated_volunteer_days',
+                  title: 'Volunteer days',
+                  type: 'activity_aggregation',
+                  status: 'declared',
+                  optional: false,
+                  acceptedSources: ['manual_evidence'],
+                  currentResponses: [],
+                },
+              ],
+            },
+          ],
+        }),
+        completion({
+          criterion: Criterion.integration,
+          status: 'ready_for_precheck',
+          requirementGroups: [
+            {
+              key: 'integration_path',
+              title: 'Integration path',
+              operator: 'one_of',
+              optional: false,
+              requirements: [
+                {
+                  key: 'foreign_language',
+                  title: 'Foreign language',
+                  type: 'evidence',
+                  status: 'verified',
+                  optional: false,
+                  acceptedSources: ['manual_evidence'],
+                  currentResponses: [],
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+    });
+
+    const ethics = result.criteriaResults.find((item) => item.criterion === Criterion.ethics);
+    expect(ethics?.missingRequirements).toHaveLength(0);
+    expect(ethics?.needsVerification).toHaveLength(0);
+    expect(ethics?.requirementGroups[0].requirements[1]).toMatchObject({
+      key: 'no_violation',
+      responsibility: 'reviewer',
+      blocksSubmission: false,
+      verificationStage: 'review',
+    });
+    expect(result.missingItems.map((item) => item.requirementKey)).toContain('no_f_grade');
+    expect(
+      result.criteriaResults
+        .find((item) => item.criterion === Criterion.volunteer)
+        ?.needsVerification.map((item) => item.requirementKey),
+    ).toEqual(['accumulated_volunteer_days']);
+    expect(result.missingItems.map((item) => item.requirementKey)).not.toContain('no_violation');
+    expect(result.readyToSubmit).toBe(false);
+  });
+
   it('prioritizes official supplement requests over completion actions', () => {
     const result = buildPrecheckFromCompletion({
       application: application({
@@ -180,9 +333,7 @@ describe('precheck completion integration', () => {
     expect(result.criteriaResults[0].missingRequirements).toHaveLength(0);
     expect(result.criteriaResults[0].needsVerification).toHaveLength(1);
     expect(result.nextAction).toMatchObject({
-      criterion: Criterion.physical,
-      requirementKey: 'physical_course_result',
-      type: 'wait_physical_course_verification',
+      type: 'submit_application',
     });
   });
 

@@ -194,6 +194,11 @@ function normalizeExplicitRequirement(
     acceptedSources: normalizeSources(requirement.acceptedSources, type),
     formSchema: requirement.formSchema,
     currentResponses: [],
+    responsibility: normalizeResponsibility(requirement.responsibility ?? config.responsibility),
+    blocksSubmission: booleanOrUndefined(requirement.blocksSubmission ?? config.blocksSubmission),
+    verificationStage: normalizeVerificationStage(
+      requirement.verificationStage ?? config.verificationStage,
+    ),
     config: {
       metricType: normalizeMetricType(config.metricType ?? requirement.metricType),
       operator: normalizeThresholdOperator(config.operator ?? requirement.operator),
@@ -232,7 +237,7 @@ function buildEthicsRequirementGroups(
   const thresholdValue = numberOrUndefined(threshold.value) ?? 82;
   const thresholdOperator = normalizeThresholdOperator(threshold.operator) ?? '>=';
 
-  const foundation: RequirementGroupDto = explicitFoundation ?? {
+  const foundationBase: RequirementGroupDto = explicitFoundation ?? {
     key: 'ethics_foundation',
     title: 'Dữ liệu nền về đạo đức',
     operator: 'all_of',
@@ -269,6 +274,9 @@ function buildEthicsRequirementGroups(
         optional: false,
         acceptedSources: ['system_data', 'manual_evidence'],
         currentResponses: [],
+        responsibility: 'reviewer',
+        blocksSubmission: false,
+        verificationStage: 'review',
         nextAction: {
           type: 'wait_system_confirmation',
           label: 'Chờ nhà trường xác nhận tình trạng vi phạm',
@@ -276,6 +284,8 @@ function buildEthicsRequirementGroups(
       },
     ],
   };
+
+  const foundation = applyEthicsOwnershipDefaults(foundationBase);
 
   const explicitAdditional = parsedGroups.find(
     (group) => group.key === 'ethics_additional_achievements',
@@ -321,6 +331,47 @@ function buildEthicsRequirementGroups(
   );
 
   return [foundation, additional, ...nonEthicsLegacy.filter((group) => group.optional)];
+}
+
+function applyEthicsOwnershipDefaults(group: RequirementGroupDto): RequirementGroupDto {
+  return {
+    ...group,
+    requirements: group.requirements.map((requirement) => {
+      if (requirement.key === 'conduct_score') {
+        return {
+          ...requirement,
+          responsibility: requirement.responsibility ?? 'student',
+          blocksSubmission: requirement.blocksSubmission ?? true,
+          verificationStage: requirement.verificationStage ?? 'draft',
+        };
+      }
+      if (requirement.key === 'no_violation') {
+        return {
+          ...requirement,
+          responsibility: 'reviewer',
+          blocksSubmission: false,
+          verificationStage: 'review',
+          nextAction: isDeadEndNoViolationAction(requirement.nextAction)
+            ? {
+                type: 'reviewer_verification',
+                label: 'Cán bộ xét duyệt sẽ xác minh tình trạng vi phạm',
+              }
+            : requirement.nextAction,
+        };
+      }
+      return requirement;
+    }),
+  };
+}
+
+function isDeadEndNoViolationAction(action: RequirementDto['nextAction']): boolean {
+  if (!action) return true;
+  const label = action.label.toLowerCase();
+  return (
+    action.type === 'wait_system_confirmation' ||
+    label.includes('nha truong') ||
+    label.includes('nhà trường')
+  );
 }
 
 function ethicsAchievementTitle(evidenceType: string): string {
@@ -455,6 +506,20 @@ function buildAcademicRequirementGroups(
     })),
   };
 
+  const normalizedFoundation: RequirementGroupDto = {
+    ...foundation,
+    requirements: foundation.requirements.map((requirement) =>
+      requirement.key === 'no_f_grade'
+        ? {
+            ...requirement,
+            responsibility: 'reviewer',
+            blocksSubmission: false,
+            verificationStage: 'review',
+          }
+        : requirement,
+    ),
+  };
+
   const remaining = parsedGroups.filter(
     (group) => group.key !== foundation.key && group.key !== additional.key,
   );
@@ -465,7 +530,7 @@ function buildAcademicRequirementGroups(
       ),
   );
 
-  return [foundation, additional, ...nonAcademicLegacy.filter((group) => group.optional)];
+  return [normalizedFoundation, additional, ...nonAcademicLegacy.filter((group) => group.optional)];
 }
 
 function academicAchievementTitle(evidenceType: string): string {
@@ -1080,6 +1145,30 @@ function normalizeRequirementType(value: unknown): RequirementDto['type'] | null
   return null;
 }
 
+function normalizeResponsibility(value: unknown): RequirementDto['responsibility'] | undefined {
+  if (
+    value === 'student' ||
+    value === 'system' ||
+    value === 'reviewer' ||
+    value === 'committee'
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeVerificationStage(value: unknown): RequirementDto['verificationStage'] | undefined {
+  if (
+    value === 'draft' ||
+    value === 'precheck' ||
+    value === 'review' ||
+    value === 'resolution'
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
 function normalizeMetricType(value: unknown): MetricType | undefined {
   return Object.values(MetricType).includes(value as MetricType)
     ? (value as MetricType)
@@ -1129,6 +1218,10 @@ function stringOrDefault(value: unknown, fallback: string): string {
 
 function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function booleanOrUndefined(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function numberOrUndefined(value: unknown): number | undefined {
