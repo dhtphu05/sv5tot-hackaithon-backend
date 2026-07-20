@@ -49,6 +49,19 @@ export class StudentAssistantService {
     const precheckIsStale = application
       ? isApplicationPrecheckStale(application, latestPrecheck?.createdAt)
       : false;
+    const importableCriteria = completion
+      .filter((item) => ['not_started', 'in_progress', 'precheck_warning'].includes(item.status))
+      .map((item) => item.criterion);
+    const verifiedImportableEvents =
+      application && application.student.studentCode
+        ? await this.repository.findVerifiedImportableEvents({
+            applicationId: application.id,
+            workspaceId: application.workspaceId,
+            studentCode: application.student.studentCode,
+            criteria: importableCriteria,
+            limit: 5,
+          })
+        : [];
     const priorityInput = {
       application: application
         ? {
@@ -63,6 +76,7 @@ export class StudentAssistantService {
       completion,
       latestPrecheck,
       precheckIsStale,
+      verifiedImportableEvents,
     };
     const nextBestAction = resolveStudentNextBestAction(priorityInput);
     const state = resolveAssistantState(priorityInput);
@@ -98,6 +112,11 @@ export class StudentAssistantService {
           status: task.status,
           dueDate: task.dueDate?.toISOString() ?? null,
         })) ?? [],
+      importableEvents: verifiedImportableEvents.map((event) => ({
+        id: event.id,
+        criterion: event.criterion,
+        updatedAt: event.updatedAt.toISOString(),
+      })),
     };
     const contextVersion = sha256(JSON.stringify(stableSort(versionInput))).slice(0, 32);
     const context: StudentAssistantContext = {
@@ -243,6 +262,9 @@ function buildFallbackNarrative(
   }
   if (action.type === 'submit_application') {
     return 'Các tiêu chí bắt buộc hiện đã sẵn sàng. Bạn có thể xem lại hồ sơ một lần cuối trước khi nộp cho cán bộ xét duyệt.';
+  }
+  if (action.type === 'import_event') {
+    return 'Bạn có một hoạt động trong danh sách chính thức phù hợp với tiêu chí còn thiếu. Kiểm tra thông tin và nhập minh chứng nếu đúng với hồ sơ của bạn.';
   }
   if (state === 'under_review') {
     return 'Hồ sơ đã được gửi và đang trong quy trình xét duyệt. Bạn có thể theo dõi trạng thái hoặc phản hồi khi có yêu cầu mới.';

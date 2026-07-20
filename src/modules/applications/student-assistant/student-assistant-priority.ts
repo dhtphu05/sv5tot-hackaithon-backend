@@ -41,6 +41,12 @@ type LatestPrecheck = {
   nextBestAction?: string | null;
 };
 
+type VerifiedImportableEvent = {
+  id: string;
+  eventName: string;
+  criterion: Criterion;
+};
+
 export type StudentAssistantPriorityInput = {
   application: {
     id: string;
@@ -53,6 +59,7 @@ export type StudentAssistantPriorityInput = {
   completion: CriterionCompletionDto[];
   latestPrecheck: LatestPrecheck | null;
   precheckIsStale: boolean;
+  verifiedImportableEvents?: VerifiedImportableEvent[];
   now?: Date;
 };
 
@@ -175,6 +182,32 @@ export function resolveStudentNextBestAction(
     };
   }
 
+  const importable = firstImportableEvent(input.verifiedImportableEvents ?? [], input.completion);
+  if (importable) {
+    return {
+      id: `import-event:${importable.id}`,
+      type: 'import_event',
+      priority: 5,
+      title: `Thêm minh chứng từ ${importable.eventName}`,
+      deterministicDescription:
+        'Bạn có trong danh sách chính thức của một hoạt động phù hợp với tiêu chí còn thiếu.',
+      ctaLabel: 'Nhập từ sự kiện',
+      destination: {
+        route: '/app/application',
+        query: {
+          criterion: importable.criterion,
+          eventId: importable.id,
+          mode: 'suggested-import',
+        },
+      },
+      applicationId: application.id,
+      criterion: importable.criterion,
+      eventId: importable.id,
+      urgency: 'normal',
+      reasonCode: 'verified_event_import_available',
+    };
+  }
+
   const missing = input.completion.find((item) =>
     ['not_started', 'in_progress', 'precheck_warning'].includes(item.status),
   );
@@ -285,6 +318,17 @@ export function resolveStudentNextBestAction(
     urgency: 'normal',
     reasonCode: 'draft_in_progress',
   };
+}
+
+function firstImportableEvent(
+  events: VerifiedImportableEvent[],
+  completion: CriterionCompletionDto[],
+) {
+  const missingCriteria = completion
+    .filter((item) => ['not_started', 'in_progress', 'precheck_warning'].includes(item.status))
+    .map((item) => item.criterion);
+  if (!missingCriteria.length) return events[0] ?? null;
+  return events.find((event) => missingCriteria.includes(event.criterion)) ?? null;
 }
 
 export function resolveAssistantState(input: StudentAssistantPriorityInput): StudentAssistantState {

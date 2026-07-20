@@ -35,6 +35,7 @@ function input(overrides: InputOverrides = {}): StudentAssistantPriorityInput {
     completion: overrides.completion ?? [],
     latestPrecheck: overrides.latestPrecheck ?? null,
     precheckIsStale: overrides.precheckIsStale ?? false,
+    verifiedImportableEvents: overrides.verifiedImportableEvents ?? [],
     now: overrides.now ?? new Date('2026-07-21T00:00:00.000Z'),
   };
 }
@@ -162,6 +163,89 @@ describe('student assistant priority resolver', () => {
       evidenceId: 'ev-gpa',
       priority: 4,
     });
+  });
+
+  it('suggests verified event import before generic missing evidence', () => {
+    const action = resolveStudentNextBestAction(
+      input({
+        completion: [
+          {
+            criterion: Criterion.volunteer,
+            title: 'Tình nguyện tốt',
+            description: '',
+            status: 'not_started',
+            requirementGroups: [],
+            completion: { satisfied: 0, required: 1, needsVerification: 0 },
+            evidenceCount: 0,
+            nextAction: { type: 'add_evidence', label: 'Bổ sung tình nguyện', requirementKey: 'volunteer_days' },
+          },
+        ],
+        verifiedImportableEvents: [
+          {
+            id: 'event-1',
+            eventName: 'Mùa hè xanh 2026',
+            criterion: Criterion.volunteer,
+          },
+        ],
+      }),
+    );
+
+    expect(action).toMatchObject({
+      id: 'import-event:event-1',
+      type: 'import_event',
+      priority: 5,
+      eventId: 'event-1',
+      criterion: Criterion.volunteer,
+      destination: {
+        route: '/app/application',
+        query: {
+          criterion: Criterion.volunteer,
+          eventId: 'event-1',
+          mode: 'suggested-import',
+        },
+      },
+      reasonCode: 'verified_event_import_available',
+    });
+  });
+
+  it('keeps blocking precheck above verified event import', () => {
+    const action = resolveStudentNextBestAction(
+      input({
+        completion: [
+          {
+            criterion: Criterion.volunteer,
+            title: 'Tình nguyện tốt',
+            description: '',
+            status: 'not_started',
+            requirementGroups: [],
+            completion: { satisfied: 0, required: 1, needsVerification: 0 },
+            evidenceCount: 0,
+            nextAction: null,
+          },
+        ],
+        latestPrecheck: {
+          createdAt: new Date('2026-07-21T00:00:00.000Z'),
+          readinessScore: 45,
+          resultJson: {
+            nextAction: {
+              type: 'resolve_precheck_issue',
+              label: 'Xử lý minh chứng',
+              criterion: Criterion.academic,
+            },
+          },
+        },
+        precheckIsStale: false,
+        verifiedImportableEvents: [
+          {
+            id: 'event-1',
+            eventName: 'Mùa hè xanh 2026',
+            criterion: Criterion.volunteer,
+          },
+        ],
+      }),
+    );
+
+    expect(action?.type).toBe('resolve_precheck_issue');
   });
 
   it('prioritizes stale precheck before ready submit', () => {

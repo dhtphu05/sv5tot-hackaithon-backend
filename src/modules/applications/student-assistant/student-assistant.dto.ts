@@ -19,6 +19,7 @@ export type AssistantActionType =
   | 'retry_evidence_analysis'
   | 'replace_evidence_file'
   | 'resolve_precheck_issue'
+  | 'import_event'
   | 'add_evidence'
   | 'run_precheck'
   | 'rerun_precheck'
@@ -43,6 +44,7 @@ export type StudentNextBestAction = {
   applicationId: string;
   criterion?: Criterion;
   evidenceId?: string;
+  eventId?: string;
   reviewTaskId?: string;
   notificationId?: string;
   dueAt?: string;

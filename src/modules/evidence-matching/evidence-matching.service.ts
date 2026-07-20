@@ -25,10 +25,22 @@ import {
   resolveExactParticipantNameMatch,
 } from '../event-registry/event-participant-matching';
 import {
+  EVENT_SUGGESTION_MIN_QUERY_LENGTH,
+  buildAcronym,
+  buildLibraryQueryVariants,
+  hasNonYearTokenOverlap,
+  isFuzzyLibraryMatch,
+  normalizeLibraryText,
+  rankEventSuggestions,
+  tokenOverlap,
+  type EventSuggestionCandidate,
+} from './event-suggestion-ranking';
+import {
   toStudentOfficialEventLibraryItemDto,
   toStudentReferenceEventLibraryItemDto,
 } from './evidence-matching.dto';
 import type {
+  EvidenceEventSuggestionQuery,
   EvidenceMatchingLibraryQuery,
   EvidenceMatchingSearchQuery,
 } from './evidence-matching.validation';
@@ -203,6 +215,116 @@ export class EvidenceMatchingService {
     };
   }
 
+  async suggestions(user: AuthenticatedUser, query: EvidenceEventSuggestionQuery) {
+    const application = await this.db.application.findUnique({
+      where: { id: query.applicationId },
+      select: { id: true, studentId: true, workspaceId: true },
+    });
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    assertSameWorkspace(user, application, 'Application not found');
+    assertApplicationOwner(application as Application, user);
+
+    const normalizedQuery = normalizeLibraryText(query.query);
+    const hasEventId = Boolean(query.eventId);
+    if (!hasEventId && normalizedQuery.length < EVENT_SUGGESTION_MIN_QUERY_LENGTH) {
+      return {
+        query: query.query ?? null,
+        normalizedQuery: normalizedQuery || null,
+        suggestions: [],
+        meta: {
+          minimumQueryLength: EVENT_SUGGESTION_MIN_QUERY_LENGTH,
+          resultCount: 0,
+          source: 'event_registry' as const,
+        },
+      };
+    }
+
+    const where: Prisma.EventRegistryWhereInput = {
+      workspaceId: application.workspaceId,
+      status: EventStatus.active,
+      rosterIndexed: true,
+      ...(query.criterion ? { criterion: query.criterion } : {}),
+      ...(query.eventId ? { id: query.eventId } : {}),
+    };
+
+    const events = (await this.db.eventRegistry.findMany({
+      where,
+      select: {
+        id: true,
+        eventName: true,
+        criterion: true,
+        organizer: true,
+        organizerLevel: true,
+        startDate: true,
+        endDate: true,
+        convertedValue: true,
+        convertedUnit: true,
+        createdAt: true,
+        updatedAt: true,
+        aliases: { select: { alias: true, normalizedAliasKey: true } },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+      take: query.eventId ? 1 : Math.max(query.limit * 25, 250),
+    })) as EventSuggestionCandidate[];
+
+    const importedEventIds = await this.findImportedEventIds(
+      application.id,
+      events.map((event) => event.id),
+    );
+    const visibleEvents = query.excludeImported
+      ? events.filter((event) => !importedEventIds.has(event.id))
+      : events;
+    const ranked = rankEventSuggestions({
+      events: visibleEvents,
+      query: query.eventId ? (query.query ?? null) : normalizedQuery,
+      criterion: query.criterion,
+    }).slice(0, query.limit);
+
+    await this.auditService.log({
+      actorId: user.id,
+      actorRole: user.role,
+      action: auditActions.EVENT_SUGGESTION_VIEWED,
+      entityType: 'official_matching',
+      entityId: application.id,
+      applicationId: application.id,
+      metadata: {
+        criterion: query.criterion ?? null,
+        query: query.query ?? null,
+        eventId: query.eventId ?? null,
+        resultCount: ranked.length,
+      },
+    });
+
+    return {
+      query: query.query ?? null,
+      normalizedQuery: normalizedQuery || null,
+      suggestions: ranked.map((item) => ({
+        eventId: item.event.id,
+        eventName: item.event.eventName,
+        criterion: item.event.criterion,
+        organizer: item.event.organizer,
+        organizerLevel: item.event.organizerLevel,
+        startDate: item.event.startDate,
+        endDate: item.event.endDate,
+        convertedValue: item.event.convertedValue,
+        convertedUnit: item.event.convertedUnit,
+        alreadyImported: importedEventIds.has(item.event.id),
+        match: item.match,
+        participantCheck: {
+          required: true,
+          state: 'eligible_to_check' as const,
+        },
+      })),
+      meta: {
+        minimumQueryLength: EVENT_SUGGESTION_MIN_QUERY_LENGTH,
+        resultCount: ranked.length,
+        source: 'event_registry' as const,
+      },
+    };
+  }
+
   private async findCandidates(
     user: AuthenticatedUser,
     query: EvidenceMatchingSearchQuery,
@@ -324,20 +446,6 @@ export class EvidenceMatchingService {
   }
 }
 
-const verifiedLibraryAbbreviations: Record<string, string> = {
-  cd: 'chien dich',
-  mhx: 'mua he xanh',
-  nckh: 'nghien cuu khoa hoc',
-};
-
-const verifiedLibraryAliases = new Map<string, string>([
-  ['cd mhx', 'chien dich mua he xanh'],
-  ['chien dich mhx', 'chien dich mua he xanh'],
-  ['mhx', 'mua he xanh'],
-  ['nckh', 'nghien cuu khoa hoc'],
-  ['hien mau', 'hien mau nhan dao'],
-]);
-
 function rankLibraryEvents(events: StudentLibraryEvent[], search: string): StudentLibraryEvent[] {
   const query = normalizeLibraryText(search);
   if (!query) return dedupeLibraryEvents(events);
@@ -361,21 +469,6 @@ function dedupeLibraryEvents(events: StudentLibraryEvent[]): StudentLibraryEvent
     deduped.push(event);
   }
   return deduped;
-}
-
-function buildLibraryQueryVariants(query: string): string[] {
-  const expandedTokens = query
-    .split(' ')
-    .flatMap((token) => verifiedLibraryAbbreviations[token]?.split(' ') ?? [token])
-    .join(' ');
-  return Array.from(
-    new Set([
-      query,
-      expandedTokens,
-      verifiedLibraryAliases.get(query) ?? '',
-      ...(query.startsWith('chien dich ') ? [query.replace(/^chien dich\s+/, '')] : []),
-    ].filter(Boolean)),
-  );
 }
 
 function scoreLibraryEvent(event: StudentLibraryEvent, queryVariants: string[]): number {
@@ -405,50 +498,6 @@ function scoreLibraryEvent(event: StudentLibraryEvent, queryVariants: string[]):
   }
 
   return best;
-}
-
-function normalizeLibraryText(value: string | null | undefined): string {
-  return (value ?? '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/đ/g, 'd')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function buildAcronym(value: string): string {
-  const tokens = value.split(' ').filter((token) => token && !/^\d{4}$/.test(token));
-  return tokens.map((token) => token[0]).join('');
-}
-
-function isFuzzyLibraryMatch(query: string, title: string): boolean {
-  const queryTokens = query.split(' ').filter((token) => token.length >= 3);
-  const titleTokens = title.split(' ').filter((token) => token.length >= 3);
-  return queryTokens.every((queryToken) =>
-    titleTokens.some((titleToken) => {
-      if (titleToken.includes(queryToken) || queryToken.includes(titleToken)) return true;
-      const distance = levenshteinDistance(queryToken, titleToken);
-      return distance <= Math.max(2, Math.floor(Math.min(queryToken.length, titleToken.length) / 4));
-    }),
-  );
-}
-
-function levenshteinDistance(left: string, right: string): number {
-  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  const current = Array.from({ length: right.length + 1 }, () => 0);
-
-  for (let i = 1; i <= left.length; i += 1) {
-    current[0] = i;
-    for (let j = 1; j <= right.length; j += 1) {
-      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
-      current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost);
-    }
-    previous.splice(0, previous.length, ...current);
-  }
-
-  return previous[right.length] ?? 0;
 }
 
 function rankEvent(
@@ -508,29 +557,6 @@ function resolveMatchType(matchType: OfficialMatchType, participantFound: boolea
     return participantFound ? 'similar_name_and_student_found' : 'similar_name_student_not_found';
   }
   return 'no_match';
-}
-
-function tokenOverlap(query: string, target: string): number {
-  const queryTokens = new Set(query.split(' ').filter((token) => token.length >= 2));
-  if (queryTokens.size === 0) return 0;
-  const targetTokens = new Set(target.split(' ').filter((token) => token.length >= 2));
-  let matches = 0;
-  for (const token of queryTokens) {
-    if (targetTokens.has(token)) matches += 1;
-  }
-  return matches / queryTokens.size;
-}
-
-function hasNonYearTokenOverlap(query: string, target: string): boolean {
-  const targetTokens = new Set(
-    target
-      .split(' ')
-      .filter((token) => token.length >= 2 && !/^\d{4}$/.test(token)),
-  );
-  return query
-    .split(' ')
-    .filter((token) => token.length >= 2 && !/^\d{4}$/.test(token))
-    .some((token) => targetTokens.has(token));
 }
 
 function toOfficialMatchingEventDto(event: EventRegistry) {

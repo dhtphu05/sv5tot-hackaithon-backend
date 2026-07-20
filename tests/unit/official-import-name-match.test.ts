@@ -41,6 +41,7 @@ const user = {
 const application = {
   id: 'application-1',
   studentId: 'student-1',
+  workspaceId: 'workspace-1',
   status: 'draft',
   student: {
     id: 'student-1',
@@ -51,6 +52,7 @@ const application = {
 
 const event = {
   id: 'event-1',
+  workspaceId: 'workspace-1',
   eventName: 'Mùa hè xanh 2026',
   criterion: Criterion.volunteer,
   organizer: 'Hội Sinh viên',
@@ -84,6 +86,7 @@ describe('importEventAsEvidence participant name matching', () => {
     prismaMock.$transaction.mockImplementation(async (callback) =>
       callback({
         evidence: {
+          findFirst: vi.fn().mockResolvedValue(null),
           create: vi.fn().mockResolvedValue({
             id: 'evidence-1',
             applicationId: 'application-1',
@@ -110,6 +113,7 @@ describe('importEventAsEvidence participant name matching', () => {
             matchedParticipantId: participant.id,
           }),
         },
+        application: { update: vi.fn().mockResolvedValue({}) },
         auditLog: { create: vi.fn().mockResolvedValue({}) },
       }),
     );
