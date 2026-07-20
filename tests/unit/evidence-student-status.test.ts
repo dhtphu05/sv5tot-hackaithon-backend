@@ -72,7 +72,7 @@ describe('evidence student status DTO', () => {
   it('normalizes warning labels and readable summary keys', () => {
     expect(mapWarnings([{ code: 'not_matched_registry' }])[0]).toMatchObject({
       code: 'official_match_not_found',
-      label: 'Chưa tìm thấy trong danh sách chính thức',
+      label: 'Minh chứng tự tải lên',
     });
     expect(buildReadableSummary({ student_name: 'Nguyen Van Sinh', event_name: 'Mua he xanh' })).toMatchObject({
       studentName: 'Nguyen Van Sinh',

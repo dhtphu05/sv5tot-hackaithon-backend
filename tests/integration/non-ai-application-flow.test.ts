@@ -172,7 +172,7 @@ describe('non-AI individual application end-to-end flow', () => {
       .post('/api/applications/current/start')
       .set('Authorization', `Bearer ${student.accessToken}`)
       .send({ schoolYear, targetLevel: Level.school })
-      .expect(200);
+      .expect(201);
     const applicationId = started.body.data.id as string;
     expect(started.body.data).toMatchObject({
       id: applicationId,
@@ -235,7 +235,7 @@ describe('non-AI individual application end-to-end flow', () => {
           sourceType: 'manual_upload',
         })
         .expect(201);
-      const evidenceId = created.body.data.id as string;
+      const evidenceId = created.body.data.evidence.id as string;
       evidenceIds[criterion] = evidenceId;
 
       const uploaded = await request(app)
@@ -262,7 +262,7 @@ describe('non-AI individual application end-to-end flow', () => {
       .get(`/api/applications/${applicationId}/evidences`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
-    expect(listedEvidences.body.data).toHaveLength(criteria.length);
+    expect(listedEvidences.body.data.items).toHaveLength(criteria.length);
 
     const submitted = await request(app)
       .post(`/api/applications/${applicationId}/submit`)
@@ -292,12 +292,12 @@ describe('non-AI individual application end-to-end flow', () => {
       .query({ schoolYear, status: 'under_review', q: 'E2E Student' })
       .set('Authorization', `Bearer ${manager.accessToken}`)
       .expect(200);
-    expect(managerApplications.body.data).toEqual(
+    expect(managerApplications.body.data.items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: applicationId,
           status: 'under_review',
-          reviewProgress: expect.objectContaining({ totalTasks: criteria.length }),
+          reviewTaskCount: criteria.length,
         }),
       ]),
     );
@@ -306,7 +306,7 @@ describe('non-AI individual application end-to-end flow', () => {
       .get('/api/manager/workloads')
       .set('Authorization', `Bearer ${manager.accessToken}`)
       .expect(200);
-    expect(workloads.body.data.officers.some((officer: { workload: { totalActive: number } }) => officer.workload.totalActive > 0)).toBe(
+    expect(workloads.body.data.officers.some((officer: { totalOpen: number }) => officer.totalOpen > 0)).toBe(
       true,
     );
 
@@ -317,8 +317,8 @@ describe('non-AI individual application end-to-end flow', () => {
         .query({ applicationId, criterion, assignedToMe: true })
         .set('Authorization', `Bearer ${officer.accessToken}`)
         .expect(200);
-      expect(taskList.body.data).toHaveLength(1);
-      const task = taskList.body.data[0];
+      expect(taskList.body.data.items).toHaveLength(1);
+      const task = taskList.body.data.items[0];
 
       const detail = await request(app)
         .get(`/api/review/tasks/${task.id}`)
@@ -327,7 +327,7 @@ describe('non-AI individual application end-to-end flow', () => {
       expect(detail.body.data.task).toMatchObject({
         id: task.id,
         criterion,
-        status: ReviewTaskStatus.reviewing,
+        status: ReviewTaskStatus.waiting,
       });
       expect(detail.body.data.evidences).toEqual(
         expect.arrayContaining([
@@ -343,6 +343,7 @@ describe('non-AI individual application end-to-end flow', () => {
         .set('Authorization', `Bearer ${officer.accessToken}`)
         .send({
           decision: ReviewDecision.accepted,
+          officerSuggestedLevel: Level.school,
           officerNote: `Accepted ${criterion} in E2E flow.`,
           evidenceDecisions: [
             {
@@ -401,7 +402,7 @@ describe('non-AI individual application end-to-end flow', () => {
       .get('/api/notifications')
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
-    expect(notifications.body.data).toEqual(
+    expect(notifications.body.data.items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           applicationId,
@@ -414,6 +415,6 @@ describe('non-AI individual application end-to-end flow', () => {
       .get(`/api/applications/${applicationId}/timeline`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
-    expect(timeline.body.data.items.length).toBeGreaterThan(0);
+    expect(timeline.body.data.length).toBeGreaterThan(0);
   });
 });

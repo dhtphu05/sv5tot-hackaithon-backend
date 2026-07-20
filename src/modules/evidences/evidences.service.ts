@@ -734,13 +734,13 @@ export class EvidencesService {
       matchedParticipantId: card.matchedParticipantId,
       warnings: card.warningsJson,
       studentProfileFields: {
-        studentName: evidence.application?.student.fullName,
-        studentCode: evidence.application?.student.studentCode,
-        className: evidence.application?.student.className,
-        faculty: evidence.application?.student.faculty,
+        studentName: evidence.application?.student?.fullName,
+        studentCode: evidence.application?.student?.studentCode,
+        className: evidence.application?.student?.className,
+        faculty: evidence.application?.student?.faculty,
       },
       applicationMetrics:
-        evidence.application?.metrics.map((metric) => ({
+        evidence.application?.metrics?.map((metric) => ({
           metricType: metric.metricType,
           value: metric.value,
           scale: metric.scale,

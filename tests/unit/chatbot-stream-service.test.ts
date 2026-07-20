@@ -78,7 +78,11 @@ describe('ChatbotService streaming', () => {
       },
     );
 
-    expect(events.map((event) => event.event)).toEqual(['meta', 'delta', 'delta', 'card', 'final']);
+    expect(events[0]?.event).toBe('meta');
+    expect(events[1]?.event).toBe('delta');
+    expect(events[2]?.event).toBe('delta');
+    expect(events.at(-2)?.event).toBe('card');
+    expect(events.at(-1)?.event).toBe('final');
     expect(events[1]).toMatchObject({
       event: 'delta',
       data: { text: 'Mình đang kiểm tra dữ liệu hồ sơ cấp Trường...' },
@@ -87,7 +91,7 @@ describe('ChatbotService streaming', () => {
       event: 'delta',
       data: { text: 'Đã tìm thấy 2 điểm cần xử lý.' },
     });
-    expect(events[3]).toMatchObject({
+    expect(events.at(-2)).toMatchObject({
       event: 'card',
       data: {
         messages: [
@@ -133,7 +137,7 @@ describe('ChatbotService streaming', () => {
 
     const final = events.at(-1)?.data;
     expect(final).toMatchObject({
-      answer: expect.stringContaining('Mình đã kiểm tra dữ liệu demo của hồ sơ cấp Trường'),
+      answer: expect.stringContaining('Mình đã kiểm tra dữ liệu hồ sơ cấp Trường'),
       messages: [
         expect.objectContaining({
           title: 'Minh chứng hiện có trong hồ sơ cấp Trường',

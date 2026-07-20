@@ -170,6 +170,7 @@ function selectFaculty(text: string): string | undefined {
   const explicit = matchFirst(text, [
     /(?:Khoa|Viện|Đơn\s*vị)[ \t]*:[ \t]*([^\n,.;]{3,80})/i,
     /(?:Khoa|Viện|Đơn\s*vị)[ \t]+([A-ZÀ-Ỹ][^\n,.;]{3,80})/i,
+    /(?:Ngành|Chuyên\s*ngành)[ \t]*:[ \t]*([^\n,.;]{3,80})/i,
   ]);
   if (!explicit) return undefined;
   const value = normalizeWhitespace(explicit);
