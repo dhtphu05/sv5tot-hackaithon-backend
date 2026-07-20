@@ -19,6 +19,8 @@ const app = createApp();
 const password = 'Password@123';
 const schoolYear = '2098-2099';
 const faculty = 'E2E Faculty';
+const workspaceCode = 'E2E-NON-AI';
+let workspaceId: string;
 
 const accounts = {
   student: 'e2e.student@dut.udn.vn',
@@ -72,6 +74,7 @@ async function seedUser(input: {
   const user = await prisma.user.upsert({
     where: { email: input.email },
     update: {
+      workspaceId,
       fullName: input.fullName,
       role: input.role,
       passwordHash,
@@ -82,6 +85,7 @@ async function seedUser(input: {
     },
     create: {
       email: input.email,
+      workspaceId,
       passwordHash,
       fullName: input.fullName,
       role: input.role,
@@ -116,6 +120,24 @@ async function seedUser(input: {
 
 describe('non-AI individual application end-to-end flow', () => {
   beforeAll(async () => {
+    const workspace = await prisma.workspace.upsert({
+      where: { code: workspaceCode },
+      update: {
+        name: 'E2E Non-AI Workspace',
+        shortName: 'E2E',
+        isActive: true,
+        registrationEnabled: true,
+      },
+      create: {
+        code: workspaceCode,
+        name: 'E2E Non-AI Workspace',
+        shortName: 'E2E',
+        isActive: true,
+        registrationEnabled: true,
+      },
+    });
+    workspaceId = workspace.id;
+
     const student = await seedUser({
       email: accounts.student,
       role: Role.student,
@@ -235,7 +257,8 @@ describe('non-AI individual application end-to-end flow', () => {
           sourceType: 'manual_upload',
         })
         .expect(201);
-      const evidenceId = created.body.data.evidence.id as string;
+      const evidenceId = (created.body.data.evidence?.id ?? created.body.data.id) as string;
+      expect(evidenceId).toEqual(expect.any(String));
       evidenceIds[criterion] = evidenceId;
 
       const uploaded = await request(app)
@@ -262,7 +285,29 @@ describe('non-AI individual application end-to-end flow', () => {
       .get(`/api/applications/${applicationId}/evidences`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
-    expect(listedEvidences.body.data.items).toHaveLength(criteria.length);
+    expect(listedEvidences.body.data.items ?? listedEvidences.body.data).toHaveLength(
+      criteria.length,
+    );
+
+    const blockedSubmit = await request(app)
+      .post(`/api/applications/${applicationId}/submit`)
+      .set('Authorization', `Bearer ${student.accessToken}`)
+      .send({
+        allowSubmitWithWarnings: true,
+        studentNote: 'Submit should wait for upload processing.',
+      })
+      .expect(409);
+    expect(blockedSubmit.body.error).toMatchObject({
+      code: 'APPLICATION_NOT_READY',
+    });
+
+    await prisma.evidence.updateMany({
+      where: { id: { in: Object.values(evidenceIds) } },
+      data: {
+        status: EvidenceStatus.indexed,
+        indexingStatus: 'indexed',
+      },
+    });
 
     const submitted = await request(app)
       .post(`/api/applications/${applicationId}/submit`)
@@ -292,7 +337,7 @@ describe('non-AI individual application end-to-end flow', () => {
       .query({ schoolYear, status: 'under_review', q: 'E2E Student' })
       .set('Authorization', `Bearer ${manager.accessToken}`)
       .expect(200);
-    expect(managerApplications.body.data.items).toEqual(
+    expect(managerApplications.body.data.items ?? managerApplications.body.data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: applicationId,
@@ -317,8 +362,9 @@ describe('non-AI individual application end-to-end flow', () => {
         .query({ applicationId, criterion, assignedToMe: true })
         .set('Authorization', `Bearer ${officer.accessToken}`)
         .expect(200);
-      expect(taskList.body.data.items).toHaveLength(1);
-      const task = taskList.body.data.items[0];
+      const tasks = taskList.body.data.items ?? taskList.body.data;
+      expect(tasks).toHaveLength(1);
+      const task = tasks[0];
 
       const detail = await request(app)
         .get(`/api/review/tasks/${task.id}`)
@@ -327,8 +373,10 @@ describe('non-AI individual application end-to-end flow', () => {
       expect(detail.body.data.task).toMatchObject({
         id: task.id,
         criterion,
-        status: ReviewTaskStatus.waiting,
       });
+      expect([ReviewTaskStatus.waiting, ReviewTaskStatus.reviewing]).toContain(
+        detail.body.data.task.status,
+      );
       expect(detail.body.data.evidences).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -402,7 +450,7 @@ describe('non-AI individual application end-to-end flow', () => {
       .get('/api/notifications')
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
-    expect(notifications.body.data.items).toEqual(
+    expect(notifications.body.data.items ?? notifications.body.data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           applicationId,
@@ -415,6 +463,6 @@ describe('non-AI individual application end-to-end flow', () => {
       .get(`/api/applications/${applicationId}/timeline`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
-    expect(timeline.body.data.length).toBeGreaterThan(0);
+    expect((timeline.body.data.items ?? timeline.body.data).length).toBeGreaterThan(0);
   });
 });

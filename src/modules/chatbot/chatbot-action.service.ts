@@ -115,7 +115,10 @@ export class ChatbotActionService {
     if (!action) {
       throw new AppError(404, ErrorCodes.CHATBOT_ACTION_NOT_FOUND, 'Chatbot action not found');
     }
-    if (action.userId !== user.id) {
+    if (user.role !== 'admin' && action.workspaceId !== user.workspaceId) {
+      throw new AppError(404, ErrorCodes.CHATBOT_ACTION_NOT_FOUND, 'Chatbot action not found');
+    }
+    if (user.role !== 'admin' && action.userId !== user.id) {
       throw new AppError(403, ErrorCodes.CHATBOT_ACTION_FORBIDDEN, 'Action belongs to another user');
     }
     if (action.sessionStatus !== 'active') {
@@ -148,6 +151,7 @@ async function auditAction(
     data: {
       actorId: user.id,
       actorRole: user.role,
+      workspaceId: action.workspaceId,
       action: auditActionName,
       targetType: 'chatbot_action',
       targetId: action.id,

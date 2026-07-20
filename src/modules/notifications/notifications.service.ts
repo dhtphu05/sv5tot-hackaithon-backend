@@ -1,4 +1,5 @@
 import type { NotificationType, Prisma } from '@prisma/client';
+import { prisma } from '../../infrastructure/database/prisma';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { NotificationsRepository } from './notifications.repository';
@@ -7,6 +8,7 @@ import { toNotificationSummary } from './notifications.dto';
 
 export type CreateNotificationInput = {
   userId: string;
+  workspaceId?: string | null;
   type: NotificationType;
   title: string;
   message: string;
@@ -22,8 +24,17 @@ export class NotificationsService {
   constructor(private readonly notificationsRepository = new NotificationsRepository()) {}
 
   async create(input: CreateNotificationInput, tx?: Prisma.TransactionClient) {
+    const client = tx ?? prisma;
+    const userWorkspace =
+      input.workspaceId === undefined
+        ? await client.user.findUnique({
+            where: { id: input.userId },
+            select: { workspaceId: true },
+          })
+        : null;
     const data = {
       userId: input.userId,
+      workspaceId: input.workspaceId ?? userWorkspace?.workspaceId ?? null,
       type: input.type,
       title: input.title,
       message: input.message,

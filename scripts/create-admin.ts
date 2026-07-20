@@ -16,6 +16,7 @@ async function main(): Promise<void> {
     update: {
       role: Role.admin,
       isActive: true,
+      workspaceId: null,
     },
     create: {
       email,
@@ -23,6 +24,7 @@ async function main(): Promise<void> {
       passwordHash,
       role: Role.admin,
       isActive: true,
+      workspaceId: null,
     },
   });
 

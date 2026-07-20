@@ -5,6 +5,7 @@ import type { ChatbotAction, NormalizedSmartbotResponse } from './chatbot.types'
 export type ChatbotConversationRecord = {
   sessionId: string;
   userId: string;
+  workspaceId?: string | null;
   role: Role;
   applicationId?: string;
   reviewTaskId?: string;
@@ -27,6 +28,7 @@ export interface ChatbotActionRepository {
     sessionId: string;
     userId: string;
     actions: ChatbotAction[];
+    workspaceId?: string | null;
   }): Promise<ChatbotAction[]>;
   findAction(actionId: string): Promise<PersistedChatbotAction | null>;
   updateStatus(
@@ -42,12 +44,14 @@ export interface ChatbotHandoffRepository {
     applicationId?: string;
     reviewTaskId?: string;
     resolutionCaseId?: string;
+    workspaceId?: string | null;
     reason: string;
   }): Promise<void>;
 }
 
 export type PersistedChatbotAction = {
   id: string;
+  workspaceId: string | null;
   sessionId: string;
   userId: string;
   actionType: string;
@@ -76,6 +80,7 @@ export class PrismaChatbotConversationRepository implements ChatbotConversationR
       where: { id: input.sessionId },
       create: {
         id: input.sessionId,
+        workspaceId: input.workspaceId,
         userId: input.userId,
         role: input.role,
         applicationId: input.applicationId,
@@ -86,6 +91,7 @@ export class PrismaChatbotConversationRepository implements ChatbotConversationR
       },
       update: {
         status: 'active',
+        workspaceId: input.workspaceId,
         contextScope: input.contextScope,
         applicationId: input.applicationId,
         reviewTaskId: input.reviewTaskId,
@@ -124,6 +130,7 @@ export class PrismaChatbotActionRepository implements ChatbotActionRepository {
   async saveActions(input: {
     sessionId: string;
     userId: string;
+    workspaceId?: string | null;
     actions: ChatbotAction[];
   }): Promise<ChatbotAction[]> {
     const saved: ChatbotAction[] = [];
@@ -131,6 +138,7 @@ export class PrismaChatbotActionRepository implements ChatbotActionRepository {
       const created = await prisma.chatbotAction.create({
         data: {
           sessionId: input.sessionId,
+          workspaceId: input.workspaceId,
           userId: input.userId,
           actionType: action.type,
           toolName: action.toolName,
@@ -160,6 +168,7 @@ export class PrismaChatbotActionRepository implements ChatbotActionRepository {
         session: {
           select: {
             status: true,
+            workspaceId: true,
             applicationId: true,
             reviewTaskId: true,
             resolutionCaseId: true,
@@ -181,6 +190,7 @@ export class PrismaChatbotActionRepository implements ChatbotActionRepository {
         session: {
           select: {
             status: true,
+            workspaceId: true,
             applicationId: true,
             reviewTaskId: true,
             resolutionCaseId: true,
@@ -204,11 +214,13 @@ export class PrismaChatbotHandoffRepository implements ChatbotHandoffRepository 
     applicationId?: string;
     reviewTaskId?: string;
     resolutionCaseId?: string;
+    workspaceId?: string | null;
     reason: string;
   }): Promise<void> {
     await prisma.chatbotHandoff.create({
       data: {
         sessionId: input.sessionId,
+        workspaceId: input.workspaceId,
         userId: input.userId,
         applicationId: input.applicationId,
         reviewTaskId: input.reviewTaskId,
@@ -264,6 +276,7 @@ function toPersistedAction(
       session: {
         select: {
           status: true;
+          workspaceId: true;
           applicationId: true;
           reviewTaskId: true;
           resolutionCaseId: true;
@@ -275,6 +288,7 @@ function toPersistedAction(
   return {
     ...action,
     sessionStatus: action.session.status,
+    workspaceId: action.workspaceId ?? action.session.workspaceId,
     applicationId: action.session.applicationId,
     reviewTaskId: action.session.reviewTaskId,
     resolutionCaseId: action.session.resolutionCaseId,

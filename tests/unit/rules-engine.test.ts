@@ -19,6 +19,7 @@ import type { EvidenceWithCard } from '../../src/modules/rules/rules.types';
 
 const application = {
   id: 'app-1',
+  workspaceId: '11111111-1111-1111-1111-111111111111',
   studentId: 'student-1',
   schoolYear: '2025-2026',
   applicationType: ApplicationType.individual,

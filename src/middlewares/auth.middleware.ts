@@ -19,7 +19,20 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     }
 
     const payload = tokenService.verifyAccessToken(token);
-    const user = await prisma.user.findUnique({ where: { id: payload.sub } });
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+      include: {
+        workspace: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            shortName: true,
+            isActive: true,
+          },
+        },
+      },
+    });
 
     if (!user) {
       next(new AppError(401, ErrorCodes.UNAUTHORIZED, 'Authenticated user was not found'));
@@ -31,8 +44,27 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
       return;
     }
 
+    if (user.role !== 'admin') {
+      if (!user.workspaceId || !user.workspace) {
+        next(
+          new AppError(
+            403,
+            ErrorCodes.USER_WORKSPACE_REQUIRED,
+            'User account is missing workspace configuration',
+          ),
+        );
+        return;
+      }
+
+      if (!user.workspace.isActive) {
+        next(new AppError(403, ErrorCodes.WORKSPACE_INACTIVE, 'Workspace is inactive'));
+        return;
+      }
+    }
+
     req.user = {
       id: user.id,
+      workspaceId: user.workspaceId,
       email: user.email,
       role: user.role,
       fullName: user.fullName,
@@ -40,6 +72,14 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
       className: user.className,
       faculty: user.faculty,
       avatarUrl: user.avatarUrl,
+      workspace: user.workspace
+        ? {
+            id: user.workspace.id,
+            code: user.workspace.code,
+            name: user.workspace.name,
+            shortName: user.workspace.shortName,
+          }
+        : null,
     };
 
     next();

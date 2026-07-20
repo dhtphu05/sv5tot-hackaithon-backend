@@ -25,6 +25,7 @@ export const officerTools: ChatbotToolDefinition[] = [
         .parse(input);
       const tasks = await prisma.reviewTask.findMany({
         where: {
+          ...workspaceFilter(ctx),
           ...(ctx.role === 'officer' ? { assignedOfficerId: ctx.userId } : {}),
           ...(parsed.status ? { status: parsed.status } : {}),
           ...(parsed.criterion ? { criterion: parsed.criterion } : {}),
@@ -98,10 +99,11 @@ export const officerTools: ChatbotToolDefinition[] = [
     mode: 'read',
     requiredRoles: ['officer', 'manager', 'committee', 'admin'],
     inputSchema: z.object({ query: z.string().trim().min(1).max(200), criterion: z.nativeEnum(Criterion).optional() }),
-    handler: async (_ctx, input) => {
+    handler: async (ctx, input) => {
       const parsed = z.object({ query: z.string().trim().min(1).max(200), criterion: z.nativeEnum(Criterion).optional() }).parse(input);
       const items = await prisma.knowledgeBaseItem.findMany({
         where: {
+          ...workspaceFilter(ctx),
           ...(parsed.criterion ? { criterion: parsed.criterion } : {}),
           OR: [
             { evidenceName: { contains: parsed.query, mode: 'insensitive' } },
@@ -149,4 +151,8 @@ export const officerTools: ChatbotToolDefinition[] = [
 
 function textResult(message: string): ChatbotToolResult {
   return { type: 'text', message };
+}
+
+function workspaceFilter(ctx: { role: string; workspaceId?: string | null }) {
+  return ctx.role === 'admin' ? {} : { workspaceId: ctx.workspaceId ?? '__missing_workspace__' };
 }

@@ -9,6 +9,7 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { StorageService } from '../storage/storage.service';
 import type {
@@ -21,10 +22,11 @@ export class ExportsService {
   constructor(private readonly storage = new StorageService()) {}
 
   async exportApplicationsJson(user: AuthenticatedUser, query: ExportApplicationsQuery) {
-    const items = await this.buildApplicationRows(query);
+    const items = await this.buildApplicationRows(user, query);
     await createApplicationAudit(prisma, {
       actorId: user.id,
       actorRole: user.role,
+      workspaceId: user.role === Role.admin ? null : user.workspaceId,
       action: 'EXPORT_APPLICATIONS_JSON',
       targetType: 'export',
       targetId: 'applications.json',
@@ -38,10 +40,11 @@ export class ExportsService {
   }
 
   async exportApplicationsCsv(user: AuthenticatedUser, query: ExportApplicationsQuery) {
-    const items = await this.buildApplicationRows(query);
+    const items = await this.buildApplicationRows(user, query);
     await createApplicationAudit(prisma, {
       actorId: user.id,
       actorRole: user.role,
+      workspaceId: user.role === Role.admin ? null : user.workspaceId,
       action: 'EXPORT_APPLICATIONS_CSV',
       targetType: 'export',
       targetId: 'applications.csv',
@@ -51,10 +54,11 @@ export class ExportsService {
   }
 
   async exportReviewTasksCsv(user: AuthenticatedUser, query: ExportReviewTasksQuery) {
-    const items = await this.buildReviewTaskRows(query);
+    const items = await this.buildReviewTaskRows(user, query);
     await createApplicationAudit(prisma, {
       actorId: user.id,
       actorRole: user.role,
+      workspaceId: user.role === Role.admin ? null : user.workspaceId,
       action: 'EXPORT_REVIEW_TASKS_CSV',
       targetType: 'export',
       targetId: 'review-tasks.csv',
@@ -64,11 +68,12 @@ export class ExportsService {
   }
 
   async exportReviewResults(user: AuthenticatedUser, input: ExportReviewResultsInput) {
-    const data = await this.buildRows(input);
+    const data = await this.buildRows(user, input);
     if (input.format === 'json') {
       await createApplicationAudit(prisma, {
         actorId: user.id,
         actorRole: user.role,
+        workspaceId: user.role === Role.admin ? null : user.workspaceId,
         action: auditActions.EXPORT_REVIEW_RESULTS_CREATED,
         targetType: 'export',
         targetId: 'json',
@@ -90,6 +95,7 @@ export class ExportsService {
     const file = await prisma.file.create({
       data: {
         ownerId: user.id,
+        workspaceId: user.role === Role.admin ? null : user.workspaceId,
         uploadedBy: user.id,
         storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
         filePath: stored.filePath,
@@ -102,6 +108,7 @@ export class ExportsService {
     await createApplicationAudit(prisma, {
       actorId: user.id,
       actorRole: user.role,
+      workspaceId: user.role === Role.admin ? null : user.workspaceId,
       action: auditActions.EXPORT_REVIEW_RESULTS_CREATED,
       targetType: 'file',
       targetId: file.id,
@@ -124,17 +131,7 @@ export class ExportsService {
     if (!file || !isExportFilePath(file.filePath)) {
       throw new AppError(404, ErrorCodes.EXPORT_FILE_NOT_FOUND, 'Export file not found');
     }
-    if (file.storageType === FileStorageType.r2) {
-      const signedUrl = await this.storage.getSignedReadUrl(file.filePath, 300, file.storageType);
-      await createApplicationAudit(prisma, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActions.EXPORT_REVIEW_RESULTS_DOWNLOADED,
-        targetType: 'file',
-        targetId: file.id,
-      });
-      return { file, signedUrl };
-    }
+    assertSameWorkspace(user, file, 'Export file not found');
     const absolutePath = path.resolve(uploadConfig.uploadDir, file.filePath);
     const root = path.resolve(uploadConfig.uploadDir);
     const relativePath = path.relative(root, absolutePath);
@@ -145,6 +142,7 @@ export class ExportsService {
     await createApplicationAudit(prisma, {
       actorId: user.id,
       actorRole: user.role,
+      workspaceId: file.workspaceId,
       action: auditActions.EXPORT_REVIEW_RESULTS_DOWNLOADED,
       targetType: 'file',
       targetId: file.id,
@@ -152,8 +150,9 @@ export class ExportsService {
     return { file, absolutePath };
   }
 
-  private async buildRows(input: ExportReviewResultsInput) {
+  private async buildRows(user: AuthenticatedUser, input: ExportReviewResultsInput) {
     const where: Prisma.ApplicationWhereInput = {
+      ...workspaceFilterFor(user),
       ...(input.schoolYear ? { schoolYear: input.schoolYear } : {}),
       ...(input.status ? { status: input.status } : {}),
       ...(input.targetLevel ? { targetLevel: input.targetLevel } : {}),
@@ -216,8 +215,8 @@ export class ExportsService {
     });
   }
 
-  private async buildApplicationRows(query: ExportApplicationsQuery) {
-    const where = buildApplicationWhere(query);
+  private async buildApplicationRows(user: AuthenticatedUser, query: ExportApplicationsQuery) {
+    const where = { ...buildApplicationWhere(query), ...workspaceFilterFor(user) };
     const applications = await prisma.application.findMany({
       where,
       include: {
@@ -252,8 +251,9 @@ export class ExportsService {
     });
   }
 
-  private async buildReviewTaskRows(query: ExportReviewTasksQuery) {
+  private async buildReviewTaskRows(user: AuthenticatedUser, query: ExportReviewTasksQuery) {
     const where: Prisma.ReviewTaskWhereInput = {
+      ...workspaceFilterFor(user),
       ...(query.criterion ? { criterion: query.criterion } : {}),
       application: buildApplicationWhere(query),
     };

@@ -33,6 +33,7 @@ export async function processDecisionMetadataJob(job: IndexingJob): Promise<Pris
 
   const smartreaderJob = await prisma.smartReaderJob.create({
     data: {
+      workspaceId: decisionImport.workspaceId,
       jobType: SmartReaderJobType.decision_metadata,
       fileId: decisionImport.sourceFileId,
       decisionImportId: decisionImport.id,

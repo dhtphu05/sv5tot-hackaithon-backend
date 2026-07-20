@@ -19,6 +19,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       {
         text: 'Soạn yêu cầu bổ sung',
@@ -49,6 +51,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       { text: 'Em cần chuyển cán bộ', contextScope: 'reviewer_copilot' },
     );
@@ -71,6 +75,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       {
         text: 'Hồ sơ cấp Trường của em còn thiếu gì?',
@@ -112,6 +118,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       {
         text: 'hiện tại em đang có những minh chứng gì rồi ạ',
@@ -147,6 +155,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       {
         text: 'Tìm minh chứng tình nguyện',
@@ -184,6 +194,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       { text: 'Hỏi cán bộ phụ trách', contextScope: 'student_helpdesk' },
     );
@@ -208,6 +220,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       { text: 'Upload minh chứng thể lực', contextScope: 'student_helpdesk' },
     );
@@ -237,6 +251,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       {
         text: 'Cấp Trường cần tiêu chí tình nguyện gì?',
@@ -274,6 +290,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       {
         text: 'tiêu chí của sinh viên 5 tốt cấp trường',
@@ -299,6 +317,8 @@ describe('ChatbotService', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId: null,
+        workspace: null,
       },
       {
         text: 'Bạn có thể hỗ trợ gì?',

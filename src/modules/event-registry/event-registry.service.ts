@@ -13,6 +13,7 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import {
   createApplicationAudit,
 } from '../applications/application.helpers';
@@ -23,6 +24,7 @@ import {
   applyColumnMapping,
   type NormalizedParticipantInput,
 } from './event-participant.normalizer';
+import { toStaffEventWorkspaceDto } from './event-registry.dto';
 import { EventRegistryRepository } from './event-registry.repository';
 import type {
   CheckParticipantInput,
@@ -86,6 +88,7 @@ export class EventRegistryService {
           participantCount: 0,
           rosterIndexed: false,
           status,
+          workspaceId: workspaceIdForWrite(user),
           createdBy: user.id,
         },
       });
@@ -106,13 +109,30 @@ export class EventRegistryService {
   }
 
   async getDetail(user: AuthenticatedUser, eventId: string) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
     this.assertCanViewEvent(user, event);
     return this.toEventDto(event);
   }
 
+  async getStaffWorkspace(user: AuthenticatedUser, eventId: string) {
+    if (user.role === Role.student || user.role === Role.class_representative) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students cannot view staff event workspace');
+    }
+
+    const event = await this.repository.findStaffWorkspaceById(eventId);
+    if (!event) throw new AppError(404, ErrorCodes.EVENT_NOT_FOUND, 'Event not found');
+    assertSameWorkspace(user, event, 'Event not found');
+
+    const latestEventFile = event.eventFiles[0] ?? null;
+    const latestJob = latestEventFile
+      ? await this.repository.findLatestCompletedRosterJob(latestEventFile.id)
+      : null;
+
+    return toStaffEventWorkspaceDto(event, latestJob?.resultJson);
+  }
+
   async update(user: AuthenticatedUser, eventId: string, input: UpdateEventInput) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
 
     if (event.rosterIndexed && input.criterion && input.criterion !== event.criterion) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot change criterion after roster indexing');
@@ -169,7 +189,7 @@ export class EventRegistryService {
   }
 
   async delete(user: AuthenticatedUser, eventId: string) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
 
     await prisma.$transaction(async (tx) => {
       await tx.eventParticipant.deleteMany({ where: { eventId: event.id } });
@@ -190,7 +210,7 @@ export class EventRegistryService {
   }
 
   async uploadRosterFile(user: AuthenticatedUser, eventId: string, file?: UploadedRosterFile) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
     if (!file) {
       throw new AppError(400, ErrorCodes.EVENT_ROSTER_REQUIRED, 'Roster file is required');
     }
@@ -212,6 +232,7 @@ export class EventRegistryService {
           originalName: file.originalname,
           mimeType: file.mimetype,
           fileSize: file.size,
+          workspaceId: event.workspaceId,
           uploadedBy: user.id,
         },
       });
@@ -227,6 +248,7 @@ export class EventRegistryService {
       const job = await tx.indexingJob.create({
         data: {
           jobType: JobType.event_roster_indexing,
+          workspaceId: event.workspaceId,
           targetId: eventFile.id,
           status: 'queued',
           attempts: 0,
@@ -257,7 +279,7 @@ export class EventRegistryService {
   }
 
   async startIndexing(user: AuthenticatedUser, eventId: string, input: StartRosterIndexingInput) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
     const eventFile = input.eventFileId
       ? await this.repository.findEventFile(input.eventFileId)
       : await this.repository.findLatestEventFile(event.id);
@@ -279,6 +301,7 @@ export class EventRegistryService {
       (await prisma.indexingJob.create({
         data: {
           jobType: JobType.event_roster_indexing,
+          workspaceId: event.workspaceId,
           targetId: eventFile.id,
           status: 'queued',
           attempts: 0,
@@ -316,7 +339,7 @@ export class EventRegistryService {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students cannot list event participants');
     }
 
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
 
     if (query.preview) {
       const eventFile = await this.repository.findLatestEventFile(event.id);
@@ -352,7 +375,7 @@ export class EventRegistryService {
   }
 
   async confirmIndex(user: AuthenticatedUser, eventId: string, input: ConfirmIndexInput) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
     const eventFile = input.eventFileId
       ? await this.repository.findEventFile(input.eventFileId)
       : await this.repository.findLatestEventFile(event.id);
@@ -461,7 +484,7 @@ export class EventRegistryService {
     eventId: string,
     input: ImportParticipantsJsonInput,
   ) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
 
     if (event.status === EventStatus.archived) {
       throw new AppError(400, ErrorCodes.EVENT_NOT_ACTIVE, 'Cannot import participants to archived events');
@@ -545,7 +568,7 @@ export class EventRegistryService {
     eventId: string,
     input: CheckParticipantInput,
   ) {
-    const event = await this.getRequiredEvent(eventId);
+    const event = await this.getRequiredEvent(user, eventId);
 
     // Rule: Chỉ check event confirmed cho student.
     const isStudent = user.role === Role.student || user.role === Role.class_representative;
@@ -590,6 +613,7 @@ export class EventRegistryService {
       data: {
         actorId: user.id,
         actorRole: user.role,
+        workspaceId: event.workspaceId,
         action: 'EVENT_PARTICIPANT_CHECKED',
         targetType: 'event',
         targetId: event.id,
@@ -636,9 +660,10 @@ export class EventRegistryService {
     });
   }
 
-  private async getRequiredEvent(eventId: string) {
+  private async getRequiredEvent(user: AuthenticatedUser, eventId: string) {
     const event = await this.repository.findById(eventId);
     if (!event) throw new AppError(404, ErrorCodes.EVENT_NOT_FOUND, 'Event not found');
+    assertSameWorkspace(user, event, 'Event not found');
     return event;
   }
 

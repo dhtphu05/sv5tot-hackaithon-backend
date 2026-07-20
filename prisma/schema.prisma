@@ -179,6 +179,29 @@ enum KnowledgeDecision {
   reference_only
 }
 
+enum ApprovedEvidenceApprovalSource {
+  officer
+  resolution
+}
+
+enum ApprovedEvidencePrecedentStatus {
+  active
+  revoked
+}
+
+enum EventRegistryAliasType {
+  alias
+  acronym
+  abbreviation
+}
+
+enum EventRegistryAliasVerificationSource {
+  officer
+  resolution
+  registry
+  manager
+}
+
 enum MetricType {
   gpa
   conduct_score
@@ -192,6 +215,22 @@ enum VerificationStatus {
   pending
   verified
   rejected
+}
+
+enum RequirementResponseKind {
+  metric
+  evidence
+  official_event
+  system_confirmation
+}
+
+enum RequirementResponseStatus {
+  declared
+  processing
+  needs_verification
+  verified
+  rejected
+  superseded
 }
 
 enum EventStatus {
@@ -240,37 +279,76 @@ enum CollectiveStatus {
   rejected
 }
 
+model Workspace {
+  id                         String                           @id @default(uuid()) @db.Uuid
+  code                       String                           @unique
+  name                       String
+  shortName                  String?
+  isActive                   Boolean                          @default(true)
+  registrationEnabled        Boolean                          @default(false)
+  createdAt                  DateTime                         @default(now())
+  updatedAt                  DateTime                         @updatedAt
+  users                      User[]
+  applications               Application[]
+  requirementResponses       ApplicationRequirementResponse[]
+  files                      File[]
+  eventRegistries            EventRegistry[]
+  decisionImports            DecisionImport[]
+  knowledgeBaseItems         KnowledgeBaseItem[]
+  criteriaVersions           CriteriaVersion[]
+  reviewTasks                ReviewTask[]
+  resolutionCases            ResolutionCase[]
+  eventRegistryAliases       EventRegistryAlias[]
+  workspaceAbbreviations     WorkspaceAbbreviation[]
+  approvedEvidencePrecedents ApprovedEvidencePrecedent[]
+  indexingJobs               IndexingJob[]
+  smartReaderJobs            SmartReaderJob[]
+  auditLogs                  AuditLog[]
+  notifications              Notification[]
+  collectiveProfiles         CollectiveProfile[]
+  chatSessions               ChatSession[]
+  chatbotActions             ChatbotAction[]
+  chatbotHandoffs            ChatbotHandoff[]
+
+  @@index([isActive, registrationEnabled])
+}
+
 model User {
-  id                       String                  @id @default(uuid()) @db.Uuid
+  id                       String                           @id @default(uuid()) @db.Uuid
+  workspaceId              String?                          @db.Uuid
   fullName                 String
-  email                    String                  @unique
+  email                    String                           @unique
   passwordHash             String
   phone                    String?
-  role                     Role                    @default(student)
-  studentCode              String?                 @unique
+  role                     Role                             @default(student)
+  studentCode              String?
   className                String?
   faculty                  String?
   avatarUrl                String?
-  isActive                 Boolean                 @default(true)
+  isActive                 Boolean                          @default(true)
   lastLoginAt              DateTime?
-  createdAt                DateTime                @default(now())
-  updatedAt                DateTime                @updatedAt
+  createdAt                DateTime                         @default(now())
+  updatedAt                DateTime                         @updatedAt
+  workspace                Workspace?                       @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   refreshTokens            RefreshToken[]
   officerSpecializations   OfficerSpecialization[]
   applications             Application[]
-  uploadedFiles            File[]                  @relation("UploadedFiles")
-  ownedFiles               File[]                  @relation("OwnedFiles")
-  createdDecisionImports   DecisionImport[]        @relation("DecisionImportCreatedBy")
-  confirmedDecisionImports DecisionImport[]        @relation("DecisionImportConfirmedBy")
+  uploadedFiles            File[]                           @relation("UploadedFiles")
+  ownedFiles               File[]                           @relation("OwnedFiles")
+  createdDecisionImports   DecisionImport[]                 @relation("DecisionImportCreatedBy")
+  confirmedDecisionImports DecisionImport[]                 @relation("DecisionImportConfirmedBy")
   auditLogs                AuditLog[]
   notifications            Notification[]
+  requirementResponses     ApplicationRequirementResponse[]
   collectiveProfiles       CollectiveProfile[]
   assignedReviewTasks      ReviewTask[]
-  finalizedApplications    Application[]           @relation("ApplicationFinalizedBy")
+  finalizedApplications    Application[]                    @relation("ApplicationFinalizedBy")
 
+  @@unique([workspaceId, studentCode])
   @@index([role])
   @@index([faculty])
   @@index([isActive])
+  @@index([workspaceId, role, isActive])
 }
 
 model RefreshToken {
@@ -302,35 +380,41 @@ model OfficerSpecialization {
 }
 
 model Application {
-  id                  String                     @id @default(uuid()) @db.Uuid
-  studentId           String                     @db.Uuid
-  schoolYear          String
-  applicationType     ApplicationType
-  targetLevel         Level
-  status              ApplicationStatus          @default(draft)
-  readinessScore      Float                      @default(0)
-  currentDraftVersion Int                        @default(1)
-  submittedAt         DateTime?
-  finalLevel          Level?
-  finalStatus         FinalStatus                @default(pending)
-  finalNote           String?
-  finalizedAt         DateTime?
-  finalizedById       String?                    @db.Uuid
-  createdAt           DateTime                   @default(now())
-  updatedAt           DateTime                   @updatedAt
-  student             User                       @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  finalizedBy         User?                      @relation("ApplicationFinalizedBy", fields: [finalizedById], references: [id], onDelete: SetNull)
-  draftSnapshots      ApplicationDraftSnapshot[]
-  metrics             ApplicationMetric[]
-  evidences           Evidence[]
-  precheckResults     PrecheckResult[]
-  cascadeReviews      CascadeReview[]
-  reviewTasks         ReviewTask[]
-  resolutionCases     ResolutionCase[]
-  notifications       Notification[]
-  auditLogs           AuditLog[]
+  id                   String                           @id @default(uuid()) @db.Uuid
+  workspaceId          String                           @db.Uuid
+  studentId            String                           @db.Uuid
+  schoolYear           String
+  applicationType      ApplicationType
+  targetLevel          Level
+  status               ApplicationStatus                @default(draft)
+  readinessScore       Float                            @default(0)
+  currentDraftVersion  Int                              @default(1)
+  submittedAt          DateTime?
+  finalLevel           Level?
+  finalStatus          FinalStatus                      @default(pending)
+  finalNote            String?
+  finalizedAt          DateTime?
+  finalizedById        String?                          @db.Uuid
+  createdAt            DateTime                         @default(now())
+  updatedAt            DateTime                         @updatedAt
+  workspace            Workspace                        @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  student              User                             @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  finalizedBy          User?                            @relation("ApplicationFinalizedBy", fields: [finalizedById], references: [id], onDelete: SetNull)
+  draftSnapshots       ApplicationDraftSnapshot[]
+  metrics              ApplicationMetric[]
+  evidences            Evidence[]
+  requirementResponses ApplicationRequirementResponse[]
+  precheckResults      PrecheckResult[]
+  cascadeReviews       CascadeReview[]
+  reviewTasks          ReviewTask[]
+  resolutionCases      ResolutionCase[]
+  notifications        Notification[]
+  auditLogs            AuditLog[]
 
   @@unique([studentId, schoolYear, applicationType])
+  @@unique([workspaceId, studentId, schoolYear, applicationType])
+  @@index([workspaceId, status, targetLevel])
+  @@index([workspaceId, studentId, schoolYear])
   @@index([status, targetLevel])
   @@index([targetLevel])
   @@index([studentId])
@@ -352,76 +436,114 @@ model ApplicationDraftSnapshot {
 }
 
 model ApplicationMetric {
-  id                 String             @id @default(uuid()) @db.Uuid
-  applicationId      String             @db.Uuid
-  metricType         MetricType
-  value              Float
-  scale              Float?
-  evidenceFileId     String?            @db.Uuid
-  verificationStatus VerificationStatus @default(unverified)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-  application        Application        @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  id                   String                           @id @default(uuid()) @db.Uuid
+  applicationId        String                           @db.Uuid
+  metricType           MetricType
+  value                Float
+  scale                Float?
+  evidenceFileId       String?                          @db.Uuid
+  schoolYear           String?
+  source               String?
+  supportingEvidenceId String?                          @db.Uuid
+  verificationStatus   VerificationStatus               @default(unverified)
+  createdAt            DateTime                         @default(now())
+  updatedAt            DateTime                         @updatedAt
+  application          Application                      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  requirementResponses ApplicationRequirementResponse[]
 
   @@unique([applicationId, metricType])
   @@index([verificationStatus])
 }
 
 model File {
-  id                              String              @id @default(uuid()) @db.Uuid
-  ownerId                         String              @db.Uuid
+  id                              String                      @id @default(uuid()) @db.Uuid
+  workspaceId                     String?                     @db.Uuid
+  ownerId                         String                      @db.Uuid
   storageType                     FileStorageType
   filePath                        String
   publicUrl                       String?
   originalName                    String
   mimeType                        String
   fileSize                        Int
-  uploadedBy                      String              @db.Uuid
+  uploadedBy                      String                      @db.Uuid
   vnptHash                        String?
   vnptFileType                    String?
   vnptUploadedAt                  DateTime?
   vnptUploadRawJson               Json?
-  createdAt                       DateTime            @default(now())
-  owner                           User                @relation("OwnedFiles", fields: [ownerId], references: [id], onDelete: Cascade)
-  uploader                        User                @relation("UploadedFiles", fields: [uploadedBy], references: [id], onDelete: Restrict)
+  createdAt                       DateTime                    @default(now())
+  workspace                       Workspace?                  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  owner                           User                        @relation("OwnedFiles", fields: [ownerId], references: [id], onDelete: Cascade)
+  uploader                        User                        @relation("UploadedFiles", fields: [uploadedBy], references: [id], onDelete: Restrict)
   evidenceFiles                   EvidenceFile[]
   eventFiles                      EventFile[]
-  decisionImports                 DecisionImport[]    @relation("DecisionImportSourceFile")
-  sampleCertificateEvents         EventRegistry[]     @relation("EventSampleCertificate")
-  sampleCertificateKnowledgeItems KnowledgeBaseItem[] @relation("KnowledgeSampleCertificate")
+  decisionImports                 DecisionImport[]            @relation("DecisionImportSourceFile")
+  sampleCertificateEvents         EventRegistry[]             @relation("EventSampleCertificate")
+  sampleCertificateKnowledgeItems KnowledgeBaseItem[]         @relation("KnowledgeSampleCertificate")
+  approvedEvidencePrecedents      ApprovedEvidencePrecedent[]
 
+  @@index([workspaceId])
   @@index([ownerId])
   @@index([uploadedBy])
 }
 
 model Evidence {
-  id                  String               @id @default(uuid()) @db.Uuid
-  applicationId       String?              @db.Uuid
-  collectiveProfileId String?              @db.Uuid
-  evidenceName        String
-  criterion           Criterion
-  sourceType          EvidenceSourceType
-  eventId             String?              @db.Uuid
-  status              EvidenceStatus       @default(draft)
-  indexingStatus      IndexingStatus       @default(not_started)
-  confidence          Float?
-  assignedOfficerId   String?              @db.Uuid
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
-  application         Application?         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  collectiveProfile   CollectiveProfile?   @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
-  event               EventRegistry?       @relation(fields: [eventId], references: [id], onDelete: SetNull)
-  evidenceFiles       EvidenceFile[]
-  evidenceCard        EvidenceCard?
-  reviewTaskEvidences ReviewTaskEvidence[]
-  resolutionCases     ResolutionCase[]
-  collectiveEvidences CollectiveEvidence[]
+  id                         String                           @id @default(uuid()) @db.Uuid
+  applicationId              String?                          @db.Uuid
+  collectiveProfileId        String?                          @db.Uuid
+  evidenceName               String
+  criterion                  Criterion
+  sourceType                 EvidenceSourceType
+  eventId                    String?                          @db.Uuid
+  status                     EvidenceStatus                   @default(draft)
+  indexingStatus             IndexingStatus                   @default(not_started)
+  confidence                 Float?
+  assignedOfficerId          String?                          @db.Uuid
+  createdAt                  DateTime                         @default(now())
+  updatedAt                  DateTime                         @updatedAt
+  application                Application?                     @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  collectiveProfile          CollectiveProfile?               @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+  event                      EventRegistry?                   @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  evidenceFiles              EvidenceFile[]
+  evidenceCard               EvidenceCard?
+  approvedEvidencePrecedents ApprovedEvidencePrecedent[]
+  reviewTaskEvidences        ReviewTaskEvidence[]
+  requirementResponses       ApplicationRequirementResponse[]
+  resolutionCases            ResolutionCase[]
+  collectiveEvidences        CollectiveEvidence[]
 
   @@index([applicationId, criterion])
   @@index([collectiveProfileId, criterion])
   @@index([evidenceName])
   @@index([indexingStatus])
   @@index([assignedOfficerId])
+}
+
+model ApplicationRequirementResponse {
+  id             String                    @id @default(uuid()) @db.Uuid
+  workspaceId    String                    @db.Uuid
+  applicationId  String                    @db.Uuid
+  criterion      Criterion
+  requirementKey String
+  responseKind   RequirementResponseKind
+  metricId       String?                   @db.Uuid
+  evidenceId     String?                   @db.Uuid
+  payloadJson    Json?
+  status         RequirementResponseStatus @default(declared)
+  createdBy      String                    @db.Uuid
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
+  workspace      Workspace                 @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  application    Application               @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  metric         ApplicationMetric?        @relation(fields: [metricId], references: [id], onDelete: SetNull)
+  evidence       Evidence?                 @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
+  creator        User                      @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, applicationId])
+  @@index([applicationId, criterion])
+  @@index([applicationId, requirementKey])
+  @@index([metricId])
+  @@index([evidenceId])
+  @@index([createdBy])
 }
 
 model EvidenceFile {
@@ -436,60 +558,67 @@ model EvidenceFile {
 }
 
 model EvidenceCard {
-  id                      String   @id @default(uuid()) @db.Uuid
-  evidenceId              String   @unique @db.Uuid
-  ocrText                 String?
-  ocrLinesJson            Json?    @map("ocr_lines_json")
-  ocrParagraphsJson       Json?    @map("ocr_paragraphs_json")
-  ocrTablesJson           Json?    @map("ocr_tables_json")
-  extractedFieldsJson     Json?
-  normalizedFieldsJson    Json?    @map("normalized_fields_json")
-  warningsJson            Json?
-  matchedEventId          String?  @db.Uuid
-  matchedParticipantId    String?  @map("matched_participant_id") @db.Uuid
-  matchedKnowledgeItemIds Json?
-  confidence              Float?
-  sourceEndpoint          String?  @map("source_endpoint")
-  smartreaderJobId        String?  @map("smartreader_job_id") @db.Uuid
-  aiSummary               String?
-  rawAiResponse           Json?
-  rawResponseJson         Json?    @map("raw_response_json")
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
-  evidence                Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+  id                         String                      @id @default(uuid()) @db.Uuid
+  evidenceId                 String                      @unique @db.Uuid
+  ocrText                    String?
+  ocrLinesJson               Json?                       @map("ocr_lines_json")
+  ocrParagraphsJson          Json?                       @map("ocr_paragraphs_json")
+  ocrTablesJson              Json?                       @map("ocr_tables_json")
+  extractedFieldsJson        Json?
+  normalizedFieldsJson       Json?                       @map("normalized_fields_json")
+  warningsJson               Json?
+  matchedEventId             String?                     @db.Uuid
+  matchedParticipantId       String?                     @map("matched_participant_id") @db.Uuid
+  matchedKnowledgeItemIds    Json?
+  confidence                 Float?
+  sourceEndpoint             String?                     @map("source_endpoint")
+  smartreaderJobId           String?                     @map("smartreader_job_id") @db.Uuid
+  aiSummary                  String?
+  rawAiResponse              Json?
+  rawResponseJson            Json?                       @map("raw_response_json")
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  evidence                   Evidence                    @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+  approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 }
 
 model EventRegistry {
-  id                      String             @id @default(uuid()) @db.Uuid
-  eventName               String
-  criterion               Criterion
-  organizer               String
-  organizerLevel          Level
-  startDate               DateTime?
-  endDate                 DateTime?
-  convertedValue          Float?
-  convertedUnit           String?
-  eligibleLevelsJson      Json?
-  participantCount        Int                @default(0)
-  rosterIndexed           Boolean            @default(false)
-  sampleCertificateFileId String?            @db.Uuid
-  decisionDocumentId      String?            @db.Uuid
-  sourceDecisionImportId  String?            @db.Uuid
-  officialDocumentNo      String?
-  officialIssueDate       DateTime?
-  officialSigner          String?
-  officialIssuer          String?
-  status                  EventStatus        @default(draft)
-  createdBy               String             @db.Uuid
-  createdAt               DateTime           @default(now())
-  updatedAt               DateTime           @updatedAt
-  sampleCertificateFile   File?              @relation("EventSampleCertificate", fields: [sampleCertificateFileId], references: [id], onDelete: SetNull)
-  decisionDocument        DecisionDocument?  @relation(fields: [decisionDocumentId], references: [id], onDelete: SetNull)
-  sourceDecisionImport    DecisionImport?    @relation(fields: [sourceDecisionImportId], references: [id], onDelete: SetNull)
-  evidences               Evidence[]
-  eventFiles              EventFile[]
-  participants            EventParticipant[]
+  id                         String                      @id @default(uuid()) @db.Uuid
+  workspaceId                String                      @db.Uuid
+  eventName                  String
+  criterion                  Criterion
+  organizer                  String
+  organizerLevel             Level
+  startDate                  DateTime?
+  endDate                    DateTime?
+  convertedValue             Float?
+  convertedUnit              String?
+  eligibleLevelsJson         Json?
+  participantCount           Int                         @default(0)
+  rosterIndexed              Boolean                     @default(false)
+  sampleCertificateFileId    String?                     @db.Uuid
+  decisionDocumentId         String?                     @db.Uuid
+  sourceDecisionImportId     String?                     @db.Uuid
+  officialDocumentNo         String?
+  officialIssueDate          DateTime?
+  officialSigner             String?
+  officialIssuer             String?
+  status                     EventStatus                 @default(draft)
+  createdBy                  String                      @db.Uuid
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  workspace                  Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  sampleCertificateFile      File?                       @relation("EventSampleCertificate", fields: [sampleCertificateFileId], references: [id], onDelete: SetNull)
+  decisionDocument           DecisionDocument?           @relation(fields: [decisionDocumentId], references: [id], onDelete: SetNull)
+  sourceDecisionImport       DecisionImport?             @relation(fields: [sourceDecisionImportId], references: [id], onDelete: SetNull)
+  evidences                  Evidence[]
+  eventFiles                 EventFile[]
+  participants               EventParticipant[]
+  aliases                    EventRegistryAlias[]
+  approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 
+  @@index([workspaceId, status])
+  @@index([workspaceId, criterion])
   @@index([criterion])
   @@index([status])
   @@index([eventName])
@@ -539,6 +668,7 @@ model EventParticipant {
 
 model DecisionImport {
   id                 String                     @id @default(uuid()) @db.Uuid
+  workspaceId        String                     @db.Uuid
   title              String
   criterion          Criterion?
   eventName          String?
@@ -565,6 +695,7 @@ model DecisionImport {
   lastUserMessage    String?
   processingStep     String?
   columnMappingJson  Json?
+  workspace          Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   sourceFile         File?                      @relation("DecisionImportSourceFile", fields: [sourceFileId], references: [id], onDelete: SetNull)
   creator            User                       @relation("DecisionImportCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
   confirmer          User?                      @relation("DecisionImportConfirmedBy", fields: [confirmedBy], references: [id], onDelete: SetNull)
@@ -573,6 +704,7 @@ model DecisionImport {
   previewRows        DecisionRosterPreviewRow[]
   events             EventRegistry[]
 
+  @@index([workspaceId, status])
   @@index([status])
   @@index([sourceFileId])
   @@index([createdBy])
@@ -645,6 +777,7 @@ model DecisionRosterPreviewRow {
 
 model KnowledgeBaseItem {
   id                      String            @id @default(uuid()) @db.Uuid
+  workspaceId             String            @db.Uuid
   evidenceName            String?
   eventName               String?
   criterion               Criterion
@@ -658,27 +791,118 @@ model KnowledgeBaseItem {
   createdBy               String            @db.Uuid
   createdAt               DateTime          @default(now())
   updatedAt               DateTime          @updatedAt
+  workspace               Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   sampleCertificateFile   File?             @relation("KnowledgeSampleCertificate", fields: [sampleCertificateFileId], references: [id], onDelete: SetNull)
 
+  @@index([workspaceId, criterion, level])
   @@index([criterion, level])
   @@index([evidenceName])
   @@index([eventName])
 }
 
+model EventRegistryAlias {
+  id                 String                               @id @default(uuid()) @db.Uuid
+  workspaceId        String                               @db.Uuid
+  eventId            String                               @db.Uuid
+  criterion          Criterion
+  alias              String
+  normalizedAliasKey String
+  aliasType          EventRegistryAliasType               @default(alias)
+  verificationSource EventRegistryAliasVerificationSource @default(officer)
+  createdBy          String?                              @db.Uuid
+  createdAt          DateTime                             @default(now())
+  updatedAt          DateTime                             @updatedAt
+  workspace          Workspace                            @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  event              EventRegistry                        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, eventId, normalizedAliasKey])
+  @@index([workspaceId, criterion, normalizedAliasKey])
+  @@index([workspaceId, normalizedAliasKey])
+  @@index([eventId])
+}
+
+model WorkspaceAbbreviation {
+  id                    String    @id @default(uuid()) @db.Uuid
+  workspaceId           String    @db.Uuid
+  token                 String
+  normalizedTokenKey    String
+  expandedText          String
+  normalizedExpandedKey String
+  isActive              Boolean   @default(true)
+  createdBy             String?   @db.Uuid
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, normalizedTokenKey])
+  @@index([workspaceId, isActive])
+}
+
+model ApprovedEvidencePrecedent {
+  id                     String                          @id @default(uuid()) @db.Uuid
+  workspaceId            String                          @db.Uuid
+  criterion              Criterion
+  eventId                String                          @db.Uuid
+  sourceEvidenceId       String                          @db.Uuid
+  sourceEvidenceCardId   String?                         @db.Uuid
+  sourceReviewTaskId     String?                         @db.Uuid
+  sourceResolutionCaseId String?                         @db.Uuid
+  previewFileId          String?                         @db.Uuid
+  approvalSource         ApprovedEvidenceApprovalSource
+  organizer              String?
+  organizerLevel         Level?
+  applicableLevel        Level?
+  eventYear              Int?
+  schoolYear             String?
+  criteriaVersionId      String?                         @db.Uuid
+  normalizedTitleKey     String
+  normalizedOrganizerKey String?
+  ocrSearchKey           String?
+  ocrMetadataJson        Json?
+  auditSummaryJson       Json?
+  status                 ApprovedEvidencePrecedentStatus @default(active)
+  createdBy              String?                         @db.Uuid
+  createdAt              DateTime                        @default(now())
+  updatedAt              DateTime                        @updatedAt
+  workspace              Workspace                       @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  event                  EventRegistry                   @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sourceEvidence         Evidence                        @relation(fields: [sourceEvidenceId], references: [id], onDelete: Cascade)
+  sourceEvidenceCard     EvidenceCard?                   @relation(fields: [sourceEvidenceCardId], references: [id], onDelete: SetNull)
+  sourceReviewTask       ReviewTask?                     @relation(fields: [sourceReviewTaskId], references: [id], onDelete: SetNull)
+  sourceResolutionCase   ResolutionCase?                 @relation(fields: [sourceResolutionCaseId], references: [id], onDelete: SetNull)
+  previewFile            File?                           @relation(fields: [previewFileId], references: [id], onDelete: SetNull)
+  criteriaVersion        CriteriaVersion?                @relation(fields: [criteriaVersionId], references: [id], onDelete: SetNull)
+
+  @@unique([sourceEvidenceId])
+  @@index([workspaceId, criterion, eventId, status])
+  @@index([workspaceId, criterion, status])
+  @@index([workspaceId, normalizedTitleKey])
+  @@index([workspaceId, normalizedOrganizerKey])
+  @@index([workspaceId, eventYear])
+  @@index([sourceReviewTaskId])
+  @@index([sourceResolutionCaseId])
+  @@index([previewFileId])
+}
+
 model CriteriaVersion {
-  id            String         @id @default(uuid()) @db.Uuid
-  schoolYear    String
-  unitScope     String
-  level         Level
-  versionName   String
-  effectiveFrom DateTime?
-  effectiveTo   DateTime?
-  isActive      Boolean        @default(true)
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  rules         CriteriaRule[]
+  id                         String                      @id @default(uuid()) @db.Uuid
+  workspaceId                String                      @db.Uuid
+  schoolYear                 String
+  unitScope                  String
+  level                      Level
+  versionName                String
+  effectiveFrom              DateTime?
+  effectiveTo                DateTime?
+  isActive                   Boolean                     @default(true)
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  workspace                  Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  rules                      CriteriaRule[]
+  approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 
   @@unique([schoolYear, unitScope, level, versionName])
+  @@unique([workspaceId, schoolYear, level, versionName])
+  @@index([workspaceId, level, isActive])
   @@index([level, isActive])
 }
 
@@ -726,27 +950,32 @@ model CascadeReview {
 }
 
 model ReviewTask {
-  id                    String               @id @default(uuid()) @db.Uuid
-  applicationId         String?              @db.Uuid
-  collectiveProfileId   String?              @db.Uuid
-  criterion             Criterion
-  assignedOfficerId     String?              @db.Uuid
-  status                ReviewTaskStatus     @default(waiting)
-  decision              ReviewDecision?
-  officerNote           String?
-  officerSuggestedLevel Level?
-  levelAssessmentJson   Json?
-  decisionReason        String?
-  supplementRequestJson Json?
-  dueDate               DateTime?
-  createdAt             DateTime             @default(now())
-  updatedAt             DateTime             @updatedAt
-  application           Application?         @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  collectiveProfile     CollectiveProfile?   @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
-  assignedOfficer       User?                @relation(fields: [assignedOfficerId], references: [id], onDelete: SetNull)
-  evidences             ReviewTaskEvidence[]
-  resolutionCases       ResolutionCase[]
+  id                         String                      @id @default(uuid()) @db.Uuid
+  workspaceId                String                      @db.Uuid
+  applicationId              String?                     @db.Uuid
+  collectiveProfileId        String?                     @db.Uuid
+  criterion                  Criterion
+  assignedOfficerId          String?                     @db.Uuid
+  status                     ReviewTaskStatus            @default(waiting)
+  decision                   ReviewDecision?
+  officerNote                String?
+  officerSuggestedLevel      Level?
+  levelAssessmentJson        Json?
+  decisionReason             String?
+  supplementRequestJson      Json?
+  dueDate                    DateTime?
+  createdAt                  DateTime                    @default(now())
+  updatedAt                  DateTime                    @updatedAt
+  workspace                  Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  application                Application?                @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  collectiveProfile          CollectiveProfile?          @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
+  assignedOfficer            User?                       @relation(fields: [assignedOfficerId], references: [id], onDelete: SetNull)
+  evidences                  ReviewTaskEvidence[]
+  resolutionCases            ResolutionCase[]
+  approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 
+  @@index([workspaceId, status])
+  @@index([workspaceId, assignedOfficerId, status])
   @@index([assignedOfficerId, status])
   @@index([status])
   @@index([criterion])
@@ -765,43 +994,51 @@ model ReviewTaskEvidence {
 }
 
 model ResolutionCase {
-  id                String           @id @default(uuid()) @db.Uuid
-  applicationId     String           @db.Uuid
-  evidenceId        String?          @db.Uuid
-  reviewTaskId      String?          @db.Uuid
-  reason            String
-  status            ResolutionStatus @default(open)
-  committeeDecision String?
-  createdBy         String           @db.Uuid
-  closedBy          String?          @db.Uuid
-  createdAt         DateTime         @default(now())
-  closedAt          DateTime?
-  application       Application      @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  evidence          Evidence?        @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
-  reviewTask        ReviewTask?      @relation(fields: [reviewTaskId], references: [id], onDelete: SetNull)
+  id                         String                      @id @default(uuid()) @db.Uuid
+  workspaceId                String                      @db.Uuid
+  applicationId              String                      @db.Uuid
+  evidenceId                 String?                     @db.Uuid
+  reviewTaskId               String?                     @db.Uuid
+  reason                     String
+  status                     ResolutionStatus            @default(open)
+  committeeDecision          String?
+  createdBy                  String                      @db.Uuid
+  closedBy                   String?                     @db.Uuid
+  createdAt                  DateTime                    @default(now())
+  closedAt                   DateTime?
+  workspace                  Workspace                   @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  application                Application                 @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  evidence                   Evidence?                   @relation(fields: [evidenceId], references: [id], onDelete: SetNull)
+  reviewTask                 ReviewTask?                 @relation(fields: [reviewTaskId], references: [id], onDelete: SetNull)
+  approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 
+  @@index([workspaceId, status])
   @@index([status])
   @@index([applicationId])
   @@index([reviewTaskId])
 }
 
 model IndexingJob {
-  id           String    @id @default(uuid()) @db.Uuid
+  id           String     @id @default(uuid()) @db.Uuid
+  workspaceId  String?    @db.Uuid
   jobType      JobType
-  targetId     String    @db.Uuid
-  status       JobStatus @default(queued)
-  attempts     Int       @default(0)
+  targetId     String     @db.Uuid
+  status       JobStatus  @default(queued)
+  attempts     Int        @default(0)
   errorMessage String?
   resultJson   Json?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  workspace    Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
+  @@index([workspaceId, jobType, status])
   @@index([jobType, status])
   @@index([targetId])
 }
 
 model SmartReaderJob {
   id                     String               @id @default(uuid()) @db.Uuid
+  workspaceId            String?              @map("workspace_id") @db.Uuid
   jobType                SmartReaderJobType   @map("job_type")
   provider               String               @default("vnpt_smartreader")
   fileId                 String?              @map("file_id") @db.Uuid
@@ -829,7 +1066,9 @@ model SmartReaderJob {
   createdAt              DateTime             @default(now()) @map("created_at")
   updatedAt              DateTime             @updatedAt @map("updated_at")
   completedAt            DateTime?            @map("completed_at")
+  workspace              Workspace?           @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
+  @@index([workspaceId, jobType, status])
   @@index([jobType, status])
   @@index([fileId])
   @@index([evidenceId])
@@ -841,6 +1080,7 @@ model SmartReaderJob {
 
 model AuditLog {
   id                  String             @id @default(uuid()) @db.Uuid
+  workspaceId         String?            @db.Uuid
   actorId             String?            @db.Uuid
   actorRole           Role?
   action              String
@@ -861,10 +1101,12 @@ model AuditLog {
   userAgent           String?
   note                String?
   createdAt           DateTime           @default(now())
+  workspace           Workspace?         @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   actor               User?              @relation(fields: [actorId], references: [id], onDelete: SetNull)
   application         Application?       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   collectiveProfile   CollectiveProfile? @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
 
+  @@index([workspaceId, createdAt])
   @@index([actorId])
   @@index([applicationId])
   @@index([collectiveProfileId])
@@ -877,6 +1119,7 @@ model AuditLog {
 
 model Notification {
   id                  String             @id @default(uuid()) @db.Uuid
+  workspaceId         String?            @db.Uuid
   userId              String             @db.Uuid
   applicationId       String?            @db.Uuid
   collectiveProfileId String?            @db.Uuid
@@ -889,10 +1132,12 @@ model Notification {
   message             String
   readAt              DateTime?
   createdAt           DateTime           @default(now())
+  workspace           Workspace?         @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   application         Application?       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
   collectiveProfile   CollectiveProfile? @relation(fields: [collectiveProfileId], references: [id], onDelete: Cascade)
 
+  @@index([workspaceId, createdAt])
   @@index([userId, readAt])
   @@index([userId, readAt, createdAt])
   @@index([applicationId])
@@ -932,6 +1177,7 @@ model EmailOutbox {
 
 model CollectiveProfile {
   id               String                     @id @default(uuid()) @db.Uuid
+  workspaceId      String                     @db.Uuid
   representativeId String                     @db.Uuid
   className        String
   schoolYear       String
@@ -945,6 +1191,7 @@ model CollectiveProfile {
   completedAt      DateTime?
   createdAt        DateTime                   @default(now())
   updatedAt        DateTime                   @updatedAt
+  workspace        Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   representative   User                       @relation(fields: [representativeId], references: [id], onDelete: Cascade)
   members          CollectiveMember[]
   evidences        CollectiveEvidence[]
@@ -955,6 +1202,8 @@ model CollectiveProfile {
   auditLogs        AuditLog[]
 
   @@unique([representativeId, schoolYear, className])
+  @@unique([workspaceId, representativeId, schoolYear, className])
+  @@index([workspaceId, status, targetLevel])
   @@index([status, targetLevel])
 }
 
@@ -1002,22 +1251,25 @@ model CollectivePrecheckResult {
 }
 
 model ChatSession {
-  id                 String   @id @default(uuid()) @db.Uuid
-  userId             String   @db.Uuid
-  role               String
-  applicationId      String?  @db.Uuid
-  reviewTaskId       String?  @db.Uuid
-  resolutionCaseId   String?  @db.Uuid
-  provider           String   @default("vnpt_smartbot")
-  providerSessionId  String?
-  contextScope       String?
-  status             String   @default("active")
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  messages           ChatMessage[]
-  actions            ChatbotAction[]
-  handoffs           ChatbotHandoff[]
+  id                String           @id @default(uuid()) @db.Uuid
+  workspaceId       String?          @db.Uuid
+  userId            String           @db.Uuid
+  role              String
+  applicationId     String?          @db.Uuid
+  reviewTaskId      String?          @db.Uuid
+  resolutionCaseId  String?          @db.Uuid
+  provider          String           @default("vnpt_smartbot")
+  providerSessionId String?
+  contextScope      String?
+  status            String           @default("active")
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  workspace         Workspace?       @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  messages          ChatMessage[]
+  actions           ChatbotAction[]
+  handoffs          ChatbotHandoff[]
 
+  @@index([workspaceId, userId])
   @@index([userId])
   @@index([applicationId])
   @@map("chat_sessions")
@@ -1040,6 +1292,7 @@ model ChatMessage {
 
 model ChatbotAction {
   id                   String      @id @default(uuid()) @db.Uuid
+  workspaceId          String?     @db.Uuid
   sessionId            String      @db.Uuid
   userId               String      @db.Uuid
   actionType           String
@@ -1057,8 +1310,10 @@ model ChatbotAction {
   auditLogId           String?     @db.Uuid
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
+  workspace            Workspace?  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   session              ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@index([workspaceId, userId, status])
   @@index([sessionId])
   @@index([userId])
   @@index([status])
@@ -1066,19 +1321,22 @@ model ChatbotAction {
 }
 
 model ChatbotHandoff {
-  id                 String      @id @default(uuid()) @db.Uuid
-  sessionId          String      @db.Uuid
-  userId             String      @db.Uuid
-  applicationId      String?     @db.Uuid
-  reviewTaskId       String?     @db.Uuid
-  resolutionCaseId   String?     @db.Uuid
-  reason             String?
-  status             String      @default("pending")
-  assignedOfficerId  String?     @db.Uuid
-  createdAt          DateTime    @default(now())
-  resolvedAt         DateTime?
-  session            ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  id                String      @id @default(uuid()) @db.Uuid
+  workspaceId       String?     @db.Uuid
+  sessionId         String      @db.Uuid
+  userId            String      @db.Uuid
+  applicationId     String?     @db.Uuid
+  reviewTaskId      String?     @db.Uuid
+  resolutionCaseId  String?     @db.Uuid
+  reason            String?
+  status            String      @default("pending")
+  assignedOfficerId String?     @db.Uuid
+  createdAt         DateTime    @default(now())
+  resolvedAt        DateTime?
+  workspace         Workspace?  @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  session           ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@index([workspaceId, status])
   @@index([userId])
   @@index([status])
   @@map("chatbot_handoffs")

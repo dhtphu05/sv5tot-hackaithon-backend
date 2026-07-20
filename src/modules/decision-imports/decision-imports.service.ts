@@ -29,6 +29,7 @@ import {
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import { AuditService } from '../audit/audit.service';
 import { assertApplicationEditable, assertApplicationOwner, createApplicationAudit } from '../applications/application.helpers';
 import {
@@ -69,8 +70,8 @@ const storageService = new StorageService();
 export class DecisionImportsService {
   constructor(private readonly repository = new DecisionImportsRepository()) {}
 
-  async list(_user: AuthenticatedUser, query: ListDecisionImportsQuery) {
-    const { items, total } = await this.repository.list(query);
+  async list(user: AuthenticatedUser, query: ListDecisionImportsQuery) {
+    const { items, total } = await this.repository.list(user, query);
     return {
       items: await this.toListDtos(items),
       pagination: {
@@ -95,6 +96,7 @@ export class DecisionImportsService {
         convertedValue: input.convertedValue,
         convertedUnit: input.convertedUnit,
         eligibleLevelsJson: input.eligibleLevels ?? undefined,
+        workspaceId: workspaceIdForWrite(user),
         createdBy: user.id,
       },
     });
@@ -112,13 +114,13 @@ export class DecisionImportsService {
     return this.getDetail(user, created.id);
   }
 
-  async getDetail(_user: AuthenticatedUser, id: string) {
-    const record = await this.getRequiredImport(id);
+  async getDetail(user: AuthenticatedUser, id: string) {
+    const record = await this.getRequiredImport(id, user);
     return this.toDetailDto(record);
   }
 
   async uploadFile(user: AuthenticatedUser, id: string, file?: UploadedDecisionFile) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     if (record.status === DecisionImportStatus.confirmed) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot replace file after decision import is confirmed');
     }
@@ -139,6 +141,7 @@ export class DecisionImportsService {
         originalName: file.originalname,
         mimeType: file.mimetype,
         fileSize: file.size,
+        workspaceId: record.workspaceId,
         uploadedBy: user.id,
       },
     });
@@ -195,7 +198,7 @@ export class DecisionImportsService {
   }
 
   async start(user: AuthenticatedUser, id: string, input: StartDecisionImportInput) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     if (!record.sourceFileId || !record.vnptHash || !record.vnptFileType) {
       throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Upload decision file to VNPT before starting import');
     }
@@ -204,8 +207,18 @@ export class DecisionImportsService {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const metadataJob = await findOrCreateDecisionJob(tx, record.id, JobType.decision_metadata);
-      const rosterJob = await findOrCreateDecisionJob(tx, record.id, JobType.decision_roster_ocr);
+      const metadataJob = await findOrCreateDecisionJob(
+        tx,
+        record.id,
+        JobType.decision_metadata,
+        record.workspaceId,
+      );
+      const rosterJob = await findOrCreateDecisionJob(
+        tx,
+        record.id,
+        JobType.decision_roster_ocr,
+        record.workspaceId,
+      );
       const updated = await tx.decisionImport.update({
         where: { id: record.id },
         data: {
@@ -249,17 +262,17 @@ export class DecisionImportsService {
   }
 
   async metadata(user: AuthenticatedUser, id: string) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     return { decisionImportId: id, document: record.documents[0] ?? null };
   }
 
   async tables(user: AuthenticatedUser, id: string) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     return { decisionImportId: id, items: record.tables };
   }
 
   async preview(user: AuthenticatedUser, id: string) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     return {
       decisionImportId: id,
       summary: previewSummary(record.previewRows),
@@ -276,7 +289,7 @@ export class DecisionImportsService {
   }
 
   async updateColumnMapping(user: AuthenticatedUser, id: string, input: UpdateColumnMappingInput) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     if (record.status === DecisionImportStatus.confirmed) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot update mapping after confirmation');
     }
@@ -319,7 +332,7 @@ export class DecisionImportsService {
   }
 
   async cancel(user: AuthenticatedUser, id: string) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     if (record.status === DecisionImportStatus.confirmed) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot cancel confirmed import');
     }
@@ -339,7 +352,7 @@ export class DecisionImportsService {
   }
 
   async confirm(user: AuthenticatedUser, id: string, input: ConfirmDecisionImportInput) {
-    const record = await this.getRequiredImport(id);
+    const record = await this.getRequiredImport(id, user);
     if (record.status === DecisionImportStatus.confirmed) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Decision import is already confirmed');
     }
@@ -362,7 +375,9 @@ export class DecisionImportsService {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const existing = await tx.eventRegistry.findFirst({ where: { sourceDecisionImportId: id } });
+      const existing = await tx.eventRegistry.findFirst({
+        where: { sourceDecisionImportId: id, workspaceId: record.workspaceId },
+      });
       const event = existing
         ? await tx.eventRegistry.update({
             where: { id: existing.id },
@@ -400,6 +415,7 @@ export class DecisionImportsService {
               participantCount: rows.length,
               rosterIndexed: true,
               status: EventStatus.active,
+              workspaceId: record.workspaceId,
               createdBy: user.id,
               decisionDocumentId: document?.id,
               sourceDecisionImportId: id,
@@ -504,9 +520,13 @@ export class DecisionImportsService {
     };
   }
 
-  private async getRequiredImport(id: string): Promise<DecisionImportRecord> {
+  private async getRequiredImport(
+    id: string,
+    user?: AuthenticatedUser,
+  ): Promise<DecisionImportRecord> {
     const record = await this.repository.findById(id);
     if (!record) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+    if (user) assertSameWorkspace(user, record, 'Decision import not found');
     return record;
   }
 
@@ -634,12 +654,18 @@ async function findOrCreateDecisionJob(
   tx: Prisma.TransactionClient,
   targetId: string,
   jobType: JobType,
+  workspaceId: string,
 ) {
   const existing = await tx.indexingJob.findFirst({
     where: { targetId, jobType, status: { in: [JobStatus.queued, JobStatus.processing] } },
     orderBy: { createdAt: 'desc' },
   });
-  return existing ?? tx.indexingJob.create({ data: { targetId, jobType, status: JobStatus.queued, attempts: 0 } });
+  return (
+    existing ??
+    tx.indexingJob.create({
+      data: { targetId, jobType, workspaceId, status: JobStatus.queued, attempts: 0 },
+    })
+  );
 }
 
 export function buildRosterPreview(input: {
@@ -803,6 +829,7 @@ export async function importEventAsEvidence(input: {
     include: { student: true },
   });
   if (!application) throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+  assertSameWorkspace(input.user, application, 'Application not found');
   const isStudent = input.user.role === Role.student || input.user.role === Role.class_representative;
   if (isStudent) {
     assertApplicationOwner(application, input.user);
@@ -811,6 +838,10 @@ export async function importEventAsEvidence(input: {
 
   const event = await prisma.eventRegistry.findUnique({ where: { id: input.eventId } });
   if (!event || event.status !== EventStatus.active) {
+    throw new AppError(404, ErrorCodes.EVENT_NOT_ACTIVE, 'Event is not active');
+  }
+  assertSameWorkspace(input.user, event, 'Event is not active');
+  if (event.workspaceId !== application.workspaceId) {
     throw new AppError(404, ErrorCodes.EVENT_NOT_ACTIVE, 'Event is not active');
   }
 

@@ -2,6 +2,7 @@ import {
   EventStatus,
   EvidenceSourceType,
   Role,
+  type Application,
   type EventParticipant,
   type EventRegistry,
   type Prisma,
@@ -16,14 +17,27 @@ import {
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { AuditService } from '../audit/audit.service';
+import { assertApplicationOwner } from '../applications/application.helpers';
 import {
   normalizeMatchingText,
   resolveExactParticipantNameMatch,
 } from '../event-registry/event-participant-matching';
-import type { EvidenceMatchingSearchQuery } from './evidence-matching.validation';
+import {
+  toStudentOfficialEventLibraryItemDto,
+  toStudentReferenceEventLibraryItemDto,
+} from './evidence-matching.dto';
+import type {
+  EvidenceMatchingLibraryQuery,
+  EvidenceMatchingSearchQuery,
+} from './evidence-matching.validation';
 
 type EventWithParticipant = EventRegistry & { participants: EventParticipant[] };
+type StudentLibraryEvent = Pick<
+  EventRegistry,
+  'id' | 'eventName' | 'organizer' | 'organizerLevel' | 'criterion' | 'updatedAt'
+>;
 
 export type OfficialMatchType =
   | 'exact_name_and_student_found'
@@ -37,6 +51,75 @@ export class EvidenceMatchingService {
     private readonly db: PrismaClient = prisma,
     private readonly auditService = new AuditService(),
   ) {}
+
+  async library(user: AuthenticatedUser, query: EvidenceMatchingLibraryQuery) {
+    if (user.role !== Role.student) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only students can browse the official evidence library');
+    }
+
+    const application = await this.db.application.findUnique({
+      where: { id: query.applicationId },
+      select: { id: true, studentId: true, workspaceId: true },
+    });
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    assertSameWorkspace(user, application, 'Application not found');
+    assertApplicationOwner(application as Application, user);
+
+    const search = query.search?.trim();
+    const where: Prisma.EventRegistryWhereInput = {
+      workspaceId: application.workspaceId,
+      status: EventStatus.active,
+      rosterIndexed: true,
+      ...(query.criterion ? { criterion: query.criterion } : {}),
+    };
+    const skip = (query.page - 1) * query.limit;
+
+    const select = {
+      id: true,
+      eventName: true,
+      organizer: true,
+      organizerLevel: true,
+      criterion: true,
+      updatedAt: true,
+    } satisfies Prisma.EventRegistrySelect;
+
+    const [events, total] = search
+      ? await this.searchLibraryEvents(where, search, skip, query.limit)
+      : await this.db.$transaction([
+          this.db.eventRegistry.findMany({
+            where,
+            select,
+            orderBy: { updatedAt: 'desc' },
+            skip,
+            take: query.limit,
+          }),
+          this.db.eventRegistry.count({ where }),
+        ]);
+
+    const importedEventIds =
+      query.projection === 'reference'
+        ? new Set<string>()
+        : await this.findImportedEventIds(
+            application.id,
+            events.map((event) => event.id),
+          );
+
+    return {
+      items:
+        query.projection === 'reference'
+          ? events.map((event) => toStudentReferenceEventLibraryItemDto(event))
+          : events.map((event) =>
+              toStudentOfficialEventLibraryItemDto(event, importedEventIds.has(event.id)),
+            ),
+      page: query.page,
+      limit: query.limit,
+      total,
+      totalPages: Math.ceil(total / query.limit),
+    };
+  }
 
   async search(user: AuthenticatedUser, query: EvidenceMatchingSearchQuery) {
     const isStudent = user.role === Role.student || user.role === Role.class_representative;
@@ -54,7 +137,7 @@ export class EvidenceMatchingService {
     }
 
     const normalizedQuery = normalizeMatchingText(query.q ?? '');
-    const candidates = await this.findCandidates(query, target);
+    const candidates = await this.findCandidates(user, query, target);
     const ranked = candidates
       .map((event) => rankEvent(event, normalizedQuery))
       .filter((item) => item.matchType !== 'no_match' || !normalizedQuery)
@@ -121,10 +204,12 @@ export class EvidenceMatchingService {
   }
 
   private async findCandidates(
+    user: AuthenticatedUser,
     query: EvidenceMatchingSearchQuery,
     target: { studentCode?: string | null; studentName?: string | null },
   ): Promise<EventWithParticipant[]> {
     const where: Prisma.EventRegistryWhereInput = {
+      ...workspaceFilterFor(user),
       status: EventStatus.active,
       rosterIndexed: true,
       ...(query.criterion ? { criterion: query.criterion } : {}),
@@ -173,6 +258,7 @@ export class EvidenceMatchingService {
       const application = await this.db.application.findUnique({
         where: { id: query.applicationId },
         select: {
+          workspaceId: true,
           student: {
             select: { studentCode: true, fullName: true },
           },
@@ -181,6 +267,7 @@ export class EvidenceMatchingService {
       if (!application) {
         throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
       }
+      assertSameWorkspace(user, application, 'Application not found');
       studentCode = studentCode ?? application.student.studentCode;
       studentName = studentName ?? application.student.fullName;
     }
@@ -211,6 +298,157 @@ export class EvidenceMatchingService {
     });
     return new Set(evidences.map((evidence) => evidence.eventId).filter((id): id is string => Boolean(id)));
   }
+
+  private async searchLibraryEvents(
+    where: Prisma.EventRegistryWhereInput,
+    search: string,
+    skip: number,
+    take: number,
+  ): Promise<[StudentLibraryEvent[], number]> {
+    const candidates = (await this.db.eventRegistry.findMany({
+      where,
+      select: {
+        id: true,
+        eventName: true,
+        organizer: true,
+        organizerLevel: true,
+        criterion: true,
+        updatedAt: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: Math.max(take * 20, 500),
+    })) as StudentLibraryEvent[];
+
+    const ranked = rankLibraryEvents(candidates, search);
+    return [ranked.slice(skip, skip + take), ranked.length];
+  }
+}
+
+const verifiedLibraryAbbreviations: Record<string, string> = {
+  cd: 'chien dich',
+  mhx: 'mua he xanh',
+  nckh: 'nghien cuu khoa hoc',
+};
+
+const verifiedLibraryAliases = new Map<string, string>([
+  ['cd mhx', 'chien dich mua he xanh'],
+  ['chien dich mhx', 'chien dich mua he xanh'],
+  ['mhx', 'mua he xanh'],
+  ['nckh', 'nghien cuu khoa hoc'],
+  ['hien mau', 'hien mau nhan dao'],
+]);
+
+function rankLibraryEvents(events: StudentLibraryEvent[], search: string): StudentLibraryEvent[] {
+  const query = normalizeLibraryText(search);
+  if (!query) return dedupeLibraryEvents(events);
+
+  const queryVariants = buildLibraryQueryVariants(query);
+  const ranked = events
+    .map((event) => ({ event, score: scoreLibraryEvent(event, queryVariants) }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || right.event.updatedAt.getTime() - left.event.updatedAt.getTime());
+
+  return dedupeLibraryEvents(ranked.map((item) => item.event));
+}
+
+function dedupeLibraryEvents(events: StudentLibraryEvent[]): StudentLibraryEvent[] {
+  const seen = new Set<string>();
+  const deduped: StudentLibraryEvent[] = [];
+  for (const event of events) {
+    const key = `${event.criterion}:${normalizeLibraryText(event.eventName)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(event);
+  }
+  return deduped;
+}
+
+function buildLibraryQueryVariants(query: string): string[] {
+  const expandedTokens = query
+    .split(' ')
+    .flatMap((token) => verifiedLibraryAbbreviations[token]?.split(' ') ?? [token])
+    .join(' ');
+  return Array.from(
+    new Set([
+      query,
+      expandedTokens,
+      verifiedLibraryAliases.get(query) ?? '',
+      ...(query.startsWith('chien dich ') ? [query.replace(/^chien dich\s+/, '')] : []),
+    ].filter(Boolean)),
+  );
+}
+
+function scoreLibraryEvent(event: StudentLibraryEvent, queryVariants: string[]): number {
+  const title = normalizeLibraryText(event.eventName);
+  const organizer = normalizeLibraryText(event.organizer);
+  const eventAcronym = buildAcronym(title);
+  const searchable = `${title} ${organizer}`;
+
+  let best = 0;
+  for (const query of queryVariants) {
+    const queryAcronym = buildAcronym(query);
+    if (title === query) best = Math.max(best, 100);
+    if (title.includes(query) || query.includes(title)) best = Math.max(best, 90);
+    if (eventAcronym && (eventAcronym === query || eventAcronym === queryAcronym)) {
+      best = Math.max(best, 85);
+    }
+    if (eventAcronym && query.includes(eventAcronym) && tokenOverlap(query, title) > 0) {
+      best = Math.max(best, 80);
+    }
+    const overlap = tokenOverlap(query, searchable);
+    if (overlap >= 0.5 && hasNonYearTokenOverlap(query, title)) {
+      best = Math.max(best, 50 + overlap);
+    }
+    if (hasNonYearTokenOverlap(query, title) && isFuzzyLibraryMatch(query, title)) {
+      best = Math.max(best, 35);
+    }
+  }
+
+  return best;
+}
+
+function normalizeLibraryText(value: string | null | undefined): string {
+  return (value ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/đ/g, 'd')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildAcronym(value: string): string {
+  const tokens = value.split(' ').filter((token) => token && !/^\d{4}$/.test(token));
+  return tokens.map((token) => token[0]).join('');
+}
+
+function isFuzzyLibraryMatch(query: string, title: string): boolean {
+  const queryTokens = query.split(' ').filter((token) => token.length >= 3);
+  const titleTokens = title.split(' ').filter((token) => token.length >= 3);
+  return queryTokens.every((queryToken) =>
+    titleTokens.some((titleToken) => {
+      if (titleToken.includes(queryToken) || queryToken.includes(titleToken)) return true;
+      const distance = levenshteinDistance(queryToken, titleToken);
+      return distance <= Math.max(2, Math.floor(Math.min(queryToken.length, titleToken.length) / 4));
+    }),
+  );
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  const current = Array.from({ length: right.length + 1 }, () => 0);
+
+  for (let i = 1; i <= left.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost);
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+
+  return previous[right.length] ?? 0;
 }
 
 function rankEvent(
@@ -281,6 +519,18 @@ function tokenOverlap(query: string, target: string): number {
     if (targetTokens.has(token)) matches += 1;
   }
   return matches / queryTokens.size;
+}
+
+function hasNonYearTokenOverlap(query: string, target: string): boolean {
+  const targetTokens = new Set(
+    target
+      .split(' ')
+      .filter((token) => token.length >= 2 && !/^\d{4}$/.test(token)),
+  );
+  return query
+    .split(' ')
+    .filter((token) => token.length >= 2 && !/^\d{4}$/.test(token))
+    .some((token) => targetTokens.has(token));
 }
 
 function toOfficialMatchingEventDto(event: EventRegistry) {

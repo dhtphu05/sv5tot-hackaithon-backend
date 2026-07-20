@@ -2,6 +2,7 @@ import { FileStorageType } from '@prisma/client';
 import { env } from '../../config/env';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
+import type { AuthenticatedUser } from '../../shared/types/auth';
 import { pickSafeUser } from '../../shared/utils/pick-safe-user';
 import { sanitizeFileName } from '../storage/storage.types';
 import { StorageService } from '../storage/storage.service';
@@ -68,8 +69,8 @@ export class UsersService {
     return pickSafeUser(user);
   }
 
-  async listUsers(query: ListUsersQuery) {
-    const result = await this.usersRepository.list(query);
+  async listUsers(user: AuthenticatedUser, query: ListUsersQuery) {
+    const result = await this.usersRepository.list(user, query);
     const totalPages = Math.ceil(result.total / query.limit);
 
     return {

@@ -107,7 +107,7 @@ export async function submitCollective(req: Request, res: Response): Promise<voi
 }
 
 export async function listManagerCollectives(req: Request, res: Response): Promise<void> {
-  const data = await service.listForManager(req.query as never);
+  const data = await service.listForManager(req.user!, req.query as never);
   sendSuccess(res, data.items, { requestId: req.requestId, pagination: data.pagination });
 }
 

@@ -20,6 +20,7 @@ export type ChatbotToolDefinition = {
 
 export type ChatbotToolContext = {
   userId: string;
+  workspaceId: string | null;
   role: ChatbotToolRole;
   studentCode?: string;
   sessionId: string;

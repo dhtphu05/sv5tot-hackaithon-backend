@@ -227,6 +227,7 @@ describe('evidence OCR confidence scorer', () => {
 });
 
 describe('evidence card privacy', () => {
+  const workspaceId = '11111111-1111-4111-8111-111111111111';
   const evidence = {
     id: 'evidence-1',
     applicationId: 'application-1',
@@ -239,7 +240,17 @@ describe('evidence card privacy', () => {
     eventId: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
-    application: { studentId: 'student-owner' },
+    application: {
+      studentId: 'student-owner',
+      workspaceId,
+      student: {
+        fullName: 'Student Owner',
+        studentCode: null,
+        className: null,
+        faculty: null,
+      },
+      metrics: [],
+    },
     collectiveProfile: null,
     evidenceFiles: [],
     evidenceCard: {
@@ -278,6 +289,8 @@ describe('evidence card privacy', () => {
         className: null,
         faculty: null,
         avatarUrl: null,
+        workspaceId,
+        workspace: null,
       },
       'evidence-1',
     );
@@ -303,6 +316,8 @@ describe('evidence card privacy', () => {
           className: null,
           faculty: null,
           avatarUrl: null,
+        workspaceId,
+        workspace: null,
         },
         'evidence-1',
       ),

@@ -15,6 +15,8 @@
     "migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "seed": "tsx prisma/seed.ts",
+    "backfill:evidence-knowledge": "tsx scripts/backfill-approved-evidence-precedents.ts",
+    "backfill:requirements": "tsx scripts/backfill-requirement-responses.ts",
     "create-admin": "tsx scripts/create-admin.ts",
     "smartreader:smoke": "tsx scripts/smoke-smartreader.ts",
     "smoke:smartbot": "tsx scripts/smoke-smartbot.ts",

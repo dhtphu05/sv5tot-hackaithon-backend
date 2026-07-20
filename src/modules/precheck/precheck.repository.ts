@@ -12,6 +12,8 @@ export const precheckApplicationInclude = {
     },
     orderBy: { createdAt: 'desc' },
   },
+  requirementResponses: true,
+  reviewTasks: true,
 } satisfies Prisma.ApplicationInclude;
 
 export class PrecheckRepository {

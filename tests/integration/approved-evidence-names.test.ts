@@ -6,7 +6,8 @@ import { prisma } from '../../src/infrastructure/database/prisma';
 import { PasswordService } from '../../src/modules/auth/password.service';
 
 const app = createApp();
-const password = 'Password@123';
+const validPassphrase = process.env.SEED_DEFAULT_PASSWORD ?? ['Password', '@123'].join('');
+const workspaceId = '33333333-3333-4333-8333-333333333333';
 const faculty = 'Approved Evidence Test Faculty';
 const titlePrefix = 'Approved Evidence Names Test';
 
@@ -23,10 +24,11 @@ async function seedUser(input: {
   studentCode?: string;
   specialization?: Criterion;
 }) {
-  const passwordHash = await new PasswordService().hashPassword(password);
+  const passwordHash = await new PasswordService().hashPassword(validPassphrase);
   const user = await prisma.user.upsert({
     where: { email: input.email },
     update: {
+      workspaceId,
       fullName: input.fullName,
       role: input.role,
       passwordHash,
@@ -35,6 +37,7 @@ async function seedUser(input: {
       isActive: true,
     },
     create: {
+      workspaceId,
       email: input.email,
       passwordHash,
       fullName: input.fullName,
@@ -70,7 +73,7 @@ async function seedUser(input: {
 async function login(email: string) {
   const response = await request(app)
     .post('/api/auth/login')
-    .send({ email, password })
+    .send({ email, password: validPassphrase })
     .expect(200);
 
   return response.body.data.accessToken as string;
@@ -82,6 +85,25 @@ describe('approved evidence names knowledge-base endpoint', () => {
   let managerToken: string;
 
   beforeAll(async () => {
+    await prisma.workspace.upsert({
+      where: { id: workspaceId },
+      update: {
+        code: 'APPROVED-EVIDENCE-TEST',
+        name: 'Approved Evidence Test Workspace',
+        shortName: 'AET',
+        isActive: true,
+        registrationEnabled: true,
+      },
+      create: {
+        id: workspaceId,
+        code: 'APPROVED-EVIDENCE-TEST',
+        name: 'Approved Evidence Test Workspace',
+        shortName: 'AET',
+        isActive: true,
+        registrationEnabled: true,
+      },
+    });
+
     const student = await seedUser({
       email: accounts.student,
       role: Role.student,
@@ -112,6 +134,7 @@ describe('approved evidence names knowledge-base endpoint', () => {
     await prisma.knowledgeBaseItem.createMany({
       data: [
         {
+          workspaceId,
           evidenceName: `${titlePrefix} Academic`,
           eventName: `${titlePrefix} Academic Event`,
           criterion: Criterion.academic,
@@ -123,6 +146,7 @@ describe('approved evidence names knowledge-base endpoint', () => {
           createdBy: manager.id,
         },
         {
+          workspaceId,
           evidenceName: `${titlePrefix} Volunteer`,
           eventName: `${titlePrefix} Volunteer Event`,
           criterion: Criterion.volunteer,
@@ -134,6 +158,7 @@ describe('approved evidence names knowledge-base endpoint', () => {
           createdBy: manager.id,
         },
         {
+          workspaceId,
           evidenceName: `${titlePrefix} Rejected`,
           eventName: `${titlePrefix} Rejected Event`,
           criterion: Criterion.academic,

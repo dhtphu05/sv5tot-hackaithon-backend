@@ -14,12 +14,14 @@ import {
   getReviewTaskTimeline,
   listReviewTasks,
   claimReviewTask,
+  checkReviewTaskPrecedents,
   requestReviewTaskSupplement,
 } from './review.controller';
 import {
   ensureTasksSchema,
   escalateResolutionSchema,
   listReviewTasksQuerySchema,
+  reviewTaskPrecedentCheckQuerySchema,
   requestSupplementSchema,
   taskDecisionSchema,
 } from './review.validation';
@@ -65,6 +67,13 @@ reviewRouter.get(
   requireAuth,
   requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
   asyncHandler(getReviewTaskTimeline),
+);
+reviewRouter.get(
+  '/tasks/:id/precedents/check',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  validate({ query: reviewTaskPrecedentCheckQuerySchema }),
+  asyncHandler(checkReviewTaskPrecedents),
 );
 reviewRouter.post(
   '/tasks/:id/claim',

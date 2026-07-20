@@ -20,6 +20,8 @@ export const openApiDocument = {
   tags: [
     { name: 'Health' },
     { name: 'Version' },
+    { name: 'Workspaces' },
+    { name: 'Admin Workspaces' },
     { name: 'Auth' },
     { name: 'Users' },
     { name: 'Applications' },
@@ -67,15 +69,53 @@ export const openApiDocument = {
       },
       RegisterRequest: {
         type: 'object',
-        required: ['fullName', 'email', 'password', 'studentCode'],
+        required: ['fullName', 'email', 'password', 'workspaceId', 'studentCode'],
         properties: {
           fullName: { type: 'string', example: 'Nguyen Van A' },
           email: { type: 'string', example: 'student.new@dut.udn.vn' },
           password: { type: 'string', example: 'Password@123' },
+          workspaceId: { type: 'string', format: 'uuid' },
           studentCode: { type: 'string', example: '21IT999' },
           className: { type: 'string', example: '21TCLC_DT1' },
           faculty: { type: 'string', example: 'Cong nghe thong tin' },
           phone: { type: 'string', example: '0901234567' },
+        },
+      },
+      WorkspaceSummary: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          code: { type: 'string', example: 'DHBK-DHDN' },
+          name: {
+            type: 'string',
+            example: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
+          },
+          shortName: { type: 'string', nullable: true, example: 'DHBK' },
+        },
+      },
+      AdminWorkspaceCreateRequest: {
+        type: 'object',
+        required: ['code', 'name'],
+        properties: {
+          code: { type: 'string', example: 'DHKTE-DHDN' },
+          name: { type: 'string', example: 'Truong Dai hoc Kinh te - Dai hoc Da Nang' },
+          shortName: { type: 'string', nullable: true, example: 'DHKTE' },
+          isActive: { type: 'boolean', default: true },
+          registrationEnabled: { type: 'boolean', default: false },
+        },
+      },
+      AdminWorkspaceUpdateRequest: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          shortName: { type: 'string', nullable: true },
+        },
+      },
+      AdminWorkspaceStatusRequest: {
+        type: 'object',
+        properties: {
+          isActive: { type: 'boolean' },
+          registrationEnabled: { type: 'boolean' },
         },
       },
       ChatbotMessageRequest: {
@@ -192,16 +232,55 @@ export const openApiDocument = {
           criterion: { type: 'string', example: 'volunteer' },
           status: {
             type: 'string',
-            enum: ['passed', 'failed', 'missing', 'human_review_required'],
+            enum: [
+              'not_started',
+              'in_progress',
+              'needs_verification',
+              'ready_for_precheck',
+              'precheck_warning',
+              'supplement_required',
+              'under_review',
+              'accepted',
+              'rejected',
+            ],
           },
-          score: { type: 'number', example: 60 },
-          requiredItems: { type: 'array', items: { type: 'string' } },
-          matchedItems: { type: 'array', items: { type: 'string' } },
-          missingItems: { type: 'array', items: { type: 'string' } },
+          label: { type: 'string', example: 'Cần xác minh' },
+          requirementGroups: { type: 'array', items: { type: 'object' } },
+          satisfiedRequirements: { type: 'array', items: { type: 'string' } },
+          missingRequirements: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/PrecheckMissingRequirement' },
+          },
+          needsVerification: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/PrecheckMissingRequirement' },
+          },
           warnings: { type: 'array', items: { type: 'string' } },
-          explanation: { type: 'string' },
-          evidenceRefs: { type: 'array', items: { type: 'string' } },
-          metricRefs: { type: 'array', items: { type: 'string' } },
+          nextAction: { $ref: '#/components/schemas/PrecheckNextAction' },
+          humanConfirmationRequired: { type: 'boolean', example: true },
+        },
+      },
+      PrecheckMissingRequirement: {
+        type: 'object',
+        properties: {
+          criterion: { type: 'string', example: 'academic' },
+          requirementKey: { type: 'string', example: 'no_f_grade' },
+          title: { type: 'string', example: 'Không có học phần điểm F' },
+          status: { type: 'string', example: 'not_started' },
+          reason: { type: 'string', example: 'Chưa có dữ liệu' },
+          action: { $ref: '#/components/schemas/PrecheckNextAction' },
+        },
+      },
+      PrecheckNextAction: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', example: 'confirm_no_f_grade' },
+          criterion: { type: 'string', example: 'academic' },
+          requirementKey: { type: 'string', example: 'no_f_grade' },
+          route: { type: 'string', example: '/app/application' },
+          label: { type: 'string', example: 'Xác nhận tình trạng điểm F' },
+          shortReason: { type: 'string', example: 'Không có học phần điểm F: Chưa có dữ liệu' },
+          priority: { type: 'number', example: 2 },
         },
       },
       UpsertMetricRequest: {
@@ -317,6 +396,93 @@ export const openApiDocument = {
           },
         },
       },
+      StudentOfficialEventLibraryItem: {
+        type: 'object',
+        required: ['eventId', 'title', 'criterion', 'state'],
+        properties: {
+          eventId: { type: 'string', format: 'uuid' },
+          title: { type: 'string' },
+          organizer: { type: 'string', nullable: true },
+          organizerLevel: {
+            type: 'string',
+            nullable: true,
+            enum: ['school', 'university', 'city', 'central'],
+          },
+          criterion: {
+            type: 'string',
+            enum: ['ethics', 'academic', 'physical', 'volunteer', 'integration', 'priority', 'collective'],
+          },
+          state: { type: 'string', enum: ['available', 'already_imported'] },
+        },
+      },
+      StudentOfficialEventLibraryResponse: {
+        type: 'object',
+        required: ['items', 'page', 'limit', 'total', 'totalPages'],
+        properties: {
+          items: {
+            type: 'array',
+            items: { $ref: '#/components/schemas/StudentOfficialEventLibraryItem' },
+          },
+          page: { type: 'integer' },
+          limit: { type: 'integer' },
+          total: { type: 'integer' },
+          totalPages: { type: 'integer' },
+        },
+      },
+      StaffEventWorkspaceResponse: {
+        type: 'object',
+        properties: {
+          event: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              name: { type: 'string' },
+              organizer: { type: 'string', nullable: true },
+              organizerLevel: { type: 'string' },
+              criterion: { type: 'string' },
+              status: { type: 'string' },
+              rosterIndexed: { type: 'boolean' },
+              participantCount: { type: 'integer' },
+              convertedValue: { type: 'number', nullable: true },
+              convertedUnit: { type: 'string', nullable: true },
+              updatedAt: { type: 'string', format: 'date-time' },
+            },
+          },
+          files: {
+            type: 'array',
+            description: 'File metadata only; signed URLs are intentionally not embedded.',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', format: 'uuid' },
+                originalName: { type: 'string' },
+                mimeType: { type: 'string' },
+                size: { type: 'integer' },
+                role: {
+                  type: 'string',
+                  enum: ['roster', 'decision_source', 'sample_certificate'],
+                },
+              },
+            },
+          },
+          source: {
+            type: 'object',
+            properties: {
+              decisionImportId: { type: 'string', format: 'uuid', nullable: true },
+              decisionNumber: { type: 'string', nullable: true },
+            },
+          },
+          indexSummary: {
+            type: 'object',
+            properties: {
+              status: { type: 'string' },
+              validRows: { type: 'integer', nullable: true },
+              warningRows: { type: 'integer', nullable: true },
+              errorRows: { type: 'integer', nullable: true },
+            },
+          },
+        },
+      },
       FinalizeCollectiveRequest: {
         type: 'object',
         required: ['finalStatus', 'finalNote'],
@@ -347,6 +513,117 @@ export const openApiDocument = {
         tags: ['Version'],
         summary: 'API version',
         responses: { '200': jsonResponse('API version metadata') },
+      },
+    },
+    '/api/workspaces': {
+      get: {
+        tags: ['Workspaces'],
+        summary: 'List public workspace summaries',
+        parameters: [
+          {
+            in: 'query',
+            name: 'registration',
+            schema: { type: 'boolean' },
+            description: 'When true, only active workspaces with registration enabled are returned.',
+          },
+        ],
+        responses: { '200': jsonResponse('Workspace summaries') },
+      },
+    },
+    '/api/admin/workspaces': {
+      get: {
+        tags: ['Admin Workspaces'],
+        summary: 'Admin-only list of workspaces with counts',
+        security: bearerSecurity,
+        parameters: [
+          { in: 'query', name: 'search', schema: { type: 'string' } },
+          { in: 'query', name: 'isActive', schema: { type: 'boolean' } },
+          { in: 'query', name: 'registrationEnabled', schema: { type: 'boolean' } },
+          { in: 'query', name: 'page', schema: { type: 'integer', default: 1 } },
+          { in: 'query', name: 'limit', schema: { type: 'integer', default: 20 } },
+        ],
+        responses: {
+          '200': jsonResponse('Paginated workspace administration list'),
+          '403': jsonResponse('Admin role required'),
+        },
+      },
+      post: {
+        tags: ['Admin Workspaces'],
+        summary: 'Admin-only create workspace metadata',
+        description:
+          'Creates only the workspace row. It does not create criteria, users, membership, or demo data.',
+        security: bearerSecurity,
+        requestBody: jsonRequest('#/components/schemas/AdminWorkspaceCreateRequest'),
+        responses: {
+          '201': jsonResponse('Workspace created'),
+          '400': jsonResponse('Invalid code or status combination'),
+          '409': jsonResponse('Workspace code already exists'),
+          '403': jsonResponse('Admin role required'),
+        },
+      },
+    },
+    '/api/admin/workspaces/{workspaceId}': {
+      get: {
+        tags: ['Admin Workspaces'],
+        summary: 'Admin-only workspace detail and readiness',
+        security: bearerSecurity,
+        parameters: [pathParameter('workspaceId')],
+        responses: {
+          '200': jsonResponse('Workspace detail, counts, active criteria, and readiness'),
+          '404': jsonResponse('Workspace not found'),
+          '403': jsonResponse('Admin role required'),
+        },
+      },
+      patch: {
+        tags: ['Admin Workspaces'],
+        summary: 'Admin-only update workspace name fields',
+        description: 'Workspace code updates are not supported.',
+        security: bearerSecurity,
+        parameters: [pathParameter('workspaceId')],
+        requestBody: jsonRequest('#/components/schemas/AdminWorkspaceUpdateRequest'),
+        responses: {
+          '200': jsonResponse('Workspace updated'),
+          '404': jsonResponse('Workspace not found'),
+          '403': jsonResponse('Admin role required'),
+        },
+      },
+    },
+    '/api/admin/workspaces/{workspaceId}/status': {
+      patch: {
+        tags: ['Admin Workspaces'],
+        summary: 'Admin-only update workspace active/registration status',
+        description:
+          'Deactivating a workspace closes registration. Opening registration requires an active workspace and active CriteriaVersion.',
+        security: bearerSecurity,
+        parameters: [pathParameter('workspaceId')],
+        requestBody: jsonRequest('#/components/schemas/AdminWorkspaceStatusRequest'),
+        responses: {
+          '200': jsonResponse('Workspace status updated'),
+          '400': jsonResponse('Invalid status combination'),
+          '409': jsonResponse('Workspace is not ready for registration'),
+          '404': jsonResponse('Workspace not found'),
+          '403': jsonResponse('Admin role required'),
+        },
+      },
+    },
+    '/api/admin/workspaces/{workspaceId}/users': {
+      get: {
+        tags: ['Admin Workspaces'],
+        summary: 'Admin-only list of users in one workspace',
+        security: bearerSecurity,
+        parameters: [
+          pathParameter('workspaceId'),
+          { in: 'query', name: 'search', schema: { type: 'string' } },
+          { in: 'query', name: 'role', schema: { type: 'string' } },
+          { in: 'query', name: 'isActive', schema: { type: 'boolean' } },
+          { in: 'query', name: 'page', schema: { type: 'integer', default: 1 } },
+          { in: 'query', name: 'limit', schema: { type: 'integer', default: 20 } },
+        ],
+        responses: {
+          '200': jsonResponse('Paginated safe users in the target workspace'),
+          '404': jsonResponse('Workspace not found'),
+          '403': jsonResponse('Admin role required'),
+        },
       },
     },
     '/api/auth/login': {
@@ -565,7 +842,7 @@ export const openApiDocument = {
     '/api/applications/{id}/precheck': {
       post: {
         tags: ['Precheck'],
-        summary: 'Run MVP rules/AI precheck for an application',
+        summary: 'Run requirement-completion precheck for an application',
         description: 'Kết quả là gợi ý tiền kiểm, không phải quyết định xét duyệt cuối cùng.',
         security: bearerSecurity,
         parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }],
@@ -591,20 +868,56 @@ export const openApiDocument = {
                     level: 'city',
                     readinessScore: 72,
                     readyToSubmit: false,
-                    criteriaResults: [{ criterion: 'volunteer', status: 'failed', score: 0 }],
-                    missingItems: [
+                    criteriaResults: [
                       {
-                        criterion: 'volunteer',
-                        code: 'MISSING_VOLUNTEER_DAYS',
-                        message: 'Số ngày tình nguyện hiện chưa đạt ngưỡng 5 ngày.',
-                        severity: 'blocking',
-                        suggestedAction:
-                          'Bổ sung minh chứng tình nguyện hoặc import sự kiện hợp lệ.',
+                        criterion: 'academic',
+                        status: 'needs_verification',
+                        label: 'Can xac minh',
+                        requirementGroups: [],
+                        satisfiedRequirements: ['academic_gpa'],
+                        missingRequirements: [
+                          {
+                            criterion: 'academic',
+                            requirementKey: 'no_f_grade',
+                            title: 'Khong co hoc phan diem F',
+                            status: 'not_started',
+                            reason: 'Chua co du lieu',
+                          },
+                        ],
+                        needsVerification: [],
+                        warnings: [],
+                        nextAction: {
+                          type: 'confirm_no_f_grade',
+                          criterion: 'academic',
+                          requirementKey: 'no_f_grade',
+                          route: '/app/application',
+                          label: 'Xac nhan tinh trang diem F',
+                          shortReason: 'Khong co hoc phan diem F: Chua co du lieu',
+                          priority: 2,
+                        },
+                        humanConfirmationRequired: true,
                       },
                     ],
-                    warnings: ['HUMAN_CONFIRMATION_REQUIRED'],
-                    nextBestAction:
-                      'Hồ sơ hiện chưa đủ dữ liệu tình nguyện cho cấp Thành phố; bạn có thể bổ sung thêm minh chứng hoặc cân nhắc xét cấp phù hợp hơn.',
+                    missingItems: [
+                      {
+                        criterion: 'academic',
+                        requirementKey: 'no_f_grade',
+                        title: 'Khong co hoc phan diem F',
+                        status: 'not_started',
+                        reason: 'Chua co du lieu',
+                      },
+                    ],
+                    warnings: [],
+                    nextBestAction: 'Xac nhan tinh trang diem F',
+                    nextAction: {
+                      type: 'confirm_no_f_grade',
+                      criterion: 'academic',
+                      requirementKey: 'no_f_grade',
+                      route: '/app/application',
+                      label: 'Xac nhan tinh trang diem F',
+                      shortReason: 'Khong co hoc phan diem F: Chua co du lieu',
+                      priority: 2,
+                    },
                     humanConfirmationRequired: true,
                     createdAt: '2026-06-30T00:00:00.000Z',
                   },
@@ -876,6 +1189,27 @@ export const openApiDocument = {
         responses: { '200': jsonResponse('Knowledge base search results') },
       },
     },
+    '/api/evidence-matching/library': {
+      get: {
+        tags: ['Event Registry'],
+        summary: 'List compact official event cards available to the current student application',
+        description:
+          'Student-only official event library. Returns event card metadata and import state only; it does not return participant, roster, file, OCR, confidence, signed URL, or provider diagnostic fields.',
+        security: bearerSecurity,
+        parameters: [
+          { in: 'query', name: 'applicationId', required: true, schema: { type: 'string', format: 'uuid' } },
+          { in: 'query', name: 'search', schema: { type: 'string' } },
+          { in: 'query', name: 'criterion', schema: { type: 'string' } },
+          { in: 'query', name: 'page', schema: { type: 'integer', default: 1 } },
+          { in: 'query', name: 'limit', schema: { type: 'integer', default: 20, maximum: 50 } },
+        ],
+        responses: {
+          '200': jsonResponse('Compact official event library'),
+          '403': jsonResponse('Student role or application ownership required'),
+          '404': jsonResponse('Application not found'),
+        },
+      },
+    },
     '/api/events': {
       get: {
         tags: ['Event Registry'],
@@ -902,6 +1236,21 @@ export const openApiDocument = {
           },
         },
         responses: { '201': jsonResponse('Created event') },
+      },
+    },
+    '/api/events/{eventId}/staff-workspace': {
+      get: {
+        tags: ['Event Registry'],
+        summary: 'Get staff event workspace summary',
+        description:
+          'Read-only staff event summary for master-detail screens. File entries are metadata only; participants remain on the paginated participants endpoint and signed URLs remain on the file endpoint.',
+        security: bearerSecurity,
+        parameters: [pathParameter('eventId')],
+        responses: {
+          '200': jsonResponse('Staff event workspace summary'),
+          '403': jsonResponse('Staff role required'),
+          '404': jsonResponse('Event not found in the current workspace'),
+        },
       },
     },
     '/api/events/{id}': {

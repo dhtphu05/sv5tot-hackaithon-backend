@@ -18,6 +18,7 @@ describe('chatbot tool registry', () => {
       callChatbotTool(
         {
           userId: '2e2031e8-bd75-4d93-9b7a-78a8f31f4e22',
+          workspaceId: null,
           role: 'student',
           sessionId: 'session-1',
           requestId: 'request-1',

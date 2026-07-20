@@ -5,6 +5,7 @@ import { defaultCriteriaUnitScope, fallbackRulesByLevel } from './criteria.const
 import type { CriteriaRuleBundle } from './rules.types';
 
 export async function loadCriteriaRules(input: {
+  workspaceId: string;
   schoolYear: string;
   level: Level;
   unitScope?: string;
@@ -12,6 +13,7 @@ export async function loadCriteriaRules(input: {
   const unitScope = input.unitScope ?? defaultCriteriaUnitScope;
   const version = await prisma.criteriaVersion.findFirst({
     where: {
+      workspaceId: input.workspaceId,
       schoolYear: input.schoolYear,
       level: input.level,
       unitScope,
