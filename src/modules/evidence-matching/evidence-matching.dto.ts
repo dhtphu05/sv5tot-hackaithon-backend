@@ -5,7 +5,7 @@ type StudentOfficialEvent = Pick<
   'id' | 'eventName' | 'organizer' | 'organizerLevel' | 'criterion'
 >;
 
-type StudentReferenceEvent = Pick<EventRegistry, 'id' | 'eventName'>;
+type StudentReferenceEvent = Pick<EventRegistry, 'id' | 'eventName' | 'criterion'>;
 
 export type StudentOfficialEventLibraryItemDto = {
   eventId: string;
@@ -19,14 +19,19 @@ export type StudentOfficialEventLibraryItemDto = {
 export type StudentReferenceEventLibraryItemDto = {
   eventId: string;
   title: string;
+  criterion: Criterion;
+  approvedUsageCount: number;
 };
 
 export function toStudentReferenceEventLibraryItemDto(
   event: StudentReferenceEvent,
+  approvedUsageCount = 0,
 ): StudentReferenceEventLibraryItemDto {
   return {
     eventId: event.id,
     title: event.eventName,
+    criterion: event.criterion,
+    approvedUsageCount,
   };
 }
 

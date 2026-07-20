@@ -269,7 +269,7 @@ function scoreGroup(
     organizer: first.organizer ?? first.event.organizer,
     year: first.eventYear,
     applicableLevel: first.applicableLevel,
-    acceptedCount: records.length,
+    acceptedCount: countDistinctApprovedUsage(records),
     approvalSources: Array.from(new Set(records.map((record) => record.approvalSource))),
     hasResolutionPrecedent: records.some(
       (record) => record.approvalSource === 'resolution' || Boolean(record.sourceResolutionCaseId),
@@ -278,6 +278,17 @@ function scoreGroup(
     score,
     records,
   };
+}
+
+function countDistinctApprovedUsage(records: ApprovedPrecedentSearchRecord[]): number {
+  const keys = new Set<string>();
+  for (const record of records) {
+    if (!record.sourceEvidence) continue;
+    const usageKey =
+      record.sourceEvidence.application?.studentId ?? record.sourceEvidence.applicationId ?? null;
+    if (usageKey) keys.add(usageKey);
+  }
+  return keys.size || records.length;
 }
 
 function buildQueryVariants(

@@ -41,6 +41,8 @@ const managerUser: AuthenticatedUser = {
   workspace: null,
 };
 
+const assignedOfficerId = 'officer-assigned';
+
 describe('ReviewService.getTaskDetail evidence event matching', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -113,17 +115,89 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
   });
 });
 
+describe('ReviewService demo officer permissions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('allows a demo officer with matching specialization to act on a task assigned to another officer', async () => {
+    const reviewRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [
+          buildTask({
+            matchedEventId: null,
+            assignedOfficerId,
+            criterion: Criterion.ethics,
+          }),
+        ],
+        total: 1,
+      }),
+    };
+    const assignmentService = {
+      canOfficerHandleCriterion: vi.fn().mockResolvedValue(true),
+    };
+    const service = new ReviewService(reviewRepository as any, assignmentService as any);
+
+    const result = await service.listTasks(buildOfficerUser('officer.ethics@dut.udn.vn'), {
+      page: 1,
+      limit: 10,
+    } as any);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].permissions).toMatchObject({
+      canView: true,
+      canAct: true,
+      canClaim: false,
+      reason: 'demo_specialization_access',
+    });
+  });
+
+  it('keeps normal officers read-only when a matching task is assigned to another officer', async () => {
+    const reviewRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [
+          buildTask({
+            matchedEventId: null,
+            assignedOfficerId,
+            criterion: Criterion.ethics,
+          }),
+        ],
+        total: 1,
+      }),
+    };
+    const assignmentService = {
+      canOfficerHandleCriterion: vi.fn().mockResolvedValue(true),
+    };
+    const service = new ReviewService(reviewRepository as any, assignmentService as any);
+
+    const result = await service.listTasks(buildOfficerUser('real.officer@dut.udn.vn'), {
+      page: 1,
+      limit: 10,
+    } as any);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].permissions).toMatchObject({
+      canView: true,
+      canAct: false,
+      canClaim: false,
+      reason: 'assigned_to_other',
+    });
+  });
+});
+
 function buildTask(input: {
   matchedEventId: string | null;
   normalizedFieldsJson?: Record<string, unknown>;
+  assignedOfficerId?: string | null;
+  criterion?: Criterion;
 }) {
   return {
     id: 'task-1',
     workspaceId,
     applicationId: 'app-1',
     collectiveProfileId: null,
-    assignedOfficerId: null,
-    criterion: Criterion.academic,
+    assignedOfficerId: input.assignedOfficerId ?? null,
+    criterion: input.criterion ?? Criterion.academic,
     status: ReviewTaskStatus.reviewing,
     decision: null,
     officerNote: null,
@@ -136,6 +210,7 @@ function buildTask(input: {
     updatedAt: now,
     assignedOfficer: null,
     collectiveProfile: null,
+    _count: { evidences: 1 },
     application: {
       id: 'app-1',
       workspaceId,
@@ -201,4 +276,19 @@ function buildTask(input: {
       },
     ],
   } as any;
+}
+
+function buildOfficerUser(email: string): AuthenticatedUser {
+  return {
+    id: 'officer-current',
+    email,
+    fullName: 'Officer',
+    role: Role.officer,
+    studentCode: null,
+    className: null,
+    faculty: null,
+    avatarUrl: null,
+    workspaceId,
+    workspace: null,
+  };
 }

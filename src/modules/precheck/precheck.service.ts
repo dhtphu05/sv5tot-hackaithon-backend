@@ -209,7 +209,6 @@ export function buildPrecheckFromCompletion(input: {
   const supplementAction = buildSupplementAction(input.application);
   const criteriaResults = input.completion.map(buildCriterionPrecheckResult);
   const missingItems = criteriaResults.flatMap((item) => item.missingRequirements);
-  const needsVerificationItems = criteriaResults.flatMap((item) => item.needsVerification);
   const warnings = [
     ...input.criteriaWarnings,
     ...criteriaResults.flatMap((item) => item.warnings),
@@ -218,12 +217,17 @@ export function buildPrecheckFromCompletion(input: {
   const completionAction = criteriaResults
     .flatMap((item) => (item.nextAction ? [item.nextAction] : []))
     .sort((left, right) => left.priority - right.priority)[0];
+  const hasMissingRequirements = missingItems.length > 0;
+  const canSubmitWithPendingVerification =
+    !hasMissingRequirements && !failedEvidenceAction && !supplementAction;
   const nextAction =
-    supplementAction ?? completionAction ?? failedEvidenceAction ?? buildSubmitOrPrecheckAction(input.completion);
+    supplementAction ??
+    (hasMissingRequirements ? completionAction : null) ??
+    failedEvidenceAction ??
+    buildSubmitOrPrecheckAction(input.completion, { canSubmitWithPendingVerification });
   const readinessScore = scoreCompletion(input.completion);
   const hasBlockingGaps = missingItems.length > 0 || warnings.length > 0;
-  const hasPendingVerification = needsVerificationItems.length > 0;
-  const readyToSubmit = !hasBlockingGaps && !hasPendingVerification;
+  const readyToSubmit = !hasBlockingGaps;
 
   return {
     applicationId: input.application.id,
@@ -255,7 +259,6 @@ function buildCriterionPrecheckResult(item: CriterionCompletionDto): PrecheckCri
   const oneOfAction = buildOneOfPathAction(item);
   const nextAction =
     missingRequirements[0]?.action ??
-    needsVerification[0]?.action ??
     oneOfAction ??
     (item.nextAction ? normalizeCompletionAction(item, 2, 'Cần bổ sung') : null);
 
@@ -278,7 +281,9 @@ function buildGroupMissingRequirements(
   group: CriterionCompletionDto['requirementGroups'][number],
 ): PrecheckMissingRequirementDto[] {
   if (group.optional) return [];
-  const requirements = group.requirements.filter((requirement) => !requirement.optional);
+  const requirements = group.requirements.filter(
+    (requirement) => !requirement.optional && isSubmissionBlockingRequirement(requirement),
+  );
   if (group.operator === 'one_of') {
     const active = requirements.filter((requirement) => requirement.status !== 'not_started');
     if (active.length === 0) return [];
@@ -296,7 +301,9 @@ function buildGroupNeedsVerification(
   group: CriterionCompletionDto['requirementGroups'][number],
 ): PrecheckMissingRequirementDto[] {
   if (group.optional) return [];
-  const requirements = group.requirements.filter((requirement) => !requirement.optional);
+  const requirements = group.requirements.filter(
+    (requirement) => !requirement.optional && isSubmissionBlockingRequirement(requirement),
+  );
   const pending = requirements.filter(
     (requirement) => requirement.status === 'needs_verification' || requirement.status === 'declared',
   );
@@ -305,6 +312,13 @@ function buildGroupNeedsVerification(
     return pending.map((requirement) => buildMissingRequirement(criterion, requirement, true));
   }
   return pending.map((requirement) => buildMissingRequirement(criterion, requirement, true));
+}
+
+function isSubmissionBlockingRequirement(requirement: RequirementDto): boolean {
+  return !(
+    requirement.blocksSubmission === false &&
+    (requirement.responsibility === 'reviewer' || requirement.responsibility === 'committee')
+  );
 }
 
 function buildMissingRequirement(
@@ -442,11 +456,14 @@ function buildFailedEvidenceAction(
   };
 }
 
-function buildSubmitOrPrecheckAction(completion: CriterionCompletionDto[]): PrecheckNextActionDto {
+function buildSubmitOrPrecheckAction(
+  completion: CriterionCompletionDto[],
+  options: { canSubmitWithPendingVerification?: boolean } = {},
+): PrecheckNextActionDto {
   const allReady = completion.every((item) =>
     ['ready_for_precheck', 'accepted'].includes(item.status),
   );
-  return allReady
+  return allReady || options.canSubmitWithPendingVerification
     ? {
         type: 'submit_application',
         label: 'Nộp hồ sơ để cán bộ xét duyệt',

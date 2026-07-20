@@ -27,6 +27,8 @@ export type CriterionCompletionStatus =
 
 export type RequirementDtoStatus =
   'not_started' | 'declared' | 'needs_verification' | 'verified' | 'rejected';
+export type RequirementResponsibility = 'student' | 'system' | 'reviewer' | 'committee';
+export type RequirementVerificationStage = 'draft' | 'precheck' | 'review' | 'resolution';
 
 export interface RequirementResponseDto {
   id: string;
@@ -51,6 +53,9 @@ export interface RequirementDto {
   formSchema?: unknown;
   currentResponses: RequirementResponseDto[];
   aggregation?: RequirementAggregationDto;
+  responsibility?: RequirementResponsibility;
+  blocksSubmission?: boolean;
+  verificationStage?: RequirementVerificationStage;
   nextAction?: {
     type: string;
     label: string;
