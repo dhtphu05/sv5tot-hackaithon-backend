@@ -8,6 +8,8 @@ export type PrecheckNextActionDto = {
   shortReason: string;
   criterion?: Criterion;
   requirementKey?: string;
+  evidenceId?: string;
+  destination?: string;
   route: string;
   priority: number;
 };

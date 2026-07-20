@@ -36,7 +36,19 @@ export const startIndexingSchema = z.object({
   runMode: z.enum(['sync', 'async']).default('async'),
 });
 
+export const saveEvidenceCardCorrectionsSchema = z.object({
+  fields: z.record(z.unknown()),
+  expectedUpdatedAt: z.string().datetime().optional(),
+});
+
+export const confirmEvidenceCardSchema = z.object({
+  acknowledgedWarnings: z.array(z.string().trim().min(1)).optional(),
+  expectedUpdatedAt: z.string().datetime().optional(),
+});
+
 export type ListEvidencesQuery = z.infer<typeof listEvidencesQuerySchema>;
 export type CreateEvidenceInput = z.infer<typeof createEvidenceSchema>;
 export type UpdateEvidenceInput = z.infer<typeof updateEvidenceSchema>;
 export type StartIndexingInput = z.infer<typeof startIndexingSchema>;
+export type SaveEvidenceCardCorrectionsInput = z.infer<typeof saveEvidenceCardCorrectionsSchema>;
+export type ConfirmEvidenceCardInput = z.infer<typeof confirmEvidenceCardSchema>;

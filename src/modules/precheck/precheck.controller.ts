@@ -14,3 +14,12 @@ export async function getLatestApplicationPrecheck(req: Request, res: Response):
   const data = await service.getLatest(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });
 }
+
+export async function getLatestCurrentApplicationPrecheck(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const schoolYear = typeof req.query.schoolYear === 'string' ? req.query.schoolYear : undefined;
+  const data = await service.getLatestCurrent(req.user!, schoolYear);
+  sendSuccess(res, data, { requestId: req.requestId });
+}

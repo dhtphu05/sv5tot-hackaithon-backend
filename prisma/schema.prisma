@@ -571,6 +571,16 @@ model EvidenceCard {
   matchedParticipantId       String?                     @map("matched_participant_id") @db.Uuid
   matchedKnowledgeItemIds    Json?
   confidence                 Float?
+  provider                   String?
+  providerModel              String?                     @map("provider_model")
+  promptVersion              String?                     @map("prompt_version")
+  fieldConfidenceJson        Json?                       @map("field_confidence_json")
+  requiresHumanConfirmation  Boolean                     @default(false) @map("requires_human_confirmation")
+  confirmationStatus         String                      @default("pending") @map("confirmation_status")
+  confirmedFieldsJson        Json?                       @map("confirmed_fields_json")
+  confirmedByUserId          String?                     @map("confirmed_by_user_id") @db.Uuid
+  confirmedAt                DateTime?                   @map("confirmed_at")
+  lastCorrectedAt            DateTime?                   @map("last_corrected_at")
   sourceEndpoint             String?                     @map("source_endpoint")
   smartreaderJobId           String?                     @map("smartreader_job_id") @db.Uuid
   aiSummary                  String?
@@ -580,6 +590,8 @@ model EvidenceCard {
   updatedAt                  DateTime                    @updatedAt
   evidence                   Evidence                    @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
   approvedEvidencePrecedents ApprovedEvidencePrecedent[]
+
+  @@index([confirmationStatus])
 }
 
 model EventRegistry {
@@ -1025,6 +1037,7 @@ model IndexingJob {
   targetId     String     @db.Uuid
   status       JobStatus  @default(queued)
   attempts     Int        @default(0)
+  inputJson    Json?      @map("input_json")
   errorMessage String?
   resultJson   Json?
   createdAt    DateTime   @default(now())

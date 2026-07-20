@@ -34,13 +34,24 @@ import {
   createApplicationAudit,
 } from '../applications/application.helpers';
 import { AuditService } from '../audit/audit.service';
+import { buildEvidenceAnalysisJobInput, parseEvidenceAnalysisJobInput } from '../jobs/evidence-analysis-job-input';
 import { JobsService } from '../jobs/jobs.service';
+import {
+  buildEffectiveEvidenceCardFields,
+  evidenceCardConfirmationStatuses,
+  isEvidenceProcessing,
+  mergeFieldCorrections,
+  normalizeConfirmationStatus,
+  validateEvidenceCardCorrections,
+} from './evidence-card-confirmation';
 import { buildEvidenceCardFieldLayers } from './evidence-card-field-presenter';
 import { mapEvidenceUxStatus } from './evidence-ux-status.mapper';
 import { EvidencesRepository } from './evidences.repository';
 import type {
+  ConfirmEvidenceCardInput,
   CreateEvidenceInput,
   ListEvidencesQuery,
+  SaveEvidenceCardCorrectionsInput,
   StartIndexingInput,
   UpdateEvidenceInput,
 } from './evidences.validation';
@@ -121,6 +132,8 @@ export class EvidencesService {
             extractedFieldsJson: (input.metadata ?? {}) as Prisma.InputJsonValue,
             warningsJson: [],
             confidence: 1.0,
+            confirmationStatus: evidenceCardConfirmationStatuses.pending,
+            requiresHumanConfirmation: true,
             aiSummary: 'Minh chứng xét duyệt thủ công không dùng AI.',
             rawAiResponse: { manual: true },
           },
@@ -406,7 +419,7 @@ export class EvidencesService {
       });
 
       const fileRole = evidence.evidenceFiles.length === 0 ? 'primary' : 'supporting';
-      await tx.evidenceFile.create({
+      const evidenceFile = await tx.evidenceFile.create({
         data: {
           evidenceId: evidence.id,
           fileId: fileRecord.id,
@@ -422,13 +435,29 @@ export class EvidencesService {
         indexingStatus = IndexingStatus.pending_indexing;
       }
 
-      const existingJob = await tx.indexingJob.findFirst({
+      const jobInput = buildEvidenceAnalysisJobInput({
+        evidenceId: evidence.id,
+        evidenceFileId: evidenceFile.id,
+        fileId: fileRecord.id,
+      });
+      const activeJobs = await tx.indexingJob.findMany({
         where: {
           targetId: evidence.id,
           jobType: JobType.evidence_ocr,
           status: { in: [JobStatus.queued, JobStatus.processing] },
         },
         orderBy: { createdAt: 'desc' },
+      });
+      const existingJob = activeJobs.find((activeJob) => {
+        try {
+          const activeInput = parseEvidenceAnalysisJobInput(activeJob.inputJson);
+          return (
+            activeInput.evidenceFileId === jobInput.evidenceFileId &&
+            activeInput.fileId === jobInput.fileId
+          );
+        } catch {
+          return false;
+        }
       });
       const job =
         existingJob ??
@@ -439,8 +468,41 @@ export class EvidencesService {
             jobType: JobType.evidence_ocr,
             status: JobStatus.queued,
             attempts: 0,
+            inputJson: jobInput,
           },
         }));
+
+      if (evidence.sourceType === EvidenceSourceType.manual_upload && evidence.evidenceCard) {
+        await tx.evidenceCard.update({
+          where: { evidenceId: evidence.id },
+          data: {
+            confirmationStatus: evidenceCardConfirmationStatuses.pending,
+            confirmedFieldsJson: Prisma.JsonNull,
+            confirmedByUserId: null,
+            confirmedAt: null,
+            lastCorrectedAt: null,
+            requiresHumanConfirmation: true,
+          },
+        });
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: auditActions.EVIDENCE_CARD_CONFIRMATION_INVALIDATED,
+          targetType: 'evidence_card',
+          targetId: evidence.evidenceCard.id,
+          applicationId: evidence.applicationId,
+          workspaceId: evidence.application!.workspaceId,
+          evidenceId: evidence.id,
+          beforeStateJson: {
+            confirmationStatus: normalizeConfirmationStatus(evidence.evidenceCard.confirmationStatus),
+            confirmedAt: evidence.evidenceCard.confirmedAt,
+          },
+          afterStateJson: {
+            confirmationStatus: evidenceCardConfirmationStatuses.pending,
+            reason: 'file_replaced',
+          },
+        });
+      }
 
       const updatedEvidence = await tx.evidence.update({
         where: { id: evidence.id },
@@ -536,10 +598,20 @@ export class EvidencesService {
     const evidence = await this.getRequiredEvidence(evidenceId);
     this.assertCanViewEvidence(user, evidence);
 
+    const currentFile = resolveNewestEvidenceFile(evidence.evidenceFiles);
+    if (!currentFile) {
+      throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Evidence has no file to index');
+    }
+    const jobInput = buildEvidenceAnalysisJobInput({
+      evidenceId: evidence.id,
+      evidenceFileId: currentFile.id,
+      fileId: currentFile.fileId,
+    });
     const { job, reused } = await this.jobsService.enqueueIndexingJob(
       evidence.id,
       JobType.evidence_ocr,
       evidence.application!.workspaceId,
+      jobInput as Prisma.InputJsonValue,
     );
     await prisma.evidence.update({
       where: { id: evidence.id },
@@ -578,7 +650,7 @@ export class EvidencesService {
 
     return {
       evidence: this.toEvidenceDto(evidence, user),
-      card: evidence.evidenceCard ? this.toEvidenceCardDto(evidence, isPrivileged) : null,
+      card: evidence.evidenceCard ? this.toEvidenceCardDto(evidence, isPrivileged, user) : null,
       job: latestJob
         ? {
             id: latestJob.id,
@@ -593,6 +665,154 @@ export class EvidencesService {
       uxStatus,
       auditSummary,
     };
+  }
+
+  async saveCardCorrections(
+    user: AuthenticatedUser,
+    evidenceId: string,
+    input: SaveEvidenceCardCorrectionsInput,
+  ) {
+    const evidence = await this.getRequiredEvidence(evidenceId);
+    await this.assertCanMutateEvidenceCard(user, evidence);
+    this.assertCardReadyForStudentAction(evidence, 'edit');
+    if (evidence.sourceType === EvidenceSourceType.event_import) {
+      throw new AppError(
+        403,
+        ErrorCodes.EVIDENCE_CARD_EDIT_NOT_ALLOWED,
+        'Trusted event import fields cannot be edited here',
+      );
+    }
+    if (input.expectedUpdatedAt && evidence.evidenceCard?.updatedAt.toISOString() !== input.expectedUpdatedAt) {
+      throw new AppError(409, ErrorCodes.EVIDENCE_CARD_STALE, 'Evidence card changed; refresh before editing');
+    }
+
+    const corrections = validateEvidenceCardCorrections(input.fields);
+    const beforeFields = evidence.evidenceCard!.confirmedFieldsJson;
+    const merged = mergeFieldCorrections(beforeFields, corrections);
+    const changedFields = Object.keys(corrections);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.evidenceCard.update({
+        where: { evidenceId: evidence.id },
+        data: {
+          confirmedFieldsJson: merged as Prisma.InputJsonValue,
+          confirmationStatus: evidenceCardConfirmationStatuses.correctionRequired,
+          requiresHumanConfirmation: true,
+          lastCorrectedAt: new Date(),
+        },
+      });
+      await tx.evidence.update({
+        where: { id: evidence.id },
+        data: { updatedAt: new Date() },
+      });
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.EVIDENCE_CARD_CORRECTION_SAVED,
+        targetType: 'evidence_card',
+        targetId: evidence.evidenceCard!.id,
+        applicationId: evidence.applicationId,
+        workspaceId: evidence.application!.workspaceId,
+        evidenceId: evidence.id,
+        beforeStateJson: { fields: pickSafeFields(beforeFields, changedFields) },
+        afterStateJson: {
+          fields: pickSafeFields(merged, changedFields),
+          changedFields,
+          confirmationStatus: evidenceCardConfirmationStatuses.correctionRequired,
+        },
+      });
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.PRECHECK_INVALIDATED_BY_EVIDENCE_CARD,
+        targetType: 'evidence',
+        targetId: evidence.id,
+        applicationId: evidence.applicationId,
+        workspaceId: evidence.application!.workspaceId,
+        evidenceId: evidence.id,
+        afterStateJson: { reason: 'evidence_card_correction', changedFields },
+      });
+    });
+
+    return this.getCard(user, evidence.id);
+  }
+
+  async confirmCard(user: AuthenticatedUser, evidenceId: string, input: ConfirmEvidenceCardInput) {
+    const evidence = await this.getRequiredEvidence(evidenceId);
+    await this.assertCanMutateEvidenceCard(user, evidence);
+    this.assertCardReadyForStudentAction(evidence, 'confirm');
+    if (evidence.sourceType === EvidenceSourceType.event_import) {
+      throw new AppError(
+        403,
+        ErrorCodes.EVIDENCE_CARD_CONFIRMATION_NOT_ALLOWED,
+        'Trusted event import cards do not require confirmation',
+      );
+    }
+    const card = evidence.evidenceCard!;
+    const confirmationStatus = normalizeConfirmationStatus(card.confirmationStatus);
+    if (confirmationStatus === evidenceCardConfirmationStatuses.confirmed) {
+      throw new AppError(409, ErrorCodes.EVIDENCE_CARD_ALREADY_CONFIRMED, 'Evidence card is already confirmed');
+    }
+    if (input.expectedUpdatedAt && card.updatedAt.toISOString() !== input.expectedUpdatedAt) {
+      throw new AppError(409, ErrorCodes.EVIDENCE_CARD_STALE, 'Evidence card changed; refresh before confirming');
+    }
+
+    const effective = buildEffectiveEvidenceCardFields({
+      sourceType: evidence.sourceType,
+      provider: card.provider,
+      extractedFields: card.extractedFieldsJson,
+      normalizedFields: card.normalizedFieldsJson,
+      confirmedFields: card.confirmedFieldsJson,
+      fieldConfidence: card.fieldConfidenceJson,
+      warnings: card.warningsJson,
+      confirmationStatus,
+    }).effectiveFields;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.evidenceCard.update({
+        where: { evidenceId: evidence.id },
+        data: {
+          confirmedFieldsJson: effective as Prisma.InputJsonValue,
+          confirmationStatus: evidenceCardConfirmationStatuses.confirmed,
+          requiresHumanConfirmation: false,
+          confirmedByUserId: user.id,
+          confirmedAt: new Date(),
+        },
+      });
+      await tx.evidence.update({
+        where: { id: evidence.id },
+        data: { updatedAt: new Date() },
+      });
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.EVIDENCE_CARD_CONFIRMED,
+        targetType: 'evidence_card',
+        targetId: card.id,
+        applicationId: evidence.applicationId,
+        workspaceId: evidence.application!.workspaceId,
+        evidenceId: evidence.id,
+        beforeStateJson: { confirmationStatus },
+        afterStateJson: {
+          confirmationStatus: evidenceCardConfirmationStatuses.confirmed,
+          confirmedFieldCount: Object.keys(effective).length,
+          acknowledgedWarnings: input.acknowledgedWarnings ?? [],
+        },
+      });
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.PRECHECK_INVALIDATED_BY_EVIDENCE_CARD,
+        targetType: 'evidence',
+        targetId: evidence.id,
+        applicationId: evidence.applicationId,
+        workspaceId: evidence.application!.workspaceId,
+        evidenceId: evidence.id,
+        afterStateJson: { reason: 'evidence_card_confirmed' },
+      });
+    });
+
+    return this.getCard(user, evidence.id);
   }
 
   private async getRequiredApplication(applicationId: string) {
@@ -721,6 +941,8 @@ export class EvidencesService {
       card: evidence.evidenceCard
         ? {
             id: evidence.evidenceCard.id,
+            confirmationStatus: normalizeConfirmationStatus(evidence.evidenceCard.confirmationStatus),
+            requiresHumanConfirmation: evidence.evidenceCard.requiresHumanConfirmation,
             ...(isPrivileged ? { internalConfidence: evidence.evidenceCard.confidence } : {}),
             studentStatus,
             warnings: mapWarnings(evidence.evidenceCard.warningsJson),
@@ -732,11 +954,22 @@ export class EvidencesService {
   private toEvidenceCardDto(
     evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
     isPrivileged: boolean,
+    user?: AuthenticatedUser,
   ) {
     const card = evidence.evidenceCard;
     if (!card) return null;
 
-    const fields = card.normalizedFieldsJson ?? card.extractedFieldsJson;
+    const fieldState = buildEffectiveEvidenceCardFields({
+      sourceType: evidence.sourceType,
+      provider: card.provider,
+      extractedFields: card.extractedFieldsJson,
+      normalizedFields: card.normalizedFieldsJson,
+      confirmedFields: card.confirmedFieldsJson,
+      fieldConfidence: card.fieldConfidenceJson,
+      warnings: card.warningsJson,
+      confirmationStatus: card.confirmationStatus,
+    });
+    const fields = fieldState.effectiveFields;
     const fieldLayers = buildEvidenceCardFieldLayers({
       evidenceName: evidence.evidenceName,
       sourceType: evidence.sourceType,
@@ -769,7 +1002,7 @@ export class EvidencesService {
       indexingStatus: evidence.indexingStatus,
       criterion: evidence.criterion,
       ocrText: card.ocrText,
-      fields,
+      fields: fields as Prisma.JsonValue,
       warnings: card.warningsJson,
       matchedEventId: card.matchedEventId,
       matchedParticipantId: card.matchedParticipantId,
@@ -783,6 +1016,22 @@ export class EvidencesService {
 
     const studentCard = {
       id: card.id,
+      provider: card.provider,
+      confirmationStatus: normalizeConfirmationStatus(card.confirmationStatus),
+      requiresHumanConfirmation: card.requiresHumanConfirmation,
+      confirmedFields: fieldState.confirmedFields,
+      effectiveFields: fieldState.effectiveFields,
+      fieldDetails: fieldState.fieldDetails,
+      confirmedAt: card.confirmedAt,
+      confirmedByUserId: card.confirmedByUserId,
+      canEdit: user ? this.canMutateEvidenceCard(user, evidence) && this.isCardReadyForStudentAction(evidence) : false,
+      canConfirm:
+        user ?
+          this.canMutateEvidenceCard(user, evidence) &&
+          this.isCardReadyForStudentAction(evidence) &&
+          evidence.sourceType !== EvidenceSourceType.event_import &&
+          normalizeConfirmationStatus(card.confirmationStatus) !== evidenceCardConfirmationStatuses.confirmed
+        : false,
       readableSummary,
       userProvidedFields: fieldLayers.userProvidedFields,
       studentProfileFields: fieldLayers.studentProfileFields,
@@ -790,7 +1039,7 @@ export class EvidencesService {
       normalizedFields: fieldLayers.normalizedFields,
       verifiedFields: fieldLayers.verifiedFields,
       primaryFields: fieldLayers.primaryFields,
-      fieldConfidence: fieldLayers.fieldConfidence,
+      fieldConfidence: normalizeFieldConfidence(card.fieldConfidenceJson) ?? fieldLayers.fieldConfidence,
       metricSuggestions: fieldLayers.metricSuggestions,
       academic: fieldLayers.academic,
       matchingStatus,
@@ -817,11 +1066,13 @@ export class EvidencesService {
       matchedParticipantId: card.matchedParticipantId,
       matchedKnowledgeItemIds: card.matchedKnowledgeItemIds,
       internalConfidence: card.confidence,
+      providerModel: card.provider === 'openai' ? undefined : card.providerModel,
+      promptVersion: card.provider === 'openai' ? undefined : card.promptVersion,
       sourceEndpoint: card.sourceEndpoint,
       smartreaderJobId: card.smartreaderJobId,
       technicalSummary: card.aiSummary,
-      rawAiResponse: card.rawAiResponse,
-      rawResponseJson: card.rawResponseJson,
+      rawAiResponse: card.provider === 'openai' ? undefined : card.rawAiResponse,
+      rawResponseJson: card.provider === 'openai' ? undefined : card.rawResponseJson,
     };
   }
 
@@ -833,6 +1084,89 @@ export class EvidencesService {
       user.role === Role.admin
     );
   }
+
+  private async assertCanMutateEvidenceCard(
+    user: AuthenticatedUser,
+    evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
+  ) {
+    if (user.role !== Role.student && user.role !== Role.class_representative) {
+      throw new AppError(403, ErrorCodes.EVIDENCE_CARD_CONFIRMATION_NOT_ALLOWED, 'Only students can confirm evidence cards');
+    }
+    assertSameWorkspace(user, evidence.application!, 'Evidence not found');
+    assertApplicationOwner(evidence.application!, user);
+    if (evidence.application!.status === ApplicationStatus.supplement_required) {
+      const hasSupplementTask = await prisma.reviewTask.findFirst({
+        where: {
+          applicationId: evidence.applicationId,
+          criterion: evidence.criterion,
+          status: ReviewTaskStatus.supplement_required,
+        },
+      });
+      if (!hasSupplementTask) {
+        throw new AppError(403, ErrorCodes.SUPPLEMENT_SCOPE_VIOLATION, 'Evidence is outside supplement scope');
+      }
+    } else {
+      assertApplicationEditable(evidence.application!);
+    }
+    if (
+      evidence.status === EvidenceStatus.accepted ||
+      evidence.status === EvidenceStatus.rejected ||
+      evidence.status === EvidenceStatus.resolution_needed
+    ) {
+      throw new AppError(403, ErrorCodes.EVIDENCE_CARD_EDIT_NOT_ALLOWED, 'Evidence is locked');
+    }
+  }
+
+  private canMutateEvidenceCard(
+    user: AuthenticatedUser,
+    evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
+  ) {
+    if (user.role !== Role.student && user.role !== Role.class_representative) return false;
+    if (evidence.application?.studentId !== user.id) return false;
+    if (
+      evidence.application?.status !== ApplicationStatus.supplement_required &&
+      evidence.application?.status !== ApplicationStatus.draft &&
+      evidence.application?.status !== ApplicationStatus.prechecked &&
+      evidence.application?.status !== ApplicationStatus.ready_to_submit
+    ) {
+      return false;
+    }
+    return (
+      evidence.status !== EvidenceStatus.accepted &&
+      evidence.status !== EvidenceStatus.rejected &&
+      evidence.status !== EvidenceStatus.resolution_needed
+    );
+  }
+
+  private assertCardReadyForStudentAction(
+    evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
+    action: 'edit' | 'confirm',
+  ) {
+    if (!this.isCardReadyForStudentAction(evidence)) {
+      throw new AppError(
+        409,
+        action === 'edit' ? ErrorCodes.EVIDENCE_CARD_EDIT_NOT_ALLOWED : ErrorCodes.EVIDENCE_CARD_NOT_READY,
+        'Evidence card is not ready',
+      );
+    }
+  }
+
+  private isCardReadyForStudentAction(
+    evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
+  ) {
+    return Boolean(
+      evidence.evidenceCard &&
+      !isEvidenceProcessing(evidence.indexingStatus) &&
+      evidence.indexingStatus !== IndexingStatus.failed,
+    );
+  }
+}
+
+function pickSafeFields(value: unknown, keys: string[]) {
+  const record = value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+  return Object.fromEntries(keys.map((key) => [key, record[key] ?? null]));
 }
 
 function previewText(value?: string | null): string | undefined {
@@ -844,6 +1178,27 @@ function normalizeUploadedFileName(fileName: string) {
   if (!looksLikeMojibake(fileName)) return fileName;
   const decoded = Buffer.from(fileName, 'latin1').toString('utf8');
   return decoded.includes('\uFFFD') ? fileName : decoded;
+}
+
+function normalizeFieldConfidence(value: unknown): Record<string, number> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries = Object.entries(value).filter((entry): entry is [string, number] => {
+    const [, confidence] = entry;
+    return typeof confidence === 'number' && Number.isFinite(confidence);
+  });
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
+function resolveNewestEvidenceFile(
+  evidenceFiles: Array<{ id: string; fileId: string; file: { createdAt: Date; id: string } }>,
+) {
+  return [...evidenceFiles].sort((left, right) => {
+    const createdDiff = right.file.createdAt.getTime() - left.file.createdAt.getTime();
+    if (createdDiff !== 0) return createdDiff;
+    const fileIdDiff = right.file.id.localeCompare(left.file.id);
+    if (fileIdDiff !== 0) return fileIdDiff;
+    return right.id.localeCompare(left.id);
+  })[0] ?? null;
 }
 
 function looksLikeMojibake(value: string) {

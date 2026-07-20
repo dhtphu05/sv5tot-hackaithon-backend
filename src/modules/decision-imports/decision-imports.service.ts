@@ -32,6 +32,7 @@ import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import { AuditService } from '../audit/audit.service';
 import { assertApplicationEditable, assertApplicationOwner, createApplicationAudit } from '../applications/application.helpers';
+import { evidenceCardConfirmationStatuses } from '../evidences/evidence-card-confirmation';
 import {
   normalizeMatchingText,
   resolveExactParticipantNameMatch,
@@ -908,6 +909,11 @@ export async function importEventAsEvidence(input: {
         matchedKnowledgeItemIds: [],
         warningsJson: [],
         confidence: 0.96,
+        provider: 'event_registry',
+        fieldConfidenceJson: {},
+        requiresHumanConfirmation: false,
+        confirmationStatus: evidenceCardConfirmationStatuses.notRequired,
+        confirmedFieldsJson: readableSummary,
         aiSummary: 'Minh chứng được tạo từ danh sách chính thức đã xác nhận.',
         rawAiResponse: { source: 'official_matching_import' },
       },

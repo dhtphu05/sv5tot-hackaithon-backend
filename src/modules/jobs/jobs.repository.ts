@@ -17,10 +17,23 @@ export class JobsRepository {
     });
   }
 
+  getActiveJobsForTarget(targetId: string, jobType: JobType, workspaceId?: string | null) {
+    return this.db.indexingJob.findMany({
+      where: {
+        ...(workspaceId ? { workspaceId } : {}),
+        targetId,
+        jobType,
+        status: { in: [JobStatus.queued, JobStatus.processing] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   enqueueIndexingJob(
     targetId: string,
     jobType: JobType,
     workspaceId?: string | null,
+    inputJson?: Prisma.InputJsonValue,
     tx?: Prisma.TransactionClient,
   ) {
     const client = tx ?? this.db;
@@ -31,6 +44,7 @@ export class JobsRepository {
         jobType,
         status: JobStatus.queued,
         attempts: 0,
+        inputJson,
       },
     });
   }
@@ -44,5 +58,37 @@ export class JobsRepository {
       where: { status: JobStatus.queued },
       orderBy: { createdAt: 'asc' },
     });
+  }
+
+  async claimNextQueuedJob() {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const candidate = await this.findNextQueuedJob();
+      if (!candidate) return null;
+      const updated = await this.db.indexingJob.updateMany({
+        where: { id: candidate.id, status: JobStatus.queued },
+        data: {
+          status: JobStatus.processing,
+          attempts: { increment: 1 },
+          errorMessage: null,
+        },
+      });
+      if (updated.count === 1) {
+        return this.findById(candidate.id);
+      }
+    }
+    return null;
+  }
+
+  async claimQueuedJobById(id: string) {
+    const updated = await this.db.indexingJob.updateMany({
+      where: { id, status: JobStatus.queued },
+      data: {
+        status: JobStatus.processing,
+        attempts: { increment: 1 },
+        errorMessage: null,
+      },
+    });
+    if (updated.count !== 1) return null;
+    return this.findById(id);
   }
 }

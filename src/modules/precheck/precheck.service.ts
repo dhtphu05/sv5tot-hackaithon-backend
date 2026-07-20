@@ -16,6 +16,7 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { facultyMatches } from '../../shared/utils/faculty';
+import { normalizeSchoolYear } from '../../shared/utils/school-year';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { evaluateCriterionCompletion } from '../criteria-completion/criteria-completion.evaluator';
 import type {
@@ -142,8 +143,32 @@ export class PrecheckService {
     const application = await this.getApplication(applicationId);
     assertPrecheckAccess(application, user, true);
     const latest = await this.precheckRepository.findLatest(application.id);
-    if (!latest) return null;
+    return latest ? this.toLatestPrecheckDto(application, latest) : null;
+  }
 
+  async getLatestCurrent(user: AuthenticatedUser, schoolYear?: string) {
+    const application = await this.precheckRepository.findCurrentApplicationForLatest(
+      user.id,
+      normalizeSchoolYear(schoolYear),
+    );
+    if (!application) return null;
+
+    const latest = await this.precheckRepository.findLatest(application.id);
+    return latest ? this.toLatestPrecheckDto(application, latest) : null;
+  }
+
+  private async getApplication(applicationId: string) {
+    const application = await this.precheckRepository.findApplicationContext(applicationId);
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    return application;
+  }
+
+  private toLatestPrecheckDto(
+    application: Pick<Application, 'id' | 'targetLevel'>,
+    latest: NonNullable<Awaited<ReturnType<PrecheckRepository['findLatest']>>>,
+  ) {
     const result = latest.resultJson as Partial<PrecheckResponseDto>;
     const missingItems = Array.isArray(result.missingItems)
       ? result.missingItems
@@ -163,14 +188,6 @@ export class PrecheckService {
       humanConfirmationRequired: true,
       createdAt: latest.createdAt,
     };
-  }
-
-  private async getApplication(applicationId: string) {
-    const application = await this.precheckRepository.findApplicationContext(applicationId);
-    if (!application) {
-      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
-    }
-    return application;
   }
 }
 
@@ -312,8 +329,16 @@ function buildMissingRequirement(
   requirement: RequirementDto,
   needsVerification = false,
 ): PrecheckMissingRequirementDto {
+  const confirmationResponse = requirement.currentResponses.find((response) => {
+    const payload = parseRecord(response.payloadJson);
+    return payload.needsEvidenceConfirmation === true && stringValue(payload.evidenceId);
+  });
+  const confirmationPayload = parseRecord(confirmationResponse?.payloadJson);
+  const confirmationEvidenceId = stringValue(confirmationPayload.evidenceId);
   const reason = needsVerification
-    ? 'Cần xác minh'
+    ? confirmationEvidenceId
+      ? 'Cần xác nhận thông tin minh chứng'
+      : 'Cần xác minh'
     : requirement.status === 'rejected'
       ? 'Cần bổ sung'
       : 'Chưa có dữ liệu';
@@ -324,15 +349,25 @@ function buildMissingRequirement(
     status: requirement.status,
     reason,
     action: {
-      type: requirement.nextAction?.type ?? (needsVerification ? 'verify_requirement' : 'complete_requirement'),
+      type: confirmationEvidenceId
+        ? 'confirm_evidence'
+        : requirement.nextAction?.type ?? (needsVerification ? 'verify_requirement' : 'complete_requirement'),
       label: needsVerification
-        ? (verificationActionLabel(requirement) ?? requirement.nextAction?.label ?? reason)
+        ? confirmationEvidenceId
+          ? 'Kiểm tra thông tin minh chứng'
+          : (verificationActionLabel(requirement) ?? requirement.nextAction?.label ?? reason)
         : (requirement.nextAction?.label ?? reason),
       shortReason: `${requirement.title}: ${reason}`,
       criterion,
       requirementKey: requirement.key,
-      route: '/app/application',
-      priority: needsVerification ? 3 : 2,
+      evidenceId: confirmationEvidenceId,
+      route: confirmationEvidenceId
+        ? `/app/application?evidenceId=${confirmationEvidenceId}&mode=confirm`
+        : '/app/application',
+      destination: confirmationEvidenceId
+        ? `/app/application?evidenceId=${confirmationEvidenceId}&mode=confirm`
+        : undefined,
+      priority: confirmationEvidenceId ? 1 : needsVerification ? 3 : 2,
     },
   };
 }
@@ -363,7 +398,9 @@ function normalizeCompletionAction(
     shortReason,
     criterion: item.criterion,
     requirementKey: item.nextAction.requirementKey,
+    evidenceId: item.nextAction.evidenceId,
     route: item.nextAction.route ?? '/app/application',
+    destination: item.nextAction.destination,
     priority,
   };
 }

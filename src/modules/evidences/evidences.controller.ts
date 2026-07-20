@@ -53,3 +53,17 @@ export async function getEvidenceCard(req: Request, res: Response): Promise<void
   const data = await evidencesService.getCard(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });
 }
+
+export async function saveEvidenceCardCorrections(req: Request, res: Response): Promise<void> {
+  const data = await evidencesService.saveCardCorrections(
+    req.user!,
+    String(req.params.id),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function confirmEvidenceCard(req: Request, res: Response): Promise<void> {
+  const data = await evidencesService.confirmCard(req.user!, String(req.params.id), req.body);
+  sendSuccess(res, data, { requestId: req.requestId });
+}

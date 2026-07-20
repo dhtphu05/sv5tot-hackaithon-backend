@@ -118,6 +118,8 @@ export interface CriterionCompletionDto {
     label: string;
     requirementKey?: string;
     route?: string;
+    evidenceId?: string;
+    destination?: string;
   } | null;
 }
 
@@ -159,8 +161,12 @@ export interface CompletionEvidence {
   evidenceCard?: {
     extractedFieldsJson?: unknown;
     normalizedFieldsJson?: unknown;
+    confirmedFieldsJson?: unknown;
+    confirmationStatus?: string | null;
+    requiresHumanConfirmation?: boolean | null;
     warningsJson?: unknown;
     confidence?: number | null;
+    provider?: string | null;
   } | null;
 }
 

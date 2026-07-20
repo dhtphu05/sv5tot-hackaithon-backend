@@ -767,6 +767,60 @@ describe('criteria completion evaluator', () => {
     expect(days?.currentResponses[0].status).toBe('needs_verification');
   });
 
+  it('does not count pending manual extracted volunteer days toward verified total', () => {
+    const result = evaluate({
+      criterion: Criterion.volunteer,
+      groups: volunteerGroups(),
+      evidences: [
+        evidence({
+          id: 'pending-card',
+          sourceType: EvidenceSourceType.manual_upload,
+          evidenceCard: {
+            normalizedFieldsJson: { volunteer_days: 3 },
+            confirmationStatus: 'pending',
+            requiresHumanConfirmation: true,
+          },
+        }),
+      ],
+    });
+
+    const days = findRequirementInResult(result, 'accumulated_volunteer_days');
+    expect(result.status).toBe('needs_verification');
+    expect(days?.aggregation?.verifiedTotal).toBe(0);
+    expect(days?.currentResponses[0].payloadJson).toMatchObject({
+      needsEvidenceConfirmation: true,
+      evidenceId: 'pending-card',
+    });
+  });
+
+  it('counts confirmed manual volunteer days as student-confirmed document data', () => {
+    const result = evaluate({
+      criterion: Criterion.volunteer,
+      groups: volunteerGroups(),
+      evidences: [
+        evidence({
+          id: 'confirmed-card',
+          sourceType: EvidenceSourceType.manual_upload,
+          evidenceCard: {
+            normalizedFieldsJson: { volunteer_days: 1 },
+            confirmedFieldsJson: { volunteer_days: 3, activity_date: '2026-03-01' },
+            confirmationStatus: 'confirmed',
+            requiresHumanConfirmation: false,
+          },
+        }),
+      ],
+    });
+
+    const days = findRequirementInResult(result, 'accumulated_volunteer_days');
+    expect(days?.aggregation).toMatchObject({
+      verifiedTotal: 0,
+      pendingVerificationTotal: 3,
+    });
+    expect(days?.currentResponses[0].payloadJson).not.toMatchObject({
+      needsEvidenceConfirmation: true,
+    });
+  });
+
   it('imports official volunteer event as verified activity', () => {
     const result = evaluate({
       criterion: Criterion.volunteer,

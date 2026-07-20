@@ -6,19 +6,23 @@ import { uploadMiddleware } from '../../middlewares/upload.middleware';
 import { validate } from '../../middlewares/validate.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
 import {
+  confirmEvidenceCard,
   createApplicationEvidence,
   deleteEvidence,
   getEvidence,
   getEvidenceAudit,
   getEvidenceCard,
   listApplicationEvidences,
+  saveEvidenceCardCorrections,
   startEvidenceIndexing,
   updateEvidence,
   uploadEvidenceFile,
 } from './evidences.controller';
 import {
+  confirmEvidenceCardSchema,
   createEvidenceSchema,
   listEvidencesQuerySchema,
+  saveEvidenceCardCorrectionsSchema,
   startIndexingSchema,
   updateEvidenceSchema,
 } from './evidences.validation';
@@ -72,6 +76,20 @@ evidencesRouter.get(
     Role.admin,
   ),
   asyncHandler(getEvidenceCard),
+);
+evidencesRouter.patch(
+  '/evidences/:id/card/corrections',
+  requireAuth,
+  requireRole(Role.student, Role.class_representative),
+  validate({ body: saveEvidenceCardCorrectionsSchema }),
+  asyncHandler(saveEvidenceCardCorrections),
+);
+evidencesRouter.post(
+  '/evidences/:id/card/confirm',
+  requireAuth,
+  requireRole(Role.student, Role.class_representative),
+  validate({ body: confirmEvidenceCardSchema }),
+  asyncHandler(confirmEvidenceCard),
 );
 evidencesRouter.get(
   '/evidences/:id/audit',
