@@ -944,12 +944,16 @@ export class ManagerService {
             notificationId: notification.id,
             templateKey: 'application_result_announced',
             payload: {
+              studentName: student.fullName,
               recipientName: student.fullName,
+              applicationCode: applicationId,
               applicationId,
               schoolYear: before.schoolYear,
               targetLevel: before.targetLevel,
               finalStatus: input.finalStatus,
               finalLevel: updated.finalLevel,
+              reason: input.finalNote,
+              finalNote: input.finalNote,
             },
             dedupeKey: buildEmailDedupeKey('application_result_announced', {
               applicationId,

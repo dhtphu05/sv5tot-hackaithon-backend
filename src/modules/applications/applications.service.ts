@@ -447,6 +447,9 @@ export class ApplicationsService {
         },
         tx,
       );
+      const templateKey = isSupplementResubmit
+        ? 'application_resubmitted'
+        : 'application_submitted';
       await this.emailOutboxService.enqueue(
         {
           recipientEmail: application.student.email,
@@ -454,15 +457,18 @@ export class ApplicationsService {
           relatedUserId: application.studentId,
           applicationId: application.id,
           notificationId: notification.id,
-          templateKey: 'application_submitted',
+          templateKey,
           payload: {
+            studentName: application.student.fullName,
             recipientName: application.student.fullName,
+            applicationCode: application.id,
             applicationId: application.id,
             schoolYear: application.schoolYear,
             targetLevel: application.targetLevel,
+            criterionName: isSupplementResubmit ? supplementCriteria.join(', ') : undefined,
             status: ApplicationStatus.under_review,
           },
-          dedupeKey: buildEmailDedupeKey('application_submitted', {
+          dedupeKey: buildEmailDedupeKey(templateKey, {
             applicationId: application.id,
             version: newVersion,
             status: ApplicationStatus.under_review,
@@ -548,13 +554,18 @@ export class ApplicationsService {
           notificationId: notification.id,
           templateKey: 'supplement_requested',
           payload: {
+            studentName: student.fullName,
             recipientName: student.fullName,
+            applicationCode: application.id,
             applicationId: application.id,
             schoolYear: application.schoolYear,
             targetLevel: application.targetLevel,
             criterion: input.allowedCriteria?.join(', '),
+            criterionName: input.allowedCriteria?.join(', '),
             deadline: input.deadline,
             reason: input.reason,
+            supplementSummary: input.reason,
+            contextType: 'reopened_by_manager',
           },
           dedupeKey: buildEmailDedupeKey('supplement_requested', {
             applicationId: application.id,

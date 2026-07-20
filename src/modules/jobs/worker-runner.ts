@@ -1,4 +1,5 @@
 import { logger } from '../../config/logger';
+import { EmailWorkerService } from '../mail/email-worker.service';
 import { JobsService } from './jobs.service';
 
 type JobWorkerRunner = {
@@ -10,9 +11,11 @@ export function startJobWorkerLoop(
     enabled: boolean;
     intervalMs: number;
     service?: JobsService;
+    mailService?: EmailWorkerService;
   },
 ): JobWorkerRunner {
   const service = options.service ?? new JobsService();
+  const mailService = options.mailService ?? new EmailWorkerService();
   let stopped = false;
   let running = false;
   let timer: NodeJS.Timeout | undefined;
@@ -40,10 +43,22 @@ export function startJobWorkerLoop(
           'Background job worker processed a queued job',
         );
       }
+
+      const emailResult = await mailService.runTick();
+      if (emailResult.email || emailResult.remindersQueued > 0) {
+        logger.info(
+          {
+            emailOutboxId: emailResult.email?.id ?? null,
+            emailStatus: emailResult.email?.status ?? null,
+            remindersQueued: emailResult.remindersQueued,
+          },
+          'Background mail worker processed email outbox',
+        );
+      }
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Background job worker tick failed',
+        'Background worker tick failed',
       );
     } finally {
       running = false;
