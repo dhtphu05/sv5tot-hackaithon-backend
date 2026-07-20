@@ -9,12 +9,13 @@ export const managerTools: ChatbotToolDefinition[] = [
     mode: 'read',
     requiredRoles: ['manager', 'admin'],
     inputSchema: z.object({}),
-    handler: async () => {
+    handler: async (ctx) => {
+      const scope = workspaceFilter(ctx);
       const [applications, pending, supplement, resolution] = await Promise.all([
-        prisma.application.groupBy({ by: ['status'], _count: { status: true } }),
-        prisma.reviewTask.count({ where: { status: { in: ['waiting', 'reviewing'] } } }),
-        prisma.application.count({ where: { status: 'supplement_required' } }),
-        prisma.application.count({ where: { status: 'resolution_needed' } }),
+        prisma.application.groupBy({ by: ['status'], where: scope, _count: { status: true } }),
+        prisma.reviewTask.count({ where: { ...scope, status: { in: ['waiting', 'reviewing'] } } }),
+        prisma.application.count({ where: { ...scope, status: 'supplement_required' } }),
+        prisma.application.count({ where: { ...scope, status: 'resolution_needed' } }),
       ]);
       return {
         type: 'card',
@@ -29,10 +30,10 @@ export const managerTools: ChatbotToolDefinition[] = [
     mode: 'read',
     requiredRoles: ['manager', 'admin'],
     inputSchema: z.object({}),
-    handler: async () => {
+    handler: async (ctx) => {
       const workloads = await prisma.reviewTask.groupBy({
         by: ['criterion', 'assignedOfficerId'],
-        where: { status: { in: ['waiting', 'reviewing'] } },
+        where: { ...workspaceFilter(ctx), status: { in: ['waiting', 'reviewing'] } },
         _count: { id: true },
       });
       return {
@@ -51,10 +52,13 @@ export const managerTools: ChatbotToolDefinition[] = [
     mode: 'read',
     requiredRoles: ['manager', 'admin'],
     inputSchema: z.object({}),
-    handler: async () => {
+    handler: async (ctx) => {
       const grouped = await prisma.reviewTask.groupBy({
         by: ['criterion'],
-        where: { status: { in: ['waiting', 'reviewing', 'supplement_required', 'resolution_needed'] } },
+        where: {
+          ...workspaceFilter(ctx),
+          status: { in: ['waiting', 'reviewing', 'supplement_required', 'resolution_needed'] },
+        },
         _count: { id: true },
         orderBy: { _count: { id: 'desc' } },
       });
@@ -67,3 +71,7 @@ export const managerTools: ChatbotToolDefinition[] = [
     },
   },
 ];
+
+function workspaceFilter(ctx: { role: string; workspaceId?: string | null }) {
+  return ctx.role === 'admin' ? {} : { workspaceId: ctx.workspaceId ?? '__missing_workspace__' };
+}

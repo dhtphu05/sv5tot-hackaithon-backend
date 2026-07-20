@@ -6,27 +6,27 @@ import { ManagerService } from './manager.service';
 const service = new ManagerService();
 
 export async function listManagerApplications(req: Request, res: Response): Promise<void> {
-  const data = await service.listApplications(req.query as never);
+  const data = await service.listApplications(req.user!, req.query as never);
   sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
 }
 
 export async function getManagerWorkloads(req: Request, res: Response): Promise<void> {
-  const data = await service.getWorkloads();
+  const data = await service.getWorkloads(req.user!);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
 export async function getManagerDashboardSummary(req: Request, res: Response): Promise<void> {
-  const data = await service.getDashboardSummary();
+  const data = await service.getDashboardSummary(req.user!);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
 export async function listManagerResults(req: Request, res: Response): Promise<void> {
-  const data = await service.listResults(req.query as never);
+  const data = await service.listResults(req.user!, req.query as never);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
 export async function getCommitteeInbox(req: Request, res: Response): Promise<void> {
-  const data = await service.getCommitteeInbox(req.query as never);
+  const data = await service.getCommitteeInbox(req.user!, req.query as never);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 

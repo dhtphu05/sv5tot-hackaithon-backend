@@ -26,6 +26,7 @@ vi.mock('../../src/infrastructure/database/prisma', () => ({
 import { ReviewService } from '../../src/modules/review/review.service';
 
 const now = new Date('2026-07-05T00:00:00.000Z');
+const workspaceId = '11111111-1111-1111-1111-111111111111';
 
 const managerUser: AuthenticatedUser = {
   id: 'manager-1',
@@ -36,6 +37,8 @@ const managerUser: AuthenticatedUser = {
   className: null,
   faculty: null,
   avatarUrl: null,
+  workspaceId,
+  workspace: null,
 };
 
 describe('ReviewService.getTaskDetail evidence event matching', () => {
@@ -73,7 +76,7 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
 
     expect(prismaMock.eventRegistry.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: { in: ['event-1'] } },
+        where: { id: { in: ['event-1'] }, workspaceId },
       }),
     );
     expect(detail.evidences[0].event).toMatchObject({
@@ -116,6 +119,7 @@ function buildTask(input: {
 }) {
   return {
     id: 'task-1',
+    workspaceId,
     applicationId: 'app-1',
     collectiveProfileId: null,
     assignedOfficerId: null,
@@ -134,6 +138,7 @@ function buildTask(input: {
     collectiveProfile: null,
     application: {
       id: 'app-1',
+      workspaceId,
       schoolYear: '2025-2026',
       targetLevel: Level.city,
       applicationType: ApplicationType.individual,

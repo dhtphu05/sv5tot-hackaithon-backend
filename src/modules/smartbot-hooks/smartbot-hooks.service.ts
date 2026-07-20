@@ -18,9 +18,10 @@ export type SmartbotHookResponse = {
 export class SmartbotHooksService {
   async applicationStatus(input: ApplicationToolInput): Promise<SmartbotHookResponse> {
     const applicationId = input.applicationId ?? input.application_id;
+    const workspaceId = await resolveWebhookWorkspaceId(input);
     const app = applicationId
-      ? await prisma.application.findUnique({
-          where: { id: applicationId },
+      ? await prisma.application.findFirst({
+          where: { id: applicationId, ...(workspaceId ? { workspaceId } : { id: neverId }) },
           select: {
             id: true,
             status: true,
@@ -53,9 +54,10 @@ export class SmartbotHooksService {
 
   async precheckSummary(input: ApplicationToolInput): Promise<SmartbotHookResponse> {
     const applicationId = input.applicationId ?? input.application_id;
+    const workspaceId = await resolveWebhookWorkspaceId(input);
     const precheck = applicationId
       ? await prisma.precheckResult.findFirst({
-          where: { applicationId },
+          where: { applicationId, application: workspaceId ? { workspaceId } : { id: neverId } },
           orderBy: { createdAt: 'desc' },
           select: {
             readinessScore: true,
@@ -79,9 +81,10 @@ export class SmartbotHooksService {
 
   async cascadeSummary(input: ApplicationToolInput): Promise<SmartbotHookResponse> {
     const applicationId = input.applicationId ?? input.application_id;
+    const workspaceId = await resolveWebhookWorkspaceId(input);
     const cascade = applicationId
       ? await prisma.cascadeReview.findFirst({
-          where: { applicationId },
+          where: { applicationId, application: workspaceId ? { workspaceId } : { id: neverId } },
           orderBy: { createdAt: 'desc' },
           select: {
             targetLevel: true,
@@ -104,9 +107,18 @@ export class SmartbotHooksService {
 
   async evidenceCardSummary(input: EvidenceToolInput): Promise<SmartbotHookResponse> {
     const evidenceId = input.evidenceId ?? input.evidence_id;
+    const workspaceId = await resolveWebhookWorkspaceId(input);
     const evidence = evidenceId
-      ? await prisma.evidence.findUnique({
-          where: { id: evidenceId },
+      ? await prisma.evidence.findFirst({
+          where: {
+            id: evidenceId,
+            OR: workspaceId
+              ? [
+                  { application: { workspaceId } },
+                  { collectiveProfile: { workspaceId } },
+                ]
+              : [{ id: neverId }],
+          },
           select: {
             id: true,
             evidenceName: true,
@@ -144,8 +156,10 @@ export class SmartbotHooksService {
 
   async eventSearch(input: EventSearchToolInput): Promise<SmartbotHookResponse> {
     const criterion = parseCriterion(input.criterion);
+    const workspaceId = await resolveWebhookWorkspaceId(input);
     const events = await prisma.eventRegistry.findMany({
       where: {
+        ...(workspaceId ? { workspaceId } : { id: neverId }),
         ...(criterion ? { criterion } : {}),
         ...(input.query ? { eventName: { contains: input.query, mode: 'insensitive' } } : {}),
       },
@@ -177,9 +191,10 @@ export class SmartbotHooksService {
 
   async reviewerDraftResponse(input: ReviewerDraftToolInput): Promise<SmartbotHookResponse> {
     const taskId = input.taskId ?? input.task_id;
+    const workspaceId = await resolveWebhookWorkspaceId(input);
     const task = taskId
-      ? await prisma.reviewTask.findUnique({
-          where: { id: taskId },
+      ? await prisma.reviewTask.findFirst({
+          where: { id: taskId, ...(workspaceId ? { workspaceId } : { id: neverId }) },
           select: { id: true, criterion: true, status: true },
         })
       : null;
@@ -212,7 +227,7 @@ export class SmartbotHooksService {
       });
     }
 
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, role: true } });
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, role: true, workspaceId: true } });
     if (!user) {
       return setVariables({
         created: 'false',
@@ -226,6 +241,7 @@ export class SmartbotHooksService {
       where: { id: sessionId },
       create: {
         id: sessionId,
+        workspaceId: user.workspaceId,
         userId: user.id,
         role: user.role,
         applicationId: input.applicationId ?? input.application_id,
@@ -234,11 +250,12 @@ export class SmartbotHooksService {
         providerSessionId: sessionId,
         contextScope: 'smartbot_handoff',
       },
-      update: { status: 'active' },
+      update: { status: 'active', workspaceId: user.workspaceId },
     });
     const handoff = await prisma.chatbotHandoff.create({
       data: {
         sessionId,
+        workspaceId: user.workspaceId,
         userId: user.id,
         applicationId: input.applicationId ?? input.application_id,
         reviewTaskId: input.reviewTaskId ?? input.review_task_id,
@@ -250,6 +267,7 @@ export class SmartbotHooksService {
       data: {
         actorId: user.id,
         actorRole: user.role,
+        workspaceId: user.workspaceId,
         action: auditActions.CHATBOT_HANDOFF_CREATED,
         targetType: 'chatbot_handoff',
         targetId: handoff.id,
@@ -266,6 +284,22 @@ export class SmartbotHooksService {
       message: 'Đã tạo ticket/handoff cho cán bộ hỗ trợ.',
     });
   }
+}
+
+const neverId = '00000000-0000-0000-0000-000000000000';
+
+async function resolveWebhookWorkspaceId(input: {
+  userId?: string;
+  user_id?: string;
+  sender_id?: string;
+}): Promise<string | null> {
+  const userId = input.userId ?? input.user_id ?? extractUserId(input.sender_id);
+  if (!userId) return null;
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { workspaceId: true },
+  });
+  return user?.workspaceId ?? null;
 }
 
 function setVariables(setVariablesInput: Record<string, unknown>): SmartbotHookResponse {

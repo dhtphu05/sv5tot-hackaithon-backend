@@ -2,6 +2,7 @@ import type { Role } from '@prisma/client';
 
 export type AuthenticatedUser = {
   id: string;
+  workspaceId: string | null;
   email: string;
   role: Role;
   fullName: string;
@@ -9,6 +10,12 @@ export type AuthenticatedUser = {
   className: string | null;
   faculty: string | null;
   avatarUrl: string | null;
+  workspace: {
+    id: string;
+    code: string;
+    name: string;
+    shortName: string | null;
+  } | null;
 };
 
 export type AccessTokenPayload = {

@@ -160,7 +160,7 @@ export const studentTools: ChatbotToolDefinition[] = [
       criterion: z.nativeEnum(Criterion).optional(),
       applicationId: z.string().uuid().optional(),
     }),
-    handler: async (_ctx, input) => {
+    handler: async (ctx, input) => {
       const parsed = z
         .object({
           query: z.string().trim().max(200).optional(),
@@ -170,6 +170,7 @@ export const studentTools: ChatbotToolDefinition[] = [
         .parse(input);
       const events = await prisma.eventRegistry.findMany({
         where: {
+          ...workspaceFilter(ctx),
           ...(parsed.criterion ? { criterion: parsed.criterion } : {}),
           ...(parsed.query ? { eventName: { contains: parsed.query, mode: 'insensitive' } } : {}),
         },
@@ -195,6 +196,10 @@ async function findApplication(userId: string, applicationId?: string) {
     return prisma.application.findUnique({ where: { id: applicationId } });
   }
   return prisma.application.findFirst({ where: { studentId: userId }, orderBy: { updatedAt: 'desc' } });
+}
+
+function workspaceFilter(ctx: { role: string; workspaceId?: string | null }) {
+  return ctx.role === 'admin' ? {} : { workspaceId: ctx.workspaceId ?? '__missing_workspace__' };
 }
 
 function textResult(message: string): ChatbotToolResult {

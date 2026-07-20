@@ -19,9 +19,23 @@ export class FilesRepository {
                     reviewTasks: true,
                   },
                 },
+                collectiveProfile: true,
               },
             },
           },
+        },
+        eventFiles: {
+          include: {
+            event: {
+              select: { workspaceId: true },
+            },
+          },
+        },
+        decisionImports: {
+          select: { workspaceId: true },
+        },
+        sampleCertificateEvents: {
+          select: { workspaceId: true },
         },
       },
     });

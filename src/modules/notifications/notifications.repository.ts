@@ -4,6 +4,7 @@ import type { ListNotificationsQuery } from './notifications.validation';
 
 export type PersistNotificationInput = {
   userId: string;
+  workspaceId?: string | null;
   applicationId?: string | null;
   collectiveProfileId?: string | null;
   evidenceId?: string | null;
@@ -23,6 +24,7 @@ export class NotificationsRepository {
     return client.notification.create({
       data: {
         userId: input.userId,
+        workspaceId: input.workspaceId,
         applicationId: input.applicationId,
         collectiveProfileId: input.collectiveProfileId,
         evidenceId: input.evidenceId,

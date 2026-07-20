@@ -20,6 +20,7 @@ import { chatbotRouter } from './modules/chatbot/chatbot.routes';
 import { collectiveRouter } from './modules/collective/collective.routes';
 import { decisionImportsRouter } from './modules/decision-imports/decision-imports.routes';
 import { evidenceMatchingRouter } from './modules/evidence-matching/evidence-matching.routes';
+import { evidenceKnowledgeRouter } from './modules/evidence-knowledge/evidence-knowledge.routes';
 import { eventRegistryRouter } from './modules/event-registry/event-registry.routes';
 import { evidencesRouter } from './modules/evidences/evidences.routes';
 import { exportsRouter } from './modules/exports/exports.routes';
@@ -40,6 +41,8 @@ import { smartReaderRouter } from './modules/smartreader/smartreader.routes';
 import { smartUxRouter } from './modules/smartux/smartux.routes';
 import { meRouter, usersRouter } from './modules/users/users.routes';
 import { versionRouter } from './modules/version/version.routes';
+import { adminWorkspacesRouter, workspacesRouter } from './modules/workspaces/workspaces.routes';
+import { requirementResponsesRouter } from './modules/criteria-completion/criteria-completion.routes';
 
 export function createApp() {
   const app = express();
@@ -63,15 +66,19 @@ export function createApp() {
 
   app.use('/health', healthRouter);
   app.use('/api/version', versionRouter);
+  app.use('/api/admin/workspaces', adminWorkspacesRouter);
+  app.use('/api/workspaces', workspacesRouter);
   app.use('/api/auth', authRouter);
   app.use('/api/me', meRouter);
   app.use('/api/users', usersRouter);
   app.use('/api/applications', applicationsRouter);
+  app.use('/api', requirementResponsesRouter);
   app.use('/api', metricsRouter);
   app.use('/api', evidencesRouter);
   app.use('/api', filesRouter);
   app.use('/api/events', eventRegistryRouter);
   app.use('/api/evidence-matching', evidenceMatchingRouter);
+  app.use('/api/evidence-knowledge', evidenceKnowledgeRouter);
   app.use('/api/decision-imports', decisionImportsRouter);
   app.use('/api/knowledge-base', knowledgeBaseRouter);
   app.use('/api', precheckRouter);

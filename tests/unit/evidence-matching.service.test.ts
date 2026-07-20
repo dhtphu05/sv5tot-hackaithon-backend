@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EvidenceMatchingService } from '../../src/modules/evidence-matching/evidence-matching.service';
 import { AppError } from '../../src/shared/errors/app-error';
 
+const workspaceId = '11111111-1111-4111-8111-111111111111';
 const baseUser = {
   id: 'student-1',
   email: 'student@example.com',
@@ -12,6 +13,8 @@ const baseUser = {
   className: null,
   faculty: null,
   avatarUrl: null,
+  workspaceId,
+  workspace: null,
 };
 
 function event(overrides: Record<string, unknown> = {}) {
@@ -272,5 +275,171 @@ describe('EvidenceMatchingService', () => {
 
     expect(result.items).toEqual([]);
     expect(result.emptyState.studentStatus.code).toBe('official_match_not_found');
+  });
+
+  it('lists compact official event library without participant or file data', async () => {
+    const applicationId = '22222222-2222-4222-8222-222222222222';
+    const eventRows = [
+      event({ id: 'event-1', eventName: 'Mua he xanh 2026' }),
+      event({ id: 'event-2', eventName: 'Hien mau nhan dao' }),
+    ];
+    const db = {
+      application: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: applicationId,
+          studentId: baseUser.id,
+          workspaceId,
+        }),
+      },
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue(eventRows),
+        count: vi.fn().mockResolvedValue(2),
+      },
+      evidence: {
+        findMany: vi.fn().mockResolvedValue([{ eventId: 'event-2' }]),
+      },
+      $transaction: vi.fn((queries: Array<Promise<unknown>>) => Promise.all(queries)),
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.library(baseUser, {
+      applicationId,
+      criterion: Criterion.volunteer,
+      projection: 'full',
+      page: 1,
+      limit: 20,
+    });
+
+    expect(db.eventRegistry.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId,
+          status: EventStatus.active,
+          rosterIndexed: true,
+          criterion: Criterion.volunteer,
+        }),
+        select: expect.objectContaining({
+          id: true,
+          eventName: true,
+          organizer: true,
+          organizerLevel: true,
+          criterion: true,
+        }),
+        skip: 0,
+        take: 20,
+      }),
+    );
+    expect(db.eventRegistry.findMany.mock.calls[0][0]).not.toHaveProperty('include');
+    expect(result).toMatchObject({
+      page: 1,
+      limit: 20,
+      total: 2,
+      totalPages: 1,
+      items: [
+        {
+          eventId: 'event-1',
+          title: 'Mua he xanh 2026',
+          state: 'available',
+        },
+        {
+          eventId: 'event-2',
+          title: 'Hien mau nhan dao',
+          state: 'already_imported',
+        },
+      ],
+    });
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('participant');
+    expect(serialized).not.toContain('studentCode');
+    expect(serialized).not.toContain('file');
+    expect(serialized).not.toContain('confidence');
+  });
+
+  it('normalizes student library search aliases and typo variants into one reference result', async () => {
+    const applicationId = '22222222-2222-4222-8222-222222222222';
+    const eventRows = [
+      event({ id: 'event-1', eventName: 'Mùa hè xanh 2025' }),
+      event({ id: 'event-duplicate', eventName: 'Mùa hè xanh 2025' }),
+      event({ id: 'event-2', eventName: 'Hiến máu nhân đạo 2025' }),
+    ];
+    const db = {
+      application: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: applicationId,
+          studentId: baseUser.id,
+          workspaceId,
+        }),
+      },
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue(eventRows),
+      },
+      evidence: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    for (const search of [
+      'Mùa hè xanh 2025',
+      'mua he xanh 2025',
+      'MHX 2025',
+      'CD MHX',
+      'mua he xnah',
+    ]) {
+      const result = await service.library(baseUser, {
+        applicationId,
+        search,
+        projection: 'reference',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(result.items, search).toEqual([{ eventId: 'event-1', title: 'Mùa hè xanh 2025' }]);
+      expect(result.total, search).toBe(1);
+      expect(JSON.stringify(result)).not.toMatch(
+        /organizer|organizerLevel|criterion|state|participant|studentCode|file|ocr|reviewer|confidence|acceptedCount/i,
+      );
+    }
+  });
+
+  it('rejects official event library access for non-owner applications', async () => {
+    const service = new EvidenceMatchingService(
+      {
+        application: {
+          findUnique: vi.fn().mockResolvedValue({
+            id: '22222222-2222-4222-8222-222222222222',
+            studentId: 'another-student',
+            workspaceId,
+          }),
+        },
+      } as never,
+      { log: vi.fn() } as never,
+    );
+
+    await expect(
+      service.library(baseUser, {
+        applicationId: '22222222-2222-4222-8222-222222222222',
+        projection: 'full',
+        page: 1,
+        limit: 20,
+      }),
+    ).rejects.toBeInstanceOf(AppError);
+  });
+
+  it('rejects official event library access outside the student role', async () => {
+    const service = new EvidenceMatchingService({} as never, { log: vi.fn() } as never);
+
+    await expect(
+      service.library(
+        { ...baseUser, role: Role.officer },
+        {
+          applicationId: '22222222-2222-4222-8222-222222222222',
+          projection: 'full',
+          page: 1,
+          limit: 20,
+        },
+      ),
+    ).rejects.toBeInstanceOf(AppError);
   });
 });

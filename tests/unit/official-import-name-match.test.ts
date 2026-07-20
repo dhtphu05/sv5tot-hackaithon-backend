@@ -34,6 +34,8 @@ const user = {
   className: null,
   faculty: null,
   avatarUrl: null,
+  workspaceId: null,
+  workspace: null,
 };
 
 const application = {

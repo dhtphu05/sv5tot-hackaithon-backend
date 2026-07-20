@@ -2,6 +2,7 @@
 import { EventStatus, Role, type Prisma, type PrismaClient } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import type { ListEventsQuery, ParticipantsQuery } from './event-registry.validation';
 
 export const eventInclude = {
@@ -10,6 +11,47 @@ export const eventInclude = {
     orderBy: { createdAt: 'desc' },
   },
   sampleCertificateFile: true,
+} satisfies Prisma.EventRegistryInclude;
+
+export const staffEventWorkspaceInclude = {
+  eventFiles: {
+    include: {
+      file: {
+        select: {
+          id: true,
+          originalName: true,
+          mimeType: true,
+          fileSize: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  },
+  sampleCertificateFile: {
+    select: {
+      id: true,
+      originalName: true,
+      mimeType: true,
+      fileSize: true,
+    },
+  },
+  sourceDecisionImport: {
+    include: {
+      sourceFile: {
+        select: {
+          id: true,
+          originalName: true,
+          mimeType: true,
+          fileSize: true,
+        },
+      },
+    },
+  },
+  decisionDocument: {
+    select: {
+      documentNo: true,
+    },
+  },
 } satisfies Prisma.EventRegistryInclude;
 
 export class EventRegistryRepository {
@@ -31,6 +73,7 @@ export class EventRegistryRepository {
           : {};
 
     const where: Prisma.EventRegistryWhereInput = {
+      ...workspaceFilterFor(user),
       ...studentVisibility,
       ...(query.criterion ? { criterion: query.criterion } : {}),
       ...(query.organizerLevel ? { organizerLevel: query.organizerLevel } : {}),
@@ -69,6 +112,10 @@ export class EventRegistryRepository {
 
   findById(id: string) {
     return this.db.eventRegistry.findUnique({ where: { id }, include: eventInclude });
+  }
+
+  findStaffWorkspaceById(id: string) {
+    return this.db.eventRegistry.findUnique({ where: { id }, include: staffEventWorkspaceInclude });
   }
 
   findLatestEventFile(eventId: string) {

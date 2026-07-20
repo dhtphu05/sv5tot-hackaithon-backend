@@ -12,6 +12,7 @@ vi.mock('../../src/infrastructure/database/prisma', () => ({
 
 import { matchEvidenceRegistry } from '../../src/modules/evidences/evidence-registry-matcher';
 
+const workspaceId = '11111111-1111-4111-8111-111111111111';
 const event = {
   id: 'event-1',
 };
@@ -25,13 +26,17 @@ describe('matchEvidenceRegistry participant name matching', () => {
 
   it('matches a unique normalized student name without studentCode', async () => {
     prismaMock.eventParticipant.findMany.mockResolvedValue([
-      { id: 'participant-1', studentName: 'Nguyễn Văn Sinh' },
+      { id: 'participant-1', studentName: 'Nguyen Van Sinh' },
     ]);
 
-    const result = await matchEvidenceRegistry(Criterion.volunteer, {
-      event_name: 'Mùa hè xanh',
-      student_name: 'Nguyen Van Sinh',
-    });
+    const result = await matchEvidenceRegistry(
+      Criterion.volunteer,
+      {
+        event_name: 'Mua he xanh',
+        student_name: 'Nguyen Van Sinh',
+      },
+      workspaceId,
+    );
 
     expect(result).toMatchObject({
       eventId: 'event-1',
@@ -43,15 +48,19 @@ describe('matchEvidenceRegistry participant name matching', () => {
 
   it('does not auto match when the normalized student name is duplicated', async () => {
     prismaMock.eventParticipant.findMany.mockResolvedValue([
-      { id: 'participant-1', studentName: 'Nguyễn Văn Sinh' },
+      { id: 'participant-1', studentName: 'Nguyen Van Sinh' },
       { id: 'participant-2', studentName: 'Nguyen Van Sinh' },
     ]);
 
-    const result = await matchEvidenceRegistry(Criterion.volunteer, {
-      event_name: 'Mùa hè xanh',
-      student_name: 'Nguyễn Văn Sinh',
-      student_code: '102220001',
-    });
+    const result = await matchEvidenceRegistry(
+      Criterion.volunteer,
+      {
+        event_name: 'Mua he xanh',
+        student_name: 'Nguyen Van Sinh',
+        student_code: '102220001',
+      },
+      workspaceId,
+    );
 
     expect(result).toMatchObject({
       eventId: 'event-1',
@@ -63,14 +72,18 @@ describe('matchEvidenceRegistry participant name matching', () => {
 
   it('prioritizes a unique name match over a different studentCode', async () => {
     prismaMock.eventParticipant.findMany.mockResolvedValue([
-      { id: 'participant-by-name', studentName: 'Bùi Quốc Anh' },
+      { id: 'participant-by-name', studentName: 'Bui Quoc Anh' },
     ]);
 
-    const result = await matchEvidenceRegistry(Criterion.academic, {
-      event_name: 'Olympic',
-      student_name: 'Bui Quoc Anh',
-      student_code: '999999999',
-    });
+    const result = await matchEvidenceRegistry(
+      Criterion.academic,
+      {
+        event_name: 'Olympic',
+        student_name: 'Bui Quoc Anh',
+        student_code: '999999999',
+      },
+      workspaceId,
+    );
 
     expect(result.participantId).toBe('participant-by-name');
     expect(prismaMock.eventParticipant.findFirst).not.toHaveBeenCalled();
@@ -80,10 +93,14 @@ describe('matchEvidenceRegistry participant name matching', () => {
     prismaMock.eventParticipant.findMany.mockResolvedValue([]);
     prismaMock.eventParticipant.findFirst.mockResolvedValue({ id: 'participant-by-code' });
 
-    const result = await matchEvidenceRegistry(Criterion.integration, {
-      event_name: 'IELTS',
-      student_code: '102220001',
-    });
+    const result = await matchEvidenceRegistry(
+      Criterion.integration,
+      {
+        event_name: 'IELTS',
+        student_code: '102220001',
+      },
+      workspaceId,
+    );
 
     expect(result).toMatchObject({
       eventId: 'event-1',

@@ -11,10 +11,11 @@ export const committeeTools: ChatbotToolDefinition[] = [
     requiredRoles: ['committee', 'manager', 'admin'],
     inputSchema: z.object({ status: z.nativeEnum(ResolutionStatus).optional() }),
     handler: async (_ctx, input) => {
+      const ctx = _ctx;
       const parsed = z.object({ status: z.nativeEnum(ResolutionStatus).optional() }).parse(input);
       const grouped = await prisma.resolutionCase.groupBy({
         by: ['status'],
-        where: parsed.status ? { status: parsed.status } : {},
+        where: { ...workspaceFilter(ctx), ...(parsed.status ? { status: parsed.status } : {}) },
         _count: { id: true },
       });
       return {
@@ -30,10 +31,10 @@ export const committeeTools: ChatbotToolDefinition[] = [
     mode: 'read',
     requiredRoles: ['committee', 'manager', 'admin'],
     inputSchema: z.object({ caseId: z.string().uuid() }),
-    handler: async (_ctx, input) => {
+    handler: async (ctx, input) => {
       const parsed = z.object({ caseId: z.string().uuid() }).parse(input);
-      const item = await prisma.resolutionCase.findUnique({
-        where: { id: parsed.caseId },
+      const item = await prisma.resolutionCase.findFirst({
+        where: { id: parsed.caseId, ...workspaceFilter(ctx) },
         include: { evidence: { include: { evidenceCard: true } } },
       });
       if (!item) return { type: 'text', message: 'Không tìm thấy resolution case.' };
@@ -67,3 +68,7 @@ export const committeeTools: ChatbotToolDefinition[] = [
     },
   },
 ];
+
+function workspaceFilter(ctx: { role: string; workspaceId?: string | null }) {
+  return ctx.role === 'admin' ? {} : { workspaceId: ctx.workspaceId ?? '__missing_workspace__' };
+}

@@ -47,6 +47,9 @@ export const taskDecisionSchema = z.object({
   supplementRequestJson: z.record(z.unknown()).optional(),
   note: z.string().max(2000).optional(),
   officerNote: z.string().max(2000).optional(),
+  precedentEventId: z.string().uuid().optional(),
+  precedentEvidenceId: z.string().uuid().optional(),
+  precedentId: z.string().uuid().optional(),
   evidenceDecisions: z.array(evidenceDecisionSchema).default([]),
   evidenceAssessments: z.array(evidenceAssessmentSchema).default([]),
 });
@@ -60,13 +63,33 @@ export const requestSupplementSchema = z.object({
   deadline: z.string().datetime().optional(),
 });
 
-export const escalateResolutionSchema = z.object({
-  reason: z.string().min(1).max(2000),
-  evidenceId: z.string().uuid().optional(),
-  evidenceIds: z.array(z.string().uuid()).default([]),
+export const escalateResolutionSchema = z
+  .object({
+    reason: z.string().min(1).max(2000),
+    evidenceId: z.string().uuid().optional(),
+    evidenceIds: z.array(z.string().uuid()).default([]),
+    precedentGuardViewed: z.boolean().optional(),
+    precedentGuardReason: z
+      .enum(['different_level', 'different_organizer', 'conflicting_information', 'other'])
+      .optional(),
+    precedentId: z.string().uuid().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.precedentGuardViewed && value.precedentId && !value.precedentGuardReason) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['precedentGuardReason'],
+        message: 'precedentGuardReason is required when continuing after viewing a precedent',
+      });
+    }
+  });
+
+export const reviewTaskPrecedentCheckQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(10).default(3),
 });
 
 export type ListReviewTasksQuery = z.infer<typeof listReviewTasksQuerySchema>;
 export type TaskDecisionInput = z.infer<typeof taskDecisionSchema>;
 export type RequestSupplementInput = z.infer<typeof requestSupplementSchema>;
 export type EscalateResolutionInput = z.infer<typeof escalateResolutionSchema>;
+export type ReviewTaskPrecedentCheckQuery = z.infer<typeof reviewTaskPrecedentCheckQuerySchema>;

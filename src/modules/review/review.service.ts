@@ -1,5 +1,6 @@
 // Owns officer review tasks, decisions, supplements, and escalation.
 import {
+  ApprovedEvidenceApprovalSource,
   ApplicationStatus,
   Criterion,
   EvidenceStatus,
@@ -17,14 +18,21 @@ import { buildReadableSummary } from '../../shared/dto/evidence-student-status';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { buildEvidenceCardFieldLayers } from '../evidences/evidence-card-field-presenter';
+import { EvidenceKnowledgePublisher } from '../evidence-knowledge/evidence-knowledge.publisher';
+import { EvidenceKnowledgeService } from '../evidence-knowledge/evidence-knowledge.service';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { createNotification, NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from './review-assignment.service';
 import { getApplicationReviewProgress } from './review-progress.service';
 import { ReviewRepository, reviewTaskListInclude } from './review.repository';
-import type { ListReviewTasksQuery, TaskDecisionInput } from './review.validation';
+import type {
+  ListReviewTasksQuery,
+  ReviewTaskPrecedentCheckQuery,
+  TaskDecisionInput,
+} from './review.validation';
 
 type RequirementStatus = 'passed' | 'failed' | 'missing' | 'needs_review';
 type RiskLevel = 'low' | 'medium' | 'high';
@@ -69,6 +77,8 @@ export class ReviewService {
     private readonly assignmentService = new ReviewAssignmentService(),
     private readonly notificationsService = new NotificationsService(),
     private readonly emailOutboxService = new EmailOutboxService(),
+    private readonly evidenceKnowledgeService = new EvidenceKnowledgeService(),
+    private readonly evidenceKnowledgePublisher = new EvidenceKnowledgePublisher(),
   ) {}
 
   async getDashboard(user: AuthenticatedUser) {
@@ -237,7 +247,7 @@ export class ReviewService {
     ];
     const matchedEvents = matchedEventIds.length
       ? await prisma.eventRegistry.findMany({
-          where: { id: { in: matchedEventIds } },
+          where: { id: { in: matchedEventIds }, ...workspaceFilterFor(user) },
           select: {
             id: true,
             eventName: true,
@@ -254,6 +264,7 @@ export class ReviewService {
         evidenceId: evidence.id,
         matches: await prisma.knowledgeBaseItem.findMany({
           where: {
+            ...workspaceFilterFor(user),
             criterion: evidence.criterion,
             OR: [
               { evidenceName: { contains: evidence.evidenceName, mode: 'insensitive' } },
@@ -599,6 +610,18 @@ export class ReviewService {
     }
     const applicationId = task.applicationId;
     const application = task.application;
+    const precedentContext =
+      input.decision === ReviewDecision.accepted
+        ? await this.evidenceKnowledgeService.assertPrecedentUsableByOfficer(
+            user,
+            {
+              precedentId: input.precedentId,
+              precedentEventId: input.precedentEventId,
+              precedentEvidenceId: input.precedentEvidenceId,
+            },
+            task.criterion,
+          )
+        : null;
 
     const result = await prisma.$transaction(async (tx) => {
       const status = mapDecisionToStatus(input.decision);
@@ -659,6 +682,22 @@ export class ReviewService {
         applicationId,
         afterStateJson: { decision: input.decision },
       });
+
+      if (input.decision === ReviewDecision.accepted) {
+        const acceptedEvidenceIds = input.evidenceDecisions.length
+          ? input.evidenceDecisions
+              .filter((item) => item.status === EvidenceStatus.accepted)
+              .map((item) => item.evidenceId)
+          : evidenceIds;
+        for (const evidenceId of acceptedEvidenceIds) {
+          await this.evidenceKnowledgePublisher.publishAcceptedEvidence(tx, user, {
+            evidenceId,
+            reviewTaskId: task.id,
+            approvalSource: ApprovedEvidenceApprovalSource.officer,
+            note: officerNote,
+          });
+        }
+      }
 
       if (input.decision === ReviewDecision.supplement_required) {
         const supplementRequest = (input.supplementRequestJson ?? {}) as Record<string, unknown>;
@@ -748,7 +787,10 @@ export class ReviewService {
           orderBy: { createdAt: 'desc' },
         });
         let resolutionCaseId = existingCase?.id ?? null;
-        if (existingCase && (!existingCase.reviewTaskId || (primaryEvidenceId && !existingCase.evidenceId))) {
+        if (
+          existingCase &&
+          (!existingCase.reviewTaskId || (primaryEvidenceId && !existingCase.evidenceId))
+        ) {
           await tx.resolutionCase.update({
             where: { id: existingCase.id },
             data: {
@@ -760,6 +802,7 @@ export class ReviewService {
           const createdCase = await tx.resolutionCase.create({
             data: {
               applicationId,
+              workspaceId: task.workspaceId,
               evidenceId: primaryEvidenceId,
               reviewTaskId: task.id,
               reason: officerNote ?? 'Cần hội đồng xem xét.',
@@ -773,6 +816,7 @@ export class ReviewService {
         await this.notificationsService.create(
           {
             userId: application.studentId,
+            workspaceId: task.workspaceId,
             applicationId,
             evidenceId: primaryEvidenceId,
             reviewTaskId: task.id,
@@ -851,6 +895,24 @@ export class ReviewService {
         },
         note: officerNote,
       });
+
+      if (precedentContext) {
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'REVIEW_ACCEPTED_WITH_PRECEDENT',
+          targetType: 'review_task',
+          targetId: task.id,
+          applicationId,
+          afterStateJson: {
+            decision: input.decision,
+            precedentId: precedentContext.precedentId,
+            precedentEventId: precedentContext.precedentEventId,
+            precedentEvidenceId: precedentContext.precedentEvidenceId,
+          },
+          note: officerNote,
+        });
+      }
 
       if (
         input.decision !== ReviewDecision.supplement_required &&
@@ -993,6 +1055,9 @@ export class ReviewService {
       evidenceId?: string;
       evidenceIds?: string[];
       priority?: string;
+      precedentGuardViewed?: boolean;
+      precedentGuardReason?: string;
+      precedentId?: string;
     },
   ) {
     const selectedEvidenceIds =
@@ -1023,11 +1088,24 @@ export class ReviewService {
       afterStateJson: {
         evidenceIds: selectedEvidenceIds,
         priority: input.priority || 'normal',
+        precedentGuardViewed: input.precedentGuardViewed ?? false,
+        precedentGuardReason: input.precedentGuardReason ?? null,
+        precedentId: input.precedentId ?? null,
       },
       note: input.reason,
     });
 
     return result;
+  }
+
+  async checkPrecedents(
+    user: AuthenticatedUser,
+    taskId: string,
+    query: ReviewTaskPrecedentCheckQuery,
+  ) {
+    const task = await this.getTask(taskId);
+    await this.assertTaskAccess(user, task, false);
+    return this.evidenceKnowledgeService.searchForReviewTask(user, task, query);
   }
 
   private async getTask(taskId: string) {
@@ -1043,6 +1121,7 @@ export class ReviewService {
     task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
     decision: boolean,
   ) {
+    assertSameWorkspace(user, task, 'Review task not found');
     if (!(await this.canAccessTask(user, task, decision))) {
       throw new AppError(
         403,
@@ -1361,6 +1440,7 @@ export class ReviewService {
         const task = await tx.reviewTask.create({
           data: {
             applicationId,
+            workspaceId: application.workspaceId,
             criterion,
             assignedOfficerId,
             status: 'waiting',

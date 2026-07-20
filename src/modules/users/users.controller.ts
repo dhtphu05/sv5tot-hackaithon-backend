@@ -20,7 +20,7 @@ export async function uploadAvatar(req: Request, res: Response): Promise<void> {
 }
 
 export async function listUsers(req: Request, res: Response): Promise<void> {
-  const data = await usersService.listUsers(req.query as never);
+  const data = await usersService.listUsers(req.user!, req.query as never);
   sendSuccess(res, data.users, {
     requestId: req.requestId,
     pagination: data.pagination,

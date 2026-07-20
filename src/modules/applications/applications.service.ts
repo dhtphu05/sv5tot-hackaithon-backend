@@ -5,6 +5,7 @@ import {
   Criterion,
   EvidenceStatus,
   FinalStatus,
+  IndexingStatus,
   Level,
   NotificationType,
   Prisma,
@@ -18,7 +19,9 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { normalizeSchoolYear } from '../../shared/utils/school-year';
+import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PrecheckService } from '../precheck/precheck.service';
 import { ReviewAssignmentService } from '../review/review-assignment.service';
 import {
   assertApplicationEditable,
@@ -42,6 +45,8 @@ type SubmitApplicationContext = Prisma.ApplicationGetPayload<{
   include: {
     student: true;
     evidences: true;
+    metrics: true;
+    requirementResponses: true;
     reviewTasks: { include: { assignedOfficer: true } };
   };
 }>;
@@ -52,6 +57,7 @@ export class ApplicationsService {
     private readonly notificationsService = new NotificationsService(),
     private readonly reviewAssignmentService = new ReviewAssignmentService(),
     private readonly emailOutboxService = new EmailOutboxService(),
+    private readonly precheckService = new PrecheckService(),
   ) {}
 
   async getCurrent(user: AuthenticatedUser, query: GetCurrentApplicationQuery) {
@@ -76,6 +82,7 @@ export class ApplicationsService {
   async startCurrent(user: AuthenticatedUser, input: StartApplicationInput) {
     const schoolYear = normalizeSchoolYear(input.schoolYear);
     const targetLevel = input.targetLevel ?? Level.school;
+    const workspaceId = workspaceIdForWrite(user);
 
     const application = await prisma.$transaction(async (tx) => {
       const existing = await tx.application.findUnique({
@@ -95,6 +102,7 @@ export class ApplicationsService {
       const created = await tx.application.create({
         data: {
           studentId: user.id,
+          workspaceId,
           schoolYear,
           applicationType: ApplicationType.individual,
           targetLevel,
@@ -135,7 +143,7 @@ export class ApplicationsService {
     applicationId: string,
     input: UpdateTargetLevelInput,
   ) {
-    const application = await this.getRequiredBareApplication(applicationId);
+    const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
     assertApplicationEditable(application);
 
@@ -178,7 +186,7 @@ export class ApplicationsService {
   }
 
   async autosaveDraft(user: AuthenticatedUser, applicationId: string, input: AutosaveDraftInput) {
-    const application = await this.getRequiredBareApplication(applicationId);
+    const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
     assertApplicationEditable(application);
 
@@ -226,7 +234,7 @@ export class ApplicationsService {
   }
 
   async getTimeline(user: AuthenticatedUser, applicationId: string, query: TimelineQuery) {
-    const application = await this.getRequiredBareApplication(applicationId);
+    const application = await this.getRequiredBareApplication(user, applicationId);
 
     if (application.studentId !== user.id && user.role !== Role.admin) {
       throw new AppError(403, ErrorCodes.APPLICATION_OWNER_REQUIRED, 'Timeline is restricted');
@@ -269,6 +277,8 @@ export class ApplicationsService {
       include: {
         student: true,
         evidences: true,
+        metrics: true,
+        requirementResponses: true,
         reviewTasks: { include: { assignedOfficer: true } },
       },
     });
@@ -293,21 +303,45 @@ export class ApplicationsService {
       );
     }
 
-    const latestPrecheck = await prisma.precheckResult.findFirst({
-      where: { applicationId: application.id },
-      orderBy: { createdAt: 'desc' },
-    });
-    const missingItems = latestPrecheck?.missingItemsJson ?? null;
-
-    if (application.readinessScore < 40 && !input.allowSubmitWithWarnings) {
+    const processingEvidence = getProcessingEvidence(application);
+    if (processingEvidence) {
       throw new AppError(
         409,
         ErrorCodes.APPLICATION_NOT_READY,
-        'Application readiness is low. Pass allowSubmitWithWarnings=true to submit anyway.',
+        'Evidence upload or OCR is still processing',
+        {
+          evidenceId: processingEvidence.id,
+          criterion: processingEvidence.criterion,
+          status: processingEvidence.status,
+          indexingStatus: processingEvidence.indexingStatus,
+        },
+      );
+    }
+
+    let latestPrecheck = await prisma.precheckResult.findFirst({
+      where: { applicationId: application.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (isPrecheckStale(application, latestPrecheck?.createdAt)) {
+      await this.precheckService.run(user, application.id, { level: application.targetLevel });
+      latestPrecheck = await prisma.precheckResult.findFirst({
+        where: { applicationId: application.id },
+        orderBy: { createdAt: 'desc' },
+      });
+    }
+    const missingItems = latestPrecheck?.missingItemsJson ?? null;
+    const submitWarnings = buildSubmitWarningsFromPrecheck(latestPrecheck?.resultJson, missingItems);
+
+    if (submitWarnings.length > 0 && !input.allowSubmitWithWarnings) {
+      throw new AppError(
+        409,
+        ErrorCodes.APPLICATION_NOT_READY,
+        'Application has precheck warnings. Pass allowSubmitWithWarnings=true to submit anyway.',
         {
           readinessScore: application.readinessScore,
           latestPrecheck,
           missingItems,
+          warnings: submitWarnings,
         },
       );
     }
@@ -389,7 +423,7 @@ export class ApplicationsService {
               submittedAt: submittedAt.toISOString(),
               targetLevel: application.targetLevel,
               status: ApplicationStatus.under_review,
-              submitWarnings: buildSubmitWarnings(application.readinessScore, missingItems),
+              submitWarnings,
               studentNote: input.studentNote,
             },
           },
@@ -419,12 +453,10 @@ export class ApplicationsService {
             submittedAt: submittedAt.toISOString(),
             readinessScore: application.readinessScore,
             allowSubmitWithWarnings: input.allowSubmitWithWarnings,
+            warningCount: submitWarnings.length,
             reviewTaskCount: reviewTasks.length,
           },
-          note:
-            application.readinessScore < 60
-              ? 'Submitted with readiness warnings.'
-              : input.studentNote,
+          note: submitWarnings.length > 0 ? 'Submitted with precheck warnings.' : input.studentNote,
         });
         await createApplicationAudit(tx, {
           actorId: user.id,
@@ -491,7 +523,7 @@ export class ApplicationsService {
         submittedAt: application.submittedAt ?? new Date(),
       },
       reviewTasks: result.map(toSubmitTaskDto),
-      warnings: buildSubmitWarnings(application.readinessScore, missingItems),
+      warnings: submitWarnings,
       message: 'Hồ sơ đã được nộp và chuyển sang trạng thái đang xét duyệt.',
     };
   }
@@ -505,7 +537,7 @@ export class ApplicationsService {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager or admin can reopen supplement');
     }
 
-    const application = await this.getRequiredBareApplication(applicationId);
+    const application = await this.getRequiredBareApplication(user, applicationId);
 
     await prisma.$transaction(async (tx) => {
       await tx.application.update({
@@ -602,6 +634,7 @@ export class ApplicationsService {
       const task = await tx.reviewTask.create({
         data: {
           applicationId: application.id,
+          workspaceId: application.workspaceId,
           criterion,
           assignedOfficerId: officer?.id,
           status: ReviewTaskStatus.waiting,
@@ -637,8 +670,9 @@ export class ApplicationsService {
         });
         await this.notificationsService.create(
           {
-            userId: officer.id,
-            applicationId: application.id,
+              userId: officer.id,
+              workspaceId: application.workspaceId,
+              applicationId: application.id,
             type: NotificationType.review_updated,
             title: 'Có hồ sơ cần xét duyệt',
             message: `Bạn được giao xét tiêu chí ${criterion}.`,
@@ -646,7 +680,7 @@ export class ApplicationsService {
           tx,
         );
       } else {
-        await notifyManagersAboutUnassignedTask(tx, application.id, criterion);
+        await notifyManagersAboutUnassignedTask(tx, application.id, application.workspaceId, criterion);
       }
 
       tasks.push(task);
@@ -655,11 +689,15 @@ export class ApplicationsService {
     return tasks;
   }
 
-  private async getRequiredBareApplication(applicationId: string): Promise<Application> {
+  private async getRequiredBareApplication(
+    user: AuthenticatedUser,
+    applicationId: string,
+  ): Promise<Application> {
     const application = await this.applicationsRepository.findBareById(applicationId);
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
+    assertSameWorkspace(user, application, 'Application not found');
 
     return application;
   }
@@ -784,7 +822,52 @@ function hasPriorityPrecheckResult(value?: Prisma.JsonValue): boolean {
   });
 }
 
-function buildSubmitWarnings(readinessScore: number, missingItems: Prisma.JsonValue | null) {
+function getProcessingEvidence(application: SubmitApplicationContext) {
+  return application.evidences.find(
+    (evidence) =>
+      evidence.status === EvidenceStatus.pending_indexing ||
+      evidence.indexingStatus === IndexingStatus.pending_indexing ||
+      evidence.indexingStatus === IndexingStatus.ocr_processing,
+  );
+}
+
+function isPrecheckStale(application: SubmitApplicationContext, precheckCreatedAt?: Date | null) {
+  if (!precheckCreatedAt) return true;
+  const timestamps = [
+    application.updatedAt,
+    ...application.evidences.map((item) => item.updatedAt),
+    ...application.metrics.map((item) => item.updatedAt),
+    ...application.requirementResponses.map((item) => item.updatedAt),
+  ];
+  return timestamps.some((timestamp) => timestamp > precheckCreatedAt);
+}
+
+function buildSubmitWarningsFromPrecheck(
+  resultJson?: Prisma.JsonValue | null,
+  missingItemsJson?: Prisma.JsonValue | null,
+) {
+  const result = toRecord(resultJson);
+  const missingItems = Array.isArray(result.missingItems)
+    ? result.missingItems
+    : Array.isArray(missingItemsJson)
+      ? missingItemsJson
+      : [];
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  return [
+    ...missingItems.map((item) => {
+      const record = toRecord(item);
+      return (
+        stringValue(record.shortReason) ??
+        stringValue(record.reason) ??
+        stringValue(record.message) ??
+        'Cần bổ sung'
+      );
+    }),
+    ...warnings.filter((item): item is string => typeof item === 'string' && item.trim().length > 0),
+  ];
+}
+
+function _buildSubmitWarnings(readinessScore: number, missingItems: Prisma.JsonValue | null) {
   const warnings = [];
   if (readinessScore < 60) {
     warnings.push({
@@ -796,6 +879,16 @@ function buildSubmitWarnings(readinessScore: number, missingItems: Prisma.JsonVa
     });
   }
   return warnings;
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
 function toSubmitTaskDto(task: {
@@ -817,10 +910,15 @@ function toSubmitTaskDto(task: {
 async function notifyManagersAboutUnassignedTask(
   tx: Prisma.TransactionClient,
   applicationId: string,
+  workspaceId: string,
   criterion: Criterion,
 ) {
   const managers = await tx.user.findMany({
-    where: { role: { in: [Role.manager, Role.admin] }, isActive: true },
+    where: {
+      role: { in: [Role.manager, Role.admin] },
+      isActive: true,
+      OR: [{ role: Role.admin }, { workspaceId }],
+    },
     select: { id: true },
   });
 
@@ -829,6 +927,7 @@ async function notifyManagersAboutUnassignedTask(
   await tx.notification.createMany({
     data: managers.map((manager) => ({
       userId: manager.id,
+      workspaceId,
       applicationId,
       type: NotificationType.review_updated,
       title: 'Có review task chưa được phân công',
