@@ -234,12 +234,15 @@ export function buildPrecheckFromCompletion(input: {
   const completionAction = criteriaResults
     .flatMap((item) => (item.nextAction ? [item.nextAction] : []))
     .sort((left, right) => left.priority - right.priority)[0];
+  const confirmationAction = criteriaResults
+    .flatMap((item) => (item.nextAction?.type === 'confirm_evidence' ? [item.nextAction] : []))
+    .sort((left, right) => left.priority - right.priority)[0];
   const hasMissingRequirements = missingItems.length > 0;
   const canSubmitWithPendingVerification =
     !hasMissingRequirements && !failedEvidenceAction && !supplementAction;
   const nextAction =
     supplementAction ??
-    (hasMissingRequirements ? completionAction : null) ??
+    (hasMissingRequirements ? completionAction : confirmationAction) ??
     failedEvidenceAction ??
     buildSubmitOrPrecheckAction(input.completion, { canSubmitWithPendingVerification });
   const readinessScore = scoreCompletion(input.completion);
@@ -276,6 +279,7 @@ function buildCriterionPrecheckResult(item: CriterionCompletionDto): PrecheckCri
   const oneOfAction = buildOneOfPathAction(item);
   const nextAction =
     missingRequirements[0]?.action ??
+    needsVerification[0]?.action ??
     oneOfAction ??
     (item.nextAction ? normalizeCompletionAction(item, 2, 'Cần bổ sung') : null);
 
