@@ -6,6 +6,7 @@ import { normalizeSchoolYear } from '../../../shared/utils/school-year';
 import type { AuthenticatedUser } from '../../../shared/types/auth';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
+import { buildOpenAiSafetyIdentifier } from '../../ai/openai-client';
 import { isApplicationPrecheckStale } from '../application-freshness';
 import { evaluateCriterionCompletion } from '../../criteria-completion/criteria-completion.evaluator';
 import type { CompletionEvidence, CompletionResponse, CriterionCompletionDto } from '../../criteria-completion/criteria-completion.types';
@@ -185,6 +186,7 @@ export class StudentAssistantService {
       );
       const generated = await this.narrativeProvider.stream(cached.context, {
         signal: input.signal,
+        safetyIdentifier: buildOpenAiSafetyIdentifier('student', user.id),
         onDelta: (delta) => callbacks.onDelta(delta),
       });
       const finalText = validateFinalNarrative(generated.text, cached.context.narrative.fallbackText);

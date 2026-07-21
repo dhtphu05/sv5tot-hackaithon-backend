@@ -68,6 +68,9 @@ describe('OpenAiEvidenceAnalysisAdapter', () => {
       expect.objectContaining({
         model: 'test-model',
         store: false,
+        max_output_tokens: 4000,
+        reasoning: { effort: 'minimal' },
+        safety_identifier: expect.stringMatching(/^evidence_[a-f0-9]{32}$/),
         input: expect.arrayContaining([
           expect.objectContaining({
             content: expect.arrayContaining([

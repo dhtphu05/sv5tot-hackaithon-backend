@@ -1,5 +1,6 @@
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import { env } from '../../../config/env';
+import { getOpenAiClient } from '../../ai/openai-client';
 import type { StudentAssistantContext } from './student-assistant.dto';
 
 export type AssistantNarrativeDelta = {
@@ -12,6 +13,7 @@ export type AssistantNarrativeProvider = {
     callbacks: {
       onDelta: (delta: AssistantNarrativeDelta) => void | Promise<void>;
       signal?: AbortSignal;
+      safetyIdentifier?: string;
     },
   ): Promise<{ text: string; cached?: boolean; model?: string; totalTokens?: number }>;
 };
@@ -40,6 +42,7 @@ export class MockAssistantNarrativeProvider implements AssistantNarrativeProvide
     callbacks: {
       onDelta: (delta: AssistantNarrativeDelta) => void | Promise<void>;
       signal?: AbortSignal;
+      safetyIdentifier?: string;
     },
   ) {
     const text = context.narrative.fallbackText;
@@ -77,7 +80,7 @@ export class OpenAiAssistantNarrativeProvider implements AssistantNarrativeProvi
   private readonly client: OpenAI;
 
   constructor(private readonly config: OpenAiAssistantNarrativeConfig, client?: OpenAI) {
-    this.client = client ?? new OpenAI({ apiKey: config.apiKey });
+    this.client = client ?? getOpenAiClient();
   }
 
   async stream(
@@ -85,6 +88,7 @@ export class OpenAiAssistantNarrativeProvider implements AssistantNarrativeProvi
     callbacks: {
       onDelta: (delta: AssistantNarrativeDelta) => void | Promise<void>;
       signal?: AbortSignal;
+      safetyIdentifier?: string;
     },
   ) {
     let text = '';
@@ -94,6 +98,9 @@ export class OpenAiAssistantNarrativeProvider implements AssistantNarrativeProvi
         model: this.config.model,
         store: false,
         stream: true,
+        max_output_tokens: 800,
+        reasoning: { effort: 'minimal' },
+        safety_identifier: callbacks.safetyIdentifier,
         input: [
           {
             role: 'developer',

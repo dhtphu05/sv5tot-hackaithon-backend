@@ -99,15 +99,18 @@ const rawEnvSchema = z.object({
   EVIDENCE_ANALYSIS_PROVIDER: z.enum(['openai', 'smartreader', 'mock']).default('openai'),
   OPENAI_API_KEY: z.string().optional().default(''),
   OPENAI_EVIDENCE_MODEL: z.string().optional().default(''),
-  OPENAI_EVIDENCE_TIMEOUT_MS: z.coerce.number().int().positive().max(300000).default(30000),
+  OPENAI_EVIDENCE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(30000),
   OPENAI_EVIDENCE_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(1),
   OPENAI_STORE_RESPONSES: booleanFromEnv,
   OPENAI_EVIDENCE_PROMPT_VERSION: z.string().min(1).default('evidence-card-v1'),
   ASSISTANT_NARRATIVE_PROVIDER: z.enum(['openai', 'mock', 'disabled']).optional(),
   OPENAI_ASSISTANT_MODEL: z.string().optional().default(''),
-  OPENAI_ASSISTANT_TIMEOUT_MS: z.coerce.number().int().positive().max(300000).default(30000),
+  OPENAI_ASSISTANT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(30000),
   OPENAI_ASSISTANT_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(1),
   OPENAI_ASSISTANT_PROMPT_VERSION: z.string().min(1).default('dashboard-assistant-v1'),
+  STUDENT_ASSISTANT_PROVIDER: z.enum(['openai', 'mock', 'disabled']).optional(),
+  OPENAI_STUDENT_ASSISTANT_MODEL: z.string().optional().default(''),
+  OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION: z.string().min(1).default('student-assistant-v1'),
   ASSISTANT_NARRATIVE_CACHE_TTL_MS: z.coerce.number().int().positive().default(900000),
   ASSISTANT_MOCK_STREAM_DELAY_MS: z.coerce.number().int().min(0).max(5000).default(35),
   JOB_WORKER_ENABLED: booleanFromEnv,
@@ -177,6 +180,24 @@ const rawEnvSchema = z.object({
   }, {
     message: 'OPENAI_API_KEY and OPENAI_EVIDENCE_MODEL are required when EVIDENCE_ANALYSIS_PROVIDER=openai',
     path: ['EVIDENCE_ANALYSIS_PROVIDER'],
+  })
+  .refine((data) => {
+    if (data.ASSISTANT_NARRATIVE_PROVIDER !== 'openai') {
+      return true;
+    }
+    return !!data.OPENAI_API_KEY && !!data.OPENAI_ASSISTANT_MODEL;
+  }, {
+    message: 'OPENAI_API_KEY and OPENAI_ASSISTANT_MODEL are required when ASSISTANT_NARRATIVE_PROVIDER=openai',
+    path: ['ASSISTANT_NARRATIVE_PROVIDER'],
+  })
+  .refine((data) => {
+    if (data.STUDENT_ASSISTANT_PROVIDER !== 'openai') {
+      return true;
+    }
+    return !!data.OPENAI_API_KEY && !!data.OPENAI_STUDENT_ASSISTANT_MODEL;
+  }, {
+    message: 'OPENAI_API_KEY and OPENAI_STUDENT_ASSISTANT_MODEL are required when STUDENT_ASSISTANT_PROVIDER=openai',
+    path: ['STUDENT_ASSISTANT_PROVIDER'],
   });
 
 const envInput = {
@@ -287,6 +308,15 @@ export const env = {
   OPENAI_ASSISTANT_TIMEOUT_MS: rawEnv.OPENAI_ASSISTANT_TIMEOUT_MS,
   OPENAI_ASSISTANT_MAX_RETRIES: rawEnv.OPENAI_ASSISTANT_MAX_RETRIES,
   OPENAI_ASSISTANT_PROMPT_VERSION: rawEnv.OPENAI_ASSISTANT_PROMPT_VERSION,
+  STUDENT_ASSISTANT_PROVIDER:
+    rawEnv.STUDENT_ASSISTANT_PROVIDER ??
+    (rawEnv.NODE_ENV === 'test'
+      ? 'mock'
+      : rawEnv.OPENAI_API_KEY && rawEnv.OPENAI_STUDENT_ASSISTANT_MODEL
+        ? 'openai'
+        : 'disabled'),
+  OPENAI_STUDENT_ASSISTANT_MODEL: rawEnv.OPENAI_STUDENT_ASSISTANT_MODEL,
+  OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION: rawEnv.OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION,
   ASSISTANT_NARRATIVE_CACHE_TTL_MS: rawEnv.ASSISTANT_NARRATIVE_CACHE_TTL_MS,
   ASSISTANT_MOCK_STREAM_DELAY_MS: rawEnv.ASSISTANT_MOCK_STREAM_DELAY_MS,
   JOB_WORKER_ENABLED:

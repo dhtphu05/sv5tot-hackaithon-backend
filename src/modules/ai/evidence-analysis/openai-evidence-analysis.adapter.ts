@@ -1,5 +1,9 @@
-import OpenAI from 'openai';
 import { z } from 'zod';
+import {
+  buildOpenAiSafetyIdentifier,
+  getOpenAiClient,
+  mapOpenAiRuntimeError,
+} from '../openai-client';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
 import { validateEvidenceAnalysisOutput } from './evidence-analysis.schema';
@@ -29,6 +33,9 @@ type ResponsesCreateParams = {
       schema: Record<string, unknown>;
     };
   };
+  max_output_tokens: number;
+  reasoning?: { effort: 'minimal' };
+  safety_identifier?: string;
   metadata: Record<string, string>;
 };
 
@@ -63,7 +70,7 @@ export class OpenAiEvidenceAnalysisAdapter implements EvidenceAnalysisProvider {
     private readonly config: OpenAiEvidenceAnalysisConfig,
     client?: OpenAiResponsesClient,
   ) {
-    this.client = client ?? (new OpenAI({ apiKey: config.apiKey }) as unknown as OpenAiResponsesClient);
+    this.client = client ?? (getOpenAiClient() as unknown as OpenAiResponsesClient);
   }
 
   async analyze(input: EvidenceDocumentAnalysisInput): Promise<EvidenceDocumentAnalysisResult> {
@@ -133,6 +140,9 @@ export class OpenAiEvidenceAnalysisAdapter implements EvidenceAnalysisProvider {
           schema: zodToJsonSchema(),
         },
       },
+      max_output_tokens: 4000,
+      reasoning: { effort: 'minimal' },
+      safety_identifier: buildOpenAiSafetyIdentifier('evidence', input.evidenceId),
       metadata: {
         requestId,
         evidenceId: input.evidenceId,
@@ -209,7 +219,8 @@ function mapOpenAiError(error: unknown): AppError {
       retryable: true,
     });
   }
-  return new AppError(502, ErrorCodes.EVIDENCE_ANALYSIS_FAILED, 'Evidence analysis failed', {
+  const code = mapOpenAiRuntimeError(error, ErrorCodes.EVIDENCE_ANALYSIS_FAILED);
+  return new AppError(502, code, 'Evidence analysis failed', {
     retryable: status === undefined || status >= 500,
   });
 }

@@ -1009,3 +1009,14 @@ This section reflects the hardening pass for "Kho minh chứng / Kho sự kiện
   - Dry-run for `--code=DDK` returned zero because `DDK` is `Workspace.shortName`, not `Workspace.code`.
   - Workspace code lookup showed the DDK school workspace code is `DHBK-DHDN`.
   - Dry-run for `--code=DHBK-DHDN` scanned 91 accepted evidence rows, found 91 candidates, 0 existing precedents, 0 missing approval source, 0 missing actor, and wrote 0 rows because `--apply` was not used.
+
+## Login Dashboard Readiness Patch On 2026-07-21
+
+- `src/modules/precheck/precheck.routes.ts` now exposes `GET /api/applications/current/precheck/latest` before the dynamic `/api/applications/:id/precheck/latest` route, so Express no longer treats the literal `current` segment as a UUID application id.
+- `PrecheckService.getLatestCurrent` uses a minimal current-application lookup for the authenticated student and returns the latest precheck snapshot without loading evidence/evidence-card relations. This keeps the student dashboard current-precheck request from depending on evidence-card columns that may be pending migration.
+- Verification:
+  - Backend `npm run build` passed.
+  - `GET /api/applications/current/precheck/latest` with `student@dut.udn.vn` returned HTTP 200 after the route/query fix.
+  - `npx prisma migrate deploy` applied `20260720120000_openai_evidence_analysis` and `20260721120000_evidence_card_confirmation` to the configured Supabase database.
+  - `npx prisma migrate status` now reports `Database schema is up to date!`.
+  - Student dashboard API checks returned HTTP 200 for `/api/me`, `/api/applications/current`, `/api/applications/current/precheck/latest`, `/api/applications/:id/precheck/latest`, `/api/applications/:id/criteria-completion`, and `/api/applications/:id/evidences?limit=100`.

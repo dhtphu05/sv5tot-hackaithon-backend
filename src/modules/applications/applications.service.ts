@@ -396,7 +396,6 @@ export class ApplicationsService {
               officerSuggestedLevel: null,
               levelAssessmentJson: Prisma.JsonNull,
               decisionReason: null,
-              supplementRequestJson: Prisma.JsonNull,
             },
           });
           await tx.evidence.updateMany({

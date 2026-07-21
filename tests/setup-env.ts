@@ -18,7 +18,13 @@ process.env.VNPT_ENABLED = process.env.VNPT_ENABLED ?? 'false';
 process.env.VNPT_REQUIRE_REAL_IN_PIPELINE = process.env.VNPT_REQUIRE_REAL_IN_PIPELINE ?? 'false';
 process.env.VNPT_ALLOW_MOCK_RUNTIME = process.env.VNPT_ALLOW_MOCK_RUNTIME ?? 'true';
 process.env.EVIDENCE_ANALYSIS_PROVIDER = process.env.EVIDENCE_ANALYSIS_PROVIDER ?? 'mock';
+process.env.ASSISTANT_NARRATIVE_PROVIDER = process.env.ASSISTANT_NARRATIVE_PROVIDER ?? 'mock';
+process.env.STUDENT_ASSISTANT_PROVIDER = process.env.STUDENT_ASSISTANT_PROVIDER ?? 'mock';
+process.env.OPENAI_EVIDENCE_MODEL = process.env.OPENAI_EVIDENCE_MODEL ?? 'test-evidence-model';
 process.env.OPENAI_STORE_RESPONSES = process.env.OPENAI_STORE_RESPONSES ?? 'false';
+process.env.OPENAI_ASSISTANT_MODEL = process.env.OPENAI_ASSISTANT_MODEL ?? 'test-assistant-model';
+process.env.OPENAI_STUDENT_ASSISTANT_MODEL =
+  process.env.OPENAI_STUDENT_ASSISTANT_MODEL ?? 'test-student-assistant-model';
 process.env.SMARTBOT_MODE = process.env.SMARTBOT_MODE ?? 'mock';
 process.env.SMARTBOT_WEBHOOK_TOKEN = process.env.SMARTBOT_WEBHOOK_TOKEN ?? 'test-smartbot-webhook-token';
 process.env.MAIL_ENABLED = process.env.MAIL_ENABLED ?? 'true';

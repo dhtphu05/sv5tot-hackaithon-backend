@@ -309,6 +309,7 @@ model Workspace {
   chatSessions               ChatSession[]
   chatbotActions             ChatbotAction[]
   chatbotHandoffs            ChatbotHandoff[]
+  supplementRequests         SupplementRequest[]
 
   @@index([isActive, registrationEnabled])
 }
@@ -343,6 +344,7 @@ model User {
   collectiveProfiles       CollectiveProfile[]
   assignedReviewTasks      ReviewTask[]
   finalizedApplications    Application[]                    @relation("ApplicationFinalizedBy")
+  createdSupplementRequests SupplementRequest[]              @relation("SupplementRequestCreatedBy")
 
   @@unique([workspaceId, studentCode])
   @@index([role])
@@ -410,6 +412,7 @@ model Application {
   resolutionCases      ResolutionCase[]
   notifications        Notification[]
   auditLogs            AuditLog[]
+  supplementRequests   SupplementRequest[]
 
   @@unique([studentId, schoolYear, applicationType])
   @@unique([workspaceId, studentId, schoolYear, applicationType])
@@ -985,6 +988,7 @@ model ReviewTask {
   evidences                  ReviewTaskEvidence[]
   resolutionCases            ResolutionCase[]
   approvedEvidencePrecedents ApprovedEvidencePrecedent[]
+  supplementRequests         SupplementRequest[]
 
   @@index([workspaceId, status])
   @@index([workspaceId, assignedOfficerId, status])
@@ -994,6 +998,35 @@ model ReviewTask {
   @@index([applicationId])
   @@index([applicationId, criterion])
   @@index([collectiveProfileId, criterion])
+}
+
+model SupplementRequest {
+  id                        String      @id @default(uuid()) @db.Uuid
+  workspaceId               String      @db.Uuid
+  applicationId             String      @db.Uuid
+  reviewTaskId              String      @db.Uuid
+  criterion                 Criterion
+  status                    String      @default("active")
+  officialMessage           String
+  requestedFieldsJson       Json?
+  evidenceScopeJson         Json?
+  acceptedEvidenceTypesJson Json?
+  deadline                  DateTime?
+  createdByUserId           String?     @db.Uuid
+  createdAt                 DateTime    @default(now())
+  updatedAt                 DateTime    @updatedAt
+  resubmittedAt             DateTime?
+  closedAt                  DateTime?
+  historyJson               Json?
+  workspace                 Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  application               Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  reviewTask                ReviewTask  @relation(fields: [reviewTaskId], references: [id], onDelete: Cascade)
+  createdBy                 User?       @relation("SupplementRequestCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId, status])
+  @@index([reviewTaskId, status])
+  @@index([workspaceId, status])
+  @@index([criterion])
 }
 
 model ReviewTaskEvidence {

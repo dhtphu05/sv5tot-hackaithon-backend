@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  ApplicationStatus,
   DecisionImportStatus,
   Criterion,
   EventStatus,
@@ -14,6 +15,7 @@ import {
   Level,
   Prisma,
   Role,
+  ReviewTaskStatus,
   RosterPreviewValidationStatus,
 } from '@prisma/client';
 import type { IndexingJob, SmartReaderJob } from '@prisma/client';
@@ -831,12 +833,6 @@ export async function importEventAsEvidence(input: {
   });
   if (!application) throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
   assertSameWorkspace(input.user, application, 'Application not found');
-  const isStudent = input.user.role === Role.student || input.user.role === Role.class_representative;
-  if (isStudent) {
-    assertApplicationOwner(application, input.user);
-    assertApplicationEditable(application);
-  }
-
   const event = await prisma.eventRegistry.findUnique({ where: { id: input.eventId } });
   if (!event || event.status !== EventStatus.active) {
     throw new AppError(404, ErrorCodes.EVENT_NOT_APPROVED, 'Event is not approved');
@@ -847,6 +843,29 @@ export async function importEventAsEvidence(input: {
   }
   if (event.rosterIndexed === false) {
     throw new AppError(409, ErrorCodes.EVENT_ROSTER_NOT_CONFIRMED, 'Event roster is not confirmed');
+  }
+
+  const isStudent = input.user.role === Role.student || input.user.role === Role.class_representative;
+  if (isStudent) {
+    assertApplicationOwner(application, input.user);
+    if (application.status === ApplicationStatus.supplement_required) {
+      const hasSupplementTask = await prisma.reviewTask.findFirst({
+        where: {
+          applicationId: application.id,
+          criterion: event?.criterion,
+          status: ReviewTaskStatus.supplement_required,
+        },
+      });
+      if (!hasSupplementTask) {
+        throw new AppError(
+          403,
+          ErrorCodes.SUPPLEMENT_SCOPE_VIOLATION,
+          'Event is outside supplement scope',
+        );
+      }
+    } else {
+      assertApplicationEditable(application);
+    }
   }
 
   const studentCode = isStudent ? input.user.studentCode : application.student.studentCode;

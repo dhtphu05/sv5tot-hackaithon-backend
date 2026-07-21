@@ -19,6 +19,7 @@
     "backfill:requirements": "tsx scripts/backfill-requirement-responses.ts",
     "create-admin": "tsx scripts/create-admin.ts",
     "smartreader:smoke": "tsx scripts/smoke-smartreader.ts",
+    "smoke:openai": "tsx scripts/openai-smoke.ts",
     "smoke:smartbot": "tsx scripts/smoke-smartbot.ts",
     "smoke:cloud-run": "tsx scripts/smoke-cloud-run-readiness.ts",
     "worker:tick": "tsx scripts/worker-tick.ts",

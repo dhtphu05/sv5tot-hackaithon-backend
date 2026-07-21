@@ -1,6 +1,7 @@
 // Owns evidence records, evidence files, indexing triggers, and evidence cards.
 import {
   ApplicationStatus,
+  Criterion,
   EvidenceSourceType,
   EvidenceStatus,
   FileStorageType,
@@ -88,6 +89,7 @@ export class EvidencesService {
     assertSameWorkspace(user, application, 'Application not found');
     if (user.role === Role.student || user.role === Role.class_representative) {
       assertApplicationOwner(application, user);
+      await this.assertSupplementCriterionScope(application.id, application.status, input.criterion);
     } else if (
       user.role !== Role.officer &&
       user.role !== Role.manager &&
@@ -165,6 +167,18 @@ export class EvidencesService {
   async update(user: AuthenticatedUser, evidenceId: string, input: UpdateEvidenceInput) {
     const evidence = await this.getRequiredEvidence(evidenceId);
     assertApplicationOwner(evidence.application!, user);
+    await this.assertSupplementCriterionScope(
+      evidence.application!.id,
+      evidence.application!.status,
+      evidence.criterion,
+    );
+    if (input.criterion) {
+      await this.assertSupplementCriterionScope(
+        evidence.application!.id,
+        evidence.application!.status,
+        input.criterion,
+      );
+    }
     assertApplicationEditable(evidence.application!);
 
     if (
@@ -1083,6 +1097,28 @@ export class EvidencesService {
       user.role === Role.committee ||
       user.role === Role.admin
     );
+  }
+
+  private async assertSupplementCriterionScope(
+    applicationId: string,
+    applicationStatus: ApplicationStatus,
+    criterion: Criterion,
+  ) {
+    if (applicationStatus !== ApplicationStatus.supplement_required) return;
+    const hasSupplementTask = await prisma.reviewTask.findFirst({
+      where: {
+        applicationId,
+        criterion,
+        status: ReviewTaskStatus.supplement_required,
+      },
+    });
+    if (!hasSupplementTask) {
+      throw new AppError(
+        403,
+        ErrorCodes.SUPPLEMENT_SCOPE_VIOLATION,
+        'Evidence is outside supplement scope',
+      );
+    }
   }
 
   private async assertCanMutateEvidenceCard(
