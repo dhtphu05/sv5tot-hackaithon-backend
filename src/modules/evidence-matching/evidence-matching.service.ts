@@ -27,13 +27,7 @@ import {
 } from '../event-registry/event-participant-matching';
 import {
   EVENT_SUGGESTION_MIN_QUERY_LENGTH,
-  buildAcronym,
-  buildLibraryQueryVariants,
-  hasNonYearTokenOverlap,
-  isFuzzyLibraryMatch,
-  normalizeLibraryText,
   rankEventSuggestions,
-  tokenOverlap,
   type EventSuggestionCandidate,
 } from './event-suggestion-ranking';
 import {
