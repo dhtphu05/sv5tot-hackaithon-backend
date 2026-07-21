@@ -26,10 +26,16 @@ import {
   resolveExactParticipantNameMatch,
 } from '../event-registry/event-participant-matching';
 import {
+  EVENT_SUGGESTION_MIN_QUERY_LENGTH,
+  rankEventSuggestions,
+  type EventSuggestionCandidate,
+} from './event-suggestion-ranking';
+import {
   toStudentOfficialEventLibraryItemDto,
   toStudentReferenceEventLibraryItemDto,
 } from './evidence-matching.dto';
 import type {
+  EvidenceEventSuggestionQuery,
   EvidenceMatchingLibraryQuery,
   EvidenceMatchingSearchQuery,
 } from './evidence-matching.validation';
@@ -235,6 +241,116 @@ export class EvidenceMatchingService {
       items,
       emptyState: {
         studentStatus: getEvidenceStudentStatus('official_match_not_found'),
+      },
+    };
+  }
+
+  async suggestions(user: AuthenticatedUser, query: EvidenceEventSuggestionQuery) {
+    const application = await this.db.application.findUnique({
+      where: { id: query.applicationId },
+      select: { id: true, studentId: true, workspaceId: true },
+    });
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    assertSameWorkspace(user, application, 'Application not found');
+    assertApplicationOwner(application as Application, user);
+
+    const normalizedQuery = normalizeLibraryText(query.query);
+    const hasEventId = Boolean(query.eventId);
+    if (!hasEventId && normalizedQuery.length < EVENT_SUGGESTION_MIN_QUERY_LENGTH) {
+      return {
+        query: query.query ?? null,
+        normalizedQuery: normalizedQuery || null,
+        suggestions: [],
+        meta: {
+          minimumQueryLength: EVENT_SUGGESTION_MIN_QUERY_LENGTH,
+          resultCount: 0,
+          source: 'event_registry' as const,
+        },
+      };
+    }
+
+    const where: Prisma.EventRegistryWhereInput = {
+      workspaceId: application.workspaceId,
+      status: EventStatus.active,
+      rosterIndexed: true,
+      ...(query.criterion ? { criterion: query.criterion } : {}),
+      ...(query.eventId ? { id: query.eventId } : {}),
+    };
+
+    const events = (await this.db.eventRegistry.findMany({
+      where,
+      select: {
+        id: true,
+        eventName: true,
+        criterion: true,
+        organizer: true,
+        organizerLevel: true,
+        startDate: true,
+        endDate: true,
+        convertedValue: true,
+        convertedUnit: true,
+        createdAt: true,
+        updatedAt: true,
+        aliases: { select: { alias: true, normalizedAliasKey: true } },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+      take: query.eventId ? 1 : Math.max(query.limit * 25, 250),
+    })) as EventSuggestionCandidate[];
+
+    const importedEventIds = await this.findImportedEventIds(
+      application.id,
+      events.map((event) => event.id),
+    );
+    const visibleEvents = query.excludeImported
+      ? events.filter((event) => !importedEventIds.has(event.id))
+      : events;
+    const ranked = rankEventSuggestions({
+      events: visibleEvents,
+      query: query.eventId ? (query.query ?? null) : normalizedQuery,
+      criterion: query.criterion,
+    }).slice(0, query.limit);
+
+    await this.auditService.log({
+      actorId: user.id,
+      actorRole: user.role,
+      action: auditActions.EVENT_SUGGESTION_VIEWED,
+      entityType: 'official_matching',
+      entityId: application.id,
+      applicationId: application.id,
+      metadata: {
+        criterion: query.criterion ?? null,
+        query: query.query ?? null,
+        eventId: query.eventId ?? null,
+        resultCount: ranked.length,
+      },
+    });
+
+    return {
+      query: query.query ?? null,
+      normalizedQuery: normalizedQuery || null,
+      suggestions: ranked.map((item) => ({
+        eventId: item.event.id,
+        eventName: item.event.eventName,
+        criterion: item.event.criterion,
+        organizer: item.event.organizer,
+        organizerLevel: item.event.organizerLevel,
+        startDate: item.event.startDate,
+        endDate: item.event.endDate,
+        convertedValue: item.event.convertedValue,
+        convertedUnit: item.event.convertedUnit,
+        alreadyImported: importedEventIds.has(item.event.id),
+        match: item.match,
+        participantCheck: {
+          required: true,
+          state: 'eligible_to_check' as const,
+        },
+      })),
+      meta: {
+        minimumQueryLength: EVENT_SUGGESTION_MIN_QUERY_LENGTH,
+        resultCount: ranked.length,
+        source: 'event_registry' as const,
       },
     };
   }

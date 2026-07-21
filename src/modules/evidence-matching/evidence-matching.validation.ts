@@ -21,6 +21,15 @@ export const evidenceMatchingLibraryQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(50).default(20),
 });
 
+export const evidenceEventSuggestionQuerySchema = z.object({
+  applicationId: z.string().uuid(),
+  query: z.string().trim().optional(),
+  criterion: z.nativeEnum(Criterion).optional(),
+  eventId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().positive().max(10).default(5),
+  excludeImported: z.coerce.boolean().default(true),
+});
+
 export const importEvidenceMatchingSchema = z.object({
   applicationId: z.string().uuid(),
   participantId: z.string().uuid().optional(),
@@ -30,4 +39,5 @@ export const importEvidenceMatchingSchema = z.object({
 
 export type EvidenceMatchingSearchQuery = z.infer<typeof evidenceMatchingSearchQuerySchema>;
 export type EvidenceMatchingLibraryQuery = z.infer<typeof evidenceMatchingLibraryQuerySchema>;
+export type EvidenceEventSuggestionQuery = z.infer<typeof evidenceEventSuggestionQuerySchema>;
 export type ImportEvidenceMatchingInput = z.infer<typeof importEvidenceMatchingSchema>;

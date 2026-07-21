@@ -43,6 +43,10 @@ export const getCurrentApplicationQuerySchema = z.object({
   schoolYear: schoolYearSchema.optional(),
 });
 
+export const assistantContextStreamQuerySchema = getCurrentApplicationQuerySchema.extend({
+  contextVersion: z.string().min(8).max(128),
+});
+
 export const startApplicationSchema = z.object({
   schoolYear: schoolYearSchema.optional(),
   targetLevel: z.nativeEnum(Level).default(Level.school),
@@ -71,6 +75,7 @@ export const submitApplicationSchema = z.object({
 });
 
 export type GetCurrentApplicationQuery = z.infer<typeof getCurrentApplicationQuerySchema>;
+export type AssistantContextStreamQuery = z.infer<typeof assistantContextStreamQuerySchema>;
 export type StartApplicationInput = z.infer<typeof startApplicationSchema>;
 export type UpdateTargetLevelInput = z.infer<typeof updateTargetLevelSchema>;
 export type AutosaveDraftInput = z.infer<typeof autosaveDraftSchema>;

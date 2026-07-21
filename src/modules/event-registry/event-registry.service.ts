@@ -5,6 +5,7 @@ import {
   IndexingStatus,
   JobType,
   Role,
+  type Application,
   type EventRegistry,
 } from '@prisma/client';
 import { env } from '../../config/env';
@@ -15,6 +16,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import {
+  assertApplicationOwner,
   createApplicationAudit,
 } from '../applications/application.helpers';
 import { runIndexingJob } from '../jobs/jobs.service';
@@ -570,31 +572,41 @@ export class EventRegistryService {
   ) {
     const event = await this.getRequiredEvent(user, eventId);
 
-    // Rule: Chỉ check event confirmed cho student.
     const isStudent = user.role === Role.student || user.role === Role.class_representative;
     if (isStudent) {
       if (event.status !== EventStatus.active) {
-        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only check confirmed events');
+        throw new AppError(403, ErrorCodes.EVENT_NOT_APPROVED, 'Students can only check approved events');
+      }
+      if (event.rosterIndexed === false) {
+        throw new AppError(409, ErrorCodes.EVENT_ROSTER_NOT_CONFIRMED, 'Event roster is not confirmed');
       }
     }
 
-    // Determine target studentCode
     let targetStudentCode = input.studentCode;
-    if (!targetStudentCode) {
-      if (isStudent) {
-        targetStudentCode = user.studentCode || undefined;
+    if (isStudent) {
+      if (input.applicationId) {
+        const application = await prisma.application.findUnique({
+          where: { id: input.applicationId },
+          select: {
+            id: true,
+            studentId: true,
+            workspaceId: true,
+            student: { select: { studentCode: true } },
+          },
+        });
+        if (!application) {
+          throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+        }
+        assertSameWorkspace(user, application, 'Application not found');
+        assertApplicationOwner(application as unknown as Application, user);
+        targetStudentCode = application.student.studentCode ?? user.studentCode ?? undefined;
+      } else {
+        targetStudentCode = user.studentCode ?? undefined;
       }
     }
 
     if (!targetStudentCode) {
       throw new AppError(400, ErrorCodes.STUDENT_CODE_REQUIRED, 'studentCode is required');
-    }
-
-    // Rule: Nếu requester là student và gửi studentCode khác mình, trả FORBIDDEN.
-    if (isStudent) {
-      if (targetStudentCode !== user.studentCode) {
-        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Students can only check their own student code');
-      }
     }
 
     const participant = await prisma.eventParticipant.findUnique({
@@ -614,26 +626,46 @@ export class EventRegistryService {
         actorId: user.id,
         actorRole: user.role,
         workspaceId: event.workspaceId,
-        action: 'EVENT_PARTICIPANT_CHECKED',
+        action: auditActions.EVENT_PARTICIPANT_CHECKED,
         targetType: 'event',
         targetId: event.id,
-        afterStateJson: { found: isParticipant, studentCode: targetStudentCode },
+        afterStateJson: {
+          found: isParticipant,
+          studentCodeMasked: maskStudentCode(targetStudentCode),
+          applicationId: input.applicationId ?? null,
+        },
       },
     });
 
+    const confirmed = participant
+      ? (participant.participationStatus ?? 'confirmed').toLowerCase() === 'confirmed'
+      : false;
+
     return {
       eventId: event.id,
-      studentCode: targetStudentCode,
+      studentCode: maskStudentCode(targetStudentCode),
+      studentCodeMasked: maskStudentCode(targetStudentCode),
       isParticipant,
-      participant: participant
-        ? {
-            id: participant.id,
-            fullName: participant.studentName,
-            className: participant.className,
-            faculty: participant.faculty,
-            attendanceStatus: participant.participationStatus || 'confirmed',
-          }
-        : null,
+      participant: {
+        found: isParticipant,
+        ...(participant
+          ? {
+              id: participant.id,
+              fullName: participant.studentName,
+              className: participant.className,
+              faculty: participant.faculty,
+              attendanceStatus: participant.participationStatus || 'confirmed',
+              participationStatus: participant.participationStatus || 'confirmed',
+              convertedValue: participant.convertedValue ?? event.convertedValue,
+              convertedUnit: event.convertedUnit,
+              source: 'confirmed_event_roster' as const,
+            }
+          : {}),
+      },
+      importEligibility: {
+        eligible: isParticipant && confirmed,
+        reason: !isParticipant ? 'EVENT_PARTICIPANT_NOT_FOUND' : confirmed ? null : 'EVENT_PARTICIPANT_NOT_CONFIRMED',
+      },
     };
   }
 
@@ -706,4 +738,11 @@ export class EventRegistryService {
     };
   }
 
+}
+
+function maskStudentCode(studentCode: string | null | undefined) {
+  if (!studentCode) return null;
+  const trimmed = studentCode.trim();
+  if (trimmed.length <= 4) return '*'.repeat(trimmed.length);
+  return `${trimmed.slice(0, 2)}${'*'.repeat(Math.max(2, trimmed.length - 4))}${trimmed.slice(-2)}`;
 }

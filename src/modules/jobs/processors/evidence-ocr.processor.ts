@@ -4,14 +4,17 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   EvidenceStatus,
+  EvidenceSourceType,
   FileStorageType,
   IndexingStatus,
   JobStatus,
+  Role,
   SmartReaderJobStatus,
   SmartReaderJobType,
+  Criterion,
+  Prisma,
   type File,
   type IndexingJob,
-  type Prisma,
 } from '@prisma/client';
 import { env } from '../../../config/env';
 import { prisma } from '../../../infrastructure/database/prisma';
@@ -19,11 +22,17 @@ import { auditActions } from '../../../shared/constants/application';
 import { buildMissingFields } from '../../../shared/dto/evidence-student-status';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes, type ErrorCode } from '../../../shared/errors/error-codes';
+import {
+  getConfiguredEvidenceAnalysisProvider,
+  toFieldConfidenceMap,
+  toFlatExtractedFields,
+} from '../../ai/evidence-analysis';
 import { AuditService } from '../../audit/audit.service';
 import {
   buildEvidenceCardFieldLayers,
   hasEventNameMismatchWithUserInput,
 } from '../../evidences/evidence-card-field-presenter';
+import { evidenceCardConfirmationStatuses } from '../../evidences/evidence-card-confirmation';
 import {
   getSmartReaderAdapter,
   mapOcrResponse,
@@ -33,11 +42,16 @@ import {
   type SmartReaderOcrResult,
 } from '../../smartreader';
 import { scoreEvidenceConfidence } from '../../evidences/evidence-confidence.scorer';
-import { extractEvidenceFields } from '../../evidences/evidence-field-extractor';
+import { extractEvidenceFields, type EvidenceExtractedFields } from '../../evidences/evidence-field-extractor';
 import { normalizeEvidenceFields } from '../../evidences/evidence-field-normalizer';
 import { normalizeEvidenceOcr } from '../../evidences/evidence-ocr-normalizer';
 import { matchEvidenceRegistry } from '../../evidences/evidence-registry-matcher';
 import { StorageService } from '../../storage/storage.service';
+import {
+  isStaleEvidenceAnalysisJob,
+  parseEvidenceAnalysisJobInput,
+  type EvidenceAnalysisJobInput,
+} from '../evidence-analysis-job-input';
 
 const auditService = new AuditService();
 const storageService = new StorageService();
@@ -47,6 +61,33 @@ type EvidenceOcrOutput = {
   sourceEndpoint: string;
   smartreaderJobId: string;
 };
+
+type EvidenceOcrRecord = {
+  id: string;
+  evidenceName: string;
+  criterion: Criterion;
+  sourceType: EvidenceSourceType;
+  applicationId: string | null;
+  eventId: string | null;
+  application?: {
+    workspaceId: string;
+    student?: {
+      id: string;
+      role: Role;
+      fullName?: string | null;
+      studentCode?: string | null;
+      className?: string | null;
+      faculty?: string | null;
+    } | null;
+  } | null;
+  collectiveProfile?: {
+    workspaceId: string;
+    representative?: { id: string; role: Role } | null;
+  } | null;
+  evidenceFiles: Array<{ id: string; fileId: string; file: File }>;
+};
+
+type AuditActor = { id: string; role: Role } | null | undefined;
 
 export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.InputJsonObject> {
   const evidence = await prisma.evidence.findUnique({
@@ -65,8 +106,12 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
 
   if (!evidence) throw new Error('Evidence not found for OCR job');
 
-  const primaryFile = evidence.evidenceFiles[0]?.file;
-  if (!primaryFile) throw new Error('Evidence has no files for OCR');
+  const jobInput = parseEvidenceAnalysisJobInput(job.inputJson);
+  const targetEvidenceFile = evidence.evidenceFiles.find(
+    (link) => link.id === jobInput.evidenceFileId && link.fileId === jobInput.fileId,
+  );
+  const primaryFile = targetEvidenceFile?.file;
+  if (!primaryFile) throw new Error('Evidence analysis job file binding was not found');
 
   await prisma.evidence.update({
     where: { id: evidence.id },
@@ -77,6 +122,46 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
   const workspaceId = evidence.application?.workspaceId ?? evidence.collectiveProfile?.workspaceId;
   if (!workspaceId) {
     throw new Error('Evidence workspace not found for OCR job');
+  }
+
+  const newestFile = resolveNewestEvidenceFile(evidence.evidenceFiles);
+  if (isStaleEvidenceAnalysisJob(jobInput, newestFile)) {
+    await auditService.log({
+      actorId: actor?.id,
+      actorRole: actor?.role,
+      action: auditActions.EVIDENCE_ANALYSIS_STALE_RESULT_IGNORED,
+      entityType: 'indexing_job',
+      entityId: job.id,
+      applicationId: evidence.applicationId,
+      evidenceId: evidence.id,
+      workspaceId,
+      metadata: {
+        code: ErrorCodes.STALE_EVIDENCE_JOB_IGNORED,
+        jobEvidenceFileId: jobInput.evidenceFileId,
+        jobFileId: jobInput.fileId,
+        currentEvidenceFileId: newestFile?.evidenceFileId ?? null,
+        currentFileId: newestFile?.fileId ?? null,
+      },
+    });
+    return {
+      evidenceId: evidence.id,
+      code: ErrorCodes.STALE_EVIDENCE_JOB_IGNORED,
+      ignored: true,
+      jobStatus: JobStatus.completed,
+    };
+  }
+
+  const selectedProvider = getConfiguredEvidenceAnalysisProvider();
+  if (selectedProvider.provider !== 'smartreader') {
+    return processProviderEvidenceAnalysis({
+      job,
+      jobInput,
+      evidence,
+      primaryFile,
+      workspaceId,
+      actor,
+      provider: selectedProvider,
+    });
   }
 
   const smartreaderJob = await prisma.smartReaderJob.create({
@@ -230,6 +315,16 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
           matchedParticipantId: matched.participantId,
           matchedKnowledgeItemIds: [],
           confidence: scoring.confidence,
+          provider: 'smartreader',
+          providerModel: 'vnpt_smartreader',
+          promptVersion: undefined,
+          fieldConfidenceJson: fieldLayers.fieldConfidence as Prisma.InputJsonValue,
+          requiresHumanConfirmation: true,
+          confirmationStatus: evidenceCardConfirmationStatuses.pending,
+          confirmedFieldsJson: Prisma.JsonNull,
+          confirmedByUserId: null,
+          confirmedAt: null,
+          lastCorrectedAt: null,
           sourceEndpoint: normalizedOcr.sourceEndpoint,
           smartreaderJobId: output.smartreaderJobId,
           aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields),
@@ -249,6 +344,16 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
           matchedParticipantId: matched.participantId,
           matchedKnowledgeItemIds: [],
           confidence: scoring.confidence,
+          provider: 'smartreader',
+          providerModel: 'vnpt_smartreader',
+          promptVersion: undefined,
+          fieldConfidenceJson: fieldLayers.fieldConfidence as Prisma.InputJsonValue,
+          requiresHumanConfirmation: true,
+          confirmationStatus: evidenceCardConfirmationStatuses.pending,
+          confirmedFieldsJson: Prisma.JsonNull,
+          confirmedByUserId: null,
+          confirmedAt: null,
+          lastCorrectedAt: null,
           sourceEndpoint: normalizedOcr.sourceEndpoint,
           smartreaderJobId: output.smartreaderJobId,
           aiSummary: buildEvidenceSummary(evidence.evidenceName, normalizedFields),
@@ -473,6 +578,285 @@ export async function processEvidenceOcrJob(job: IndexingJob): Promise<Prisma.In
       retryable: failure.retryable,
     });
   }
+}
+
+async function processProviderEvidenceAnalysis(input: {
+  job: IndexingJob;
+  jobInput: EvidenceAnalysisJobInput;
+  evidence: EvidenceOcrRecord;
+  primaryFile: File;
+  workspaceId: string;
+  actor: AuditActor;
+  provider: ReturnType<typeof getConfiguredEvidenceAnalysisProvider>;
+}): Promise<Prisma.InputJsonObject> {
+  const provider = input.provider;
+  const startedAt = Date.now();
+
+  await auditService.log({
+    actorId: input.actor?.id,
+    actorRole: input.actor?.role,
+    action: auditActions.SMARTREADER_OCR_STARTED,
+    entityType: 'indexing_job',
+    entityId: input.job.id,
+    applicationId: input.evidence.applicationId,
+    evidenceId: input.evidence.id,
+    workspaceId: input.workspaceId,
+    metadata: {
+      provider: provider.provider,
+      fileId: input.primaryFile.id,
+      evidenceFileId: input.jobInput.evidenceFileId,
+      criterion: input.evidence.criterion,
+      sourceType: input.evidence.sourceType,
+    },
+  });
+
+  const fileBuffer = await loadEvidenceFileBuffer(input.primaryFile);
+  if (fileBuffer.byteLength === 0) {
+    throw new AppError(422, ErrorCodes.EMPTY_EVIDENCE_DOCUMENT, 'Evidence file is empty', {
+      retryable: false,
+    });
+  }
+
+  const analysis = await provider.analyze({
+    evidenceId: input.evidence.id,
+    evidenceFileId: input.jobInput.evidenceFileId,
+    fileId: input.primaryFile.id,
+    filename: input.primaryFile.originalName,
+    mimeType: input.primaryFile.mimeType,
+    fileBuffer,
+    evidenceName: input.evidence.evidenceName,
+    selectedCriterion: input.evidence.criterion,
+    studentContext: {
+      fullName: input.evidence.application?.student?.fullName,
+      studentCode: input.evidence.application?.student?.studentCode,
+    },
+  });
+
+  await prisma.evidence.update({
+    where: { id: input.evidence.id },
+    data: { indexingStatus: IndexingStatus.extracting },
+  });
+
+  const extractedFields = compactAnalysisFields(toFlatExtractedFields(analysis.fields));
+  const normalizedFields = normalizeEvidenceFields(extractedFields);
+
+  await prisma.evidence.update({
+    where: { id: input.evidence.id },
+    data: { indexingStatus: IndexingStatus.checking_registry },
+  });
+
+  const matched = await matchEvidenceRegistry(input.evidence.criterion, normalizedFields, input.workspaceId);
+  const semanticWarningCodes = [
+    ...(hasEventNameMismatchWithUserInput({
+      evidenceName: input.evidence.evidenceName,
+      extractedEventName: normalizedFields.event_name,
+    })
+      ? ['event_name_mismatch_with_user_input']
+      : []),
+    ...buildProfileConflictWarnings({
+      profile: input.evidence.application?.student,
+      fields: normalizedFields,
+    }),
+  ];
+  const analysisWarnings = analysis.warnings.map((warning) => ({
+    code: warning.code,
+    message: warning.message,
+    field: warning.field,
+    severity: warning.severity,
+  }));
+  const scoring = scoreEvidenceConfidence({
+    ocrSucceeded: true,
+    fields: normalizedFields,
+    evidenceName: input.evidence.evidenceName,
+    matchedEventId: matched.eventId,
+    warnings: [
+      ...analysisWarnings.map((warning) => warning.code),
+      ...matched.warnings,
+      ...semanticWarningCodes,
+    ],
+  });
+  const warningEntries = [
+    ...analysisWarnings,
+    ...buildWarnings([...scoring.warningCodes, ...matched.warnings, ...semanticWarningCodes], {
+      warnings: [],
+      warningMessages: [],
+    }),
+  ];
+  const fieldConfidence = toFieldConfidenceMap(analysis.fields);
+  const fieldLayers = buildEvidenceCardFieldLayers({
+    evidenceName: input.evidence.evidenceName,
+    sourceType: input.evidence.sourceType,
+    criterion: input.evidence.criterion,
+    extractedFields,
+    normalizedFields,
+    matchedEventId: matched.eventId,
+    matchedParticipantId: matched.participantId,
+    warnings: warningEntries,
+    studentProfileFields: {
+      studentName: input.evidence.application?.student?.fullName,
+      studentCode: input.evidence.application?.student?.studentCode,
+      className: input.evidence.application?.student?.className,
+      faculty: input.evidence.application?.student?.faculty,
+    },
+  });
+  const lowConfidenceFieldCount = Object.values(fieldConfidence).filter((confidence) => confidence < 0.6).length;
+  const missingFields = buildMissingFields(input.evidence.criterion, normalizedFields, warningEntries);
+  const matchingStatusCode =
+    matched.eventId && matched.participantId
+      ? 'official_match_found'
+      : matched.eventId
+        ? 'official_match_not_found'
+        : 'none';
+  const confidence = Math.min(scoring.confidence, analysis.overallConfidence);
+  const nextIndexingStatus =
+    scoring.needsManualReview || analysis.warnings.some((warning) => warning.severity === 'blocking')
+      ? IndexingStatus.needs_manual_review
+      : IndexingStatus.indexed;
+  const nextEvidenceStatus =
+    nextIndexingStatus === IndexingStatus.needs_manual_review
+      ? EvidenceStatus.needs_supplement
+      : EvidenceStatus.indexed;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.evidenceCard.upsert({
+      where: { evidenceId: input.evidence.id },
+      update: {
+        ocrText: analysis.summary,
+        ocrLinesJson: [],
+        ocrParagraphsJson: [],
+        ocrTablesJson: [],
+        extractedFieldsJson: extractedFields as Prisma.InputJsonValue,
+        normalizedFieldsJson: normalizedFields as Prisma.InputJsonValue,
+        warningsJson: warningEntries as Prisma.InputJsonValue,
+        matchedEventId: matched.eventId,
+        matchedParticipantId: matched.participantId,
+        matchedKnowledgeItemIds: [],
+        confidence,
+        provider: analysis.provider,
+        providerModel: analysis.providerModel,
+        promptVersion: analysis.promptVersion,
+        fieldConfidenceJson: fieldConfidence as Prisma.InputJsonValue,
+        requiresHumanConfirmation: true,
+        confirmationStatus: evidenceCardConfirmationStatuses.pending,
+        confirmedFieldsJson: Prisma.JsonNull,
+        confirmedByUserId: null,
+        confirmedAt: null,
+        lastCorrectedAt: null,
+        sourceEndpoint: `${analysis.provider}:responses`,
+        smartreaderJobId: undefined,
+        aiSummary: analysis.summary,
+        rawAiResponse: undefined,
+        rawResponseJson: undefined,
+      },
+      create: {
+        evidenceId: input.evidence.id,
+        ocrText: analysis.summary,
+        ocrLinesJson: [],
+        ocrParagraphsJson: [],
+        ocrTablesJson: [],
+        extractedFieldsJson: extractedFields as Prisma.InputJsonValue,
+        normalizedFieldsJson: normalizedFields as Prisma.InputJsonValue,
+        warningsJson: warningEntries as Prisma.InputJsonValue,
+        matchedEventId: matched.eventId,
+        matchedParticipantId: matched.participantId,
+        matchedKnowledgeItemIds: [],
+        confidence,
+        provider: analysis.provider,
+        providerModel: analysis.providerModel,
+        promptVersion: analysis.promptVersion,
+        fieldConfidenceJson: fieldConfidence as Prisma.InputJsonValue,
+        requiresHumanConfirmation: true,
+        confirmationStatus: evidenceCardConfirmationStatuses.pending,
+        confirmedFieldsJson: Prisma.JsonNull,
+        confirmedByUserId: null,
+        confirmedAt: null,
+        lastCorrectedAt: null,
+        sourceEndpoint: `${analysis.provider}:responses`,
+        smartreaderJobId: undefined,
+        aiSummary: analysis.summary,
+        rawAiResponse: undefined,
+        rawResponseJson: undefined,
+      },
+    });
+
+    await tx.evidence.update({
+      where: { id: input.evidence.id },
+      data: {
+        indexingStatus: nextIndexingStatus,
+        status: nextEvidenceStatus,
+        confidence,
+        eventId: matched.eventId ?? input.evidence.eventId,
+      },
+    });
+  });
+
+  await auditService.log({
+    actorId: input.actor?.id,
+    actorRole: input.actor?.role,
+    action: auditActions.EVIDENCE_CARD_GENERATED,
+    entityType: 'evidence',
+    entityId: input.evidence.id,
+    applicationId: input.evidence.applicationId,
+    evidenceId: input.evidence.id,
+    workspaceId: input.workspaceId,
+    metadata: {
+      provider: analysis.provider,
+      providerModel: analysis.providerModel,
+      promptVersion: analysis.promptVersion,
+      fileId: input.primaryFile.id,
+      evidenceFileId: input.jobInput.evidenceFileId,
+      criterion: input.evidence.criterion,
+      sourceType: input.evidence.sourceType,
+      indexingStatus: nextIndexingStatus,
+      statusCode: missingFields.length > 0 ? 'needs_more_info' : 'evidence_read',
+      studentStatusCode: missingFields.length > 0 ? 'needs_more_info' : 'evidence_read',
+      matchingStatusCode,
+      missingFieldCount: missingFields.length,
+      warningCount: warningEntries.length,
+      lowConfidenceFieldCount,
+      fieldConfidenceKeys: Object.keys(fieldLayers.fieldConfidence),
+      matchedEventId: matched.eventId,
+      matchedParticipantId: matched.participantId,
+      latencyMs: analysis.latencyMs ?? Date.now() - startedAt,
+      totalTokens: analysis.usage?.totalTokens,
+    },
+  });
+
+  if (scoring.needsManualReview || analysis.requiresHumanConfirmation) {
+    await auditService.log({
+      actorId: input.actor?.id,
+      actorRole: input.actor?.role,
+      action: auditActions.EVIDENCE_SENT_TO_HUMAN_VERIFICATION,
+      entityType: 'evidence',
+      entityId: input.evidence.id,
+      applicationId: input.evidence.applicationId,
+      evidenceId: input.evidence.id,
+      workspaceId: input.workspaceId,
+      metadata: {
+        provider: analysis.provider,
+        fileId: input.primaryFile.id,
+        criterion: input.evidence.criterion,
+        confidence,
+        missingFieldCount: missingFields.length,
+        warningCount: warningEntries.length,
+      },
+    });
+  }
+
+  return {
+    evidenceId: input.evidence.id,
+    confidence,
+    indexingStatus: nextIndexingStatus,
+    status: nextEvidenceStatus,
+    provider: analysis.provider,
+    providerModel: analysis.providerModel ?? null,
+    promptVersion: analysis.promptVersion ?? null,
+    requiresHumanConfirmation: true,
+    matchedEventId: matched.eventId,
+    matchedParticipantId: matched.participantId,
+    warningCodes: scoring.warningCodes,
+    jobStatus: JobStatus.completed,
+  };
 }
 
 async function ensureSmartReaderUpload(
@@ -741,6 +1125,41 @@ function buildEvidenceSummary(
 ): string {
   const subject = fields.event_name ?? evidenceName;
   return `SmartReader đã đọc các thông tin chính từ "${subject}". Cán bộ/Hội đồng vẫn là người xác nhận cuối.`;
+}
+
+function compactAnalysisFields(fields: Record<string, string | number | null>): EvidenceExtractedFields {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== null && value !== ''),
+  ) as EvidenceExtractedFields;
+}
+
+async function loadEvidenceFileBuffer(file: File): Promise<Buffer> {
+  if (file.storageType === FileStorageType.local) {
+    return fs.readFile(path.resolve(env.UPLOAD_DIR, file.filePath));
+  }
+
+  const signedUrl = await storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
+  const response = await fetch(signedUrl);
+  if (!response.ok) {
+    throw new AppError(502, ErrorCodes.STORAGE_ERROR, 'Evidence file download failed', {
+      retryable: true,
+      status: response.status,
+    });
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function resolveNewestEvidenceFile(
+  evidenceFiles: Array<{ id: string; fileId: string; file: { id: string; createdAt: Date } }>,
+) {
+  const newest = [...evidenceFiles].sort((left, right) => {
+    const createdDiff = right.file.createdAt.getTime() - left.file.createdAt.getTime();
+    if (createdDiff !== 0) return createdDiff;
+    const fileIdDiff = right.file.id.localeCompare(left.file.id);
+    if (fileIdDiff !== 0) return fileIdDiff;
+    return right.id.localeCompare(left.id);
+  })[0];
+  return newest ? { evidenceFileId: newest.id, fileId: newest.fileId } : null;
 }
 
 function buildProfileConflictWarnings(input: {

@@ -38,6 +38,7 @@ import { resolutionRouter } from './modules/resolution/resolution.routes';
 import { reviewRouter } from './modules/review/review.routes';
 import { smartbotHooksRouter } from './modules/smartbot-hooks/smartbot-hooks.routes';
 import { smartReaderRouter } from './modules/smartreader/smartreader.routes';
+import { studentAssistantRouter } from './modules/student-assistant/student-assistant.routes';
 import { smartUxRouter } from './modules/smartux/smartux.routes';
 import { meRouter, usersRouter } from './modules/users/users.routes';
 import { versionRouter } from './modules/version/version.routes';
@@ -91,6 +92,7 @@ export function createApp() {
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/audit', auditRouter);
   app.use('/api/jobs', jobsRouter);
+  app.use('/api/student-assistant', studentAssistantRouter);
   app.use('/api/chatbot', chatbotRouter);
   app.use('/api/smartbot', smartbotHooksRouter);
   app.use('/api/mail', mailRouter);

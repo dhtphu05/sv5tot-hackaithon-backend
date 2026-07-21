@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  ApplicationStatus,
   DecisionImportStatus,
   Criterion,
   EventStatus,
@@ -14,6 +15,7 @@ import {
   Level,
   Prisma,
   Role,
+  ReviewTaskStatus,
   RosterPreviewValidationStatus,
 } from '@prisma/client';
 import type { IndexingJob, SmartReaderJob } from '@prisma/client';
@@ -32,6 +34,7 @@ import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import { AuditService } from '../audit/audit.service';
 import { assertApplicationEditable, assertApplicationOwner, createApplicationAudit } from '../applications/application.helpers';
+import { evidenceCardConfirmationStatuses } from '../evidences/evidence-card-confirmation';
 import {
   normalizeMatchingText,
   resolveExactParticipantNameMatch,
@@ -830,19 +833,39 @@ export async function importEventAsEvidence(input: {
   });
   if (!application) throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
   assertSameWorkspace(input.user, application, 'Application not found');
+  const event = await prisma.eventRegistry.findUnique({ where: { id: input.eventId } });
+  if (!event || event.status !== EventStatus.active) {
+    throw new AppError(404, ErrorCodes.EVENT_NOT_APPROVED, 'Event is not approved');
+  }
+  assertSameWorkspace(input.user, event, 'Event is not approved');
+  if (event.workspaceId !== application.workspaceId) {
+    throw new AppError(404, ErrorCodes.EVENT_OUT_OF_SCOPE, 'Event is out of scope for this application');
+  }
+  if (event.rosterIndexed === false) {
+    throw new AppError(409, ErrorCodes.EVENT_ROSTER_NOT_CONFIRMED, 'Event roster is not confirmed');
+  }
+
   const isStudent = input.user.role === Role.student || input.user.role === Role.class_representative;
   if (isStudent) {
     assertApplicationOwner(application, input.user);
-    assertApplicationEditable(application);
-  }
-
-  const event = await prisma.eventRegistry.findUnique({ where: { id: input.eventId } });
-  if (!event || event.status !== EventStatus.active) {
-    throw new AppError(404, ErrorCodes.EVENT_NOT_ACTIVE, 'Event is not active');
-  }
-  assertSameWorkspace(input.user, event, 'Event is not active');
-  if (event.workspaceId !== application.workspaceId) {
-    throw new AppError(404, ErrorCodes.EVENT_NOT_ACTIVE, 'Event is not active');
+    if (application.status === ApplicationStatus.supplement_required) {
+      const hasSupplementTask = await prisma.reviewTask.findFirst({
+        where: {
+          applicationId: application.id,
+          criterion: event?.criterion,
+          status: ReviewTaskStatus.supplement_required,
+        },
+      });
+      if (!hasSupplementTask) {
+        throw new AppError(
+          403,
+          ErrorCodes.SUPPLEMENT_SCOPE_VIOLATION,
+          'Event is outside supplement scope',
+        );
+      }
+    } else {
+      assertApplicationEditable(application);
+    }
   }
 
   const studentCode = isStudent ? input.user.studentCode : application.student.studentCode;
@@ -854,10 +877,10 @@ export async function importEventAsEvidence(input: {
     studentName,
   });
   if (!participant) {
-    throw new AppError(404, ErrorCodes.PARTICIPANT_NOT_FOUND, 'Student is not in the confirmed roster');
+    throw new AppError(404, ErrorCodes.EVENT_PARTICIPANT_NOT_FOUND, 'Student is not in the confirmed roster');
   }
   if ((participant.participationStatus ?? 'confirmed').toLowerCase() !== 'confirmed') {
-    throw new AppError(400, ErrorCodes.PARTICIPANT_NOT_FOUND, 'Participant is not confirmed');
+    throw new AppError(400, ErrorCodes.EVENT_PARTICIPANT_NOT_FOUND, 'Participant is not confirmed');
   }
 
   const existing = await prisma.evidence.findFirst({
@@ -866,98 +889,160 @@ export async function importEventAsEvidence(input: {
   });
   if (existing) return formatOfficialImportResponse(existing, event, participant, true);
 
-  const result = await prisma.$transaction(async (tx) => {
-    const created = await tx.evidence.create({
-      data: {
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const duplicate = await tx.evidence.findFirst({
+        where: { applicationId: application.id, sourceType: EvidenceSourceType.event_import, eventId: event.id },
+        include: { evidenceCard: true, evidenceFiles: { include: { file: true } } },
+      });
+      if (duplicate) return { evidence: duplicate, alreadyImported: true };
+
+      const created = await tx.evidence.create({
+        data: {
+          applicationId: application.id,
+          evidenceName: input.evidenceName ?? event.eventName,
+          criterion: event.criterion,
+          sourceType: EvidenceSourceType.event_import,
+          eventId: event.id,
+          status: EvidenceStatus.under_review,
+          indexingStatus: IndexingStatus.indexed,
+          confidence: 0.96,
+        },
+      });
+      const readableSummary = {
+        studentName: participant.studentName,
+        studentCode: participant.studentCode,
+        className: participant.className,
+        faculty: participant.faculty,
+        eventName: event.eventName,
+        organizer: event.organizer,
+        organizerLevel: event.organizerLevel,
+        startDate: event.startDate?.toISOString() ?? null,
+        endDate: event.endDate?.toISOString() ?? null,
+        convertedValue: participant.convertedValue ?? event.convertedValue,
+        convertedUnit: event.convertedUnit,
+        officialDocumentNo: event.officialDocumentNo,
+      };
+      const card = await tx.evidenceCard.create({
+        data: {
+          evidenceId: created.id,
+          ocrText: null,
+          extractedFieldsJson: {
+            source: 'official_matching',
+            eventId: event.id,
+            participantId: participant.id,
+            ...readableSummary,
+          },
+          matchedEventId: event.id,
+          matchedParticipantId: participant.id,
+          matchedKnowledgeItemIds: [],
+          warningsJson: [],
+          confidence: 0.96,
+          provider: 'event_registry',
+          sourceEndpoint: 'event_registry:confirmed_roster',
+          fieldConfidenceJson: {},
+          requiresHumanConfirmation: false,
+          confirmationStatus: evidenceCardConfirmationStatuses.notRequired,
+          confirmedFieldsJson: readableSummary,
+          aiSummary: 'Minh chứng được tạo từ danh sách chính thức đã xác nhận.',
+          rawAiResponse: Prisma.JsonNull,
+        },
+      });
+      await tx.application.update({
+        where: { id: application.id },
+        data: { updatedAt: new Date() },
+      });
+      await createApplicationAudit(tx, {
+        actorId: input.user.id,
+        actorRole: input.user.role,
+        action: auditActions.EVENT_EVIDENCE_IMPORTED_BY_STUDENT,
+        targetType: 'evidence',
+        targetId: created.id,
         applicationId: application.id,
-        evidenceName: input.evidenceName ?? event.eventName,
-        criterion: event.criterion,
-        sourceType: EvidenceSourceType.event_import,
-        eventId: event.id,
-        status: EvidenceStatus.under_review,
-        indexingStatus: IndexingStatus.indexed,
-        confidence: 0.96,
-      },
-    });
-    const readableSummary = {
-      studentName: participant.studentName,
-      studentCode: participant.studentCode,
-      className: participant.className,
-      faculty: participant.faculty,
-      eventName: event.eventName,
-      organizer: event.organizer,
-      organizerLevel: event.organizerLevel,
-      startDate: event.startDate?.toISOString() ?? null,
-      endDate: event.endDate?.toISOString() ?? null,
-      convertedValue: participant.convertedValue ?? event.convertedValue,
-      convertedUnit: event.convertedUnit,
-      officialDocumentNo: event.officialDocumentNo,
-    };
-    const card = await tx.evidenceCard.create({
-      data: {
+        workspaceId: application.workspaceId,
         evidenceId: created.id,
-        ocrText: null,
-        extractedFieldsJson: {
-          source: 'official_matching',
+        eventId: event.id,
+        afterStateJson: {
           eventId: event.id,
           participantId: participant.id,
-          ...readableSummary,
+          studentCodeMasked: maskStudentCode(participant.studentCode),
+          criterion: event.criterion,
         },
-        matchedEventId: event.id,
-        matchedParticipantId: participant.id,
-        matchedKnowledgeItemIds: [],
-        warningsJson: [],
-        confidence: 0.96,
-        aiSummary: 'Minh chứng được tạo từ danh sách chính thức đã xác nhận.',
-        rawAiResponse: { source: 'official_matching_import' },
-      },
-    });
-    await createApplicationAudit(tx, {
-      actorId: input.user.id,
-      actorRole: input.user.role,
-      action: auditActions.EVENT_EVIDENCE_IMPORTED_BY_STUDENT,
-      targetType: 'evidence',
-      targetId: created.id,
-      applicationId: application.id,
-      afterStateJson: { eventId: event.id, participantId: participant.id, studentCode: participant.studentCode },
-      note: input.note,
-    });
-    await createApplicationAudit(tx, {
-      actorId: input.user.id,
-      actorRole: input.user.role,
-      action: auditActions.EVIDENCE_CREATED,
-      targetType: 'evidence',
-      targetId: created.id,
-      applicationId: application.id,
-      afterStateJson: {
-        eventId: event.id,
-        participantId: participant.id,
-        sourceType: EvidenceSourceType.event_import,
-        statusCode: 'official_match_found',
-      },
-    });
-    await createApplicationAudit(tx, {
-      actorId: input.user.id,
-      actorRole: input.user.role,
-      action: auditActions.EVIDENCE_CARD_GENERATED,
-      targetType: 'evidence_card',
-      targetId: card.id,
-      applicationId: application.id,
-      afterStateJson: {
+        note: input.note,
+      });
+      await createApplicationAudit(tx, {
+        actorId: input.user.id,
+        actorRole: input.user.role,
+        action: auditActions.EVIDENCE_CREATED,
+        targetType: 'evidence',
+        targetId: created.id,
+        applicationId: application.id,
+        workspaceId: application.workspaceId,
         evidenceId: created.id,
         eventId: event.id,
-        participantId: participant.id,
-        statusCode: 'official_match_found',
-        warningCount: 0,
+        afterStateJson: {
+          eventId: event.id,
+          participantId: participant.id,
+          sourceType: EvidenceSourceType.event_import,
+          statusCode: 'official_match_found',
+        },
+      });
+      await createApplicationAudit(tx, {
+        actorId: input.user.id,
+        actorRole: input.user.role,
+        action: auditActions.EVIDENCE_CARD_GENERATED,
+        targetType: 'evidence_card',
+        targetId: card.id,
+        applicationId: application.id,
+        workspaceId: application.workspaceId,
+        evidenceId: created.id,
+        eventId: event.id,
+        afterStateJson: {
+          evidenceId: created.id,
+          eventId: event.id,
+          participantId: participant.id,
+          statusCode: 'official_match_found',
+          warningCount: 0,
+        },
+      });
+      return {
+        evidence: {
+          ...created,
+          evidenceCard: card,
+          evidenceFiles: [],
+        },
+        alreadyImported: false,
+      };
+    });
+    return formatOfficialImportResponse(result.evidence, event, participant, result.alreadyImported);
+  } catch (error) {
+    if (!isUniqueConflict(error)) throw error;
+    const duplicate = await prisma.evidence.findFirst({
+      where: { applicationId: application.id, sourceType: EvidenceSourceType.event_import, eventId: event.id },
+      include: { evidenceCard: true, evidenceFiles: { include: { file: true } } },
+    });
+    if (!duplicate) {
+      throw new AppError(409, ErrorCodes.EVENT_IMPORT_CONFLICT, 'Event import conflict could not be resolved');
+    }
+    await createApplicationAudit(prisma, {
+      actorId: input.user.id,
+      actorRole: input.user.role,
+      action: auditActions.EVENT_IMPORT_DUPLICATE_RESOLVED,
+      targetType: 'evidence',
+      targetId: duplicate.id,
+      applicationId: application.id,
+      workspaceId: application.workspaceId,
+      evidenceId: duplicate.id,
+      eventId: event.id,
+      afterStateJson: {
+        eventId: event.id,
+        evidenceId: duplicate.id,
+        criterion: event.criterion,
+        studentCodeMasked: maskStudentCode(participant.studentCode),
       },
     });
-    return {
-      ...created,
-      evidenceCard: card,
-      evidenceFiles: [],
-    };
-  });
-  return formatOfficialImportResponse(result, event, participant, false);
+    return formatOfficialImportResponse(duplicate, event, participant, true);
+  }
 }
 
 async function resolveParticipantForOfficialImport(input: {
@@ -1098,4 +1183,15 @@ function formatOfficialImportResponse(
     alreadyImported,
     message: alreadyImported ? 'Minh chứng đã có trong hồ sơ.' : 'Đã thêm minh chứng vào hồ sơ.',
   };
+}
+
+function isUniqueConflict(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
+
+function maskStudentCode(studentCode: string | null | undefined) {
+  if (!studentCode) return null;
+  const trimmed = studentCode.trim();
+  if (trimmed.length <= 4) return '*'.repeat(trimmed.length);
+  return `${trimmed.slice(0, 2)}${'*'.repeat(Math.max(2, trimmed.length - 4))}${trimmed.slice(-2)}`;
 }

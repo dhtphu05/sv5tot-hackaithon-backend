@@ -8,6 +8,7 @@ import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { mapEvidenceUxStatus } from '../evidences/evidence-ux-status.mapper';
+import { parseEvidenceAnalysisJobInput } from './evidence-analysis-job-input';
 import { JobsRepository } from './jobs.repository';
 import { processDecisionMetadataJob } from './processors/decision-metadata.processor';
 import { processDecisionRosterOcrJob } from './processors/decision-roster-ocr.processor';
@@ -17,13 +18,29 @@ import { processEvidenceOcrJob } from './processors/evidence-ocr.processor';
 export class JobsService {
   constructor(private readonly jobsRepository = new JobsRepository()) {}
 
-  async enqueueIndexingJob(targetId: string, jobType: JobType, workspaceId?: string | null) {
-    const existing = await this.jobsRepository.getActiveJobForTarget(targetId, jobType, workspaceId);
+  async enqueueIndexingJob(
+    targetId: string,
+    jobType: JobType,
+    workspaceId?: string | null,
+    inputJson?: Prisma.InputJsonValue,
+  ) {
+    const active = await this.jobsRepository.getActiveJobsForTarget(targetId, jobType, workspaceId);
+    const existing = inputJson
+      ? active.find((job) => {
+          try {
+            const current = parseEvidenceAnalysisJobInput(job.inputJson);
+            const next = parseEvidenceAnalysisJobInput(inputJson);
+            return current.evidenceFileId === next.evidenceFileId && current.fileId === next.fileId;
+          } catch {
+            return false;
+          }
+        })
+      : active[0];
     if (existing) {
       return { job: existing, reused: true };
     }
 
-    const job = await this.jobsRepository.enqueueIndexingJob(targetId, jobType, workspaceId);
+    const job = await this.jobsRepository.enqueueIndexingJob(targetId, jobType, workspaceId, inputJson);
     return { job, reused: false };
   }
 
@@ -107,12 +124,12 @@ export class JobsService {
   }
 
   async runWorkerTick() {
-    const job = await this.jobsRepository.findNextQueuedJob();
+    const job = await this.jobsRepository.claimNextQueuedJob();
     if (!job) {
       return { processed: 0, job: null };
     }
 
-    const completed = await runIndexingJob(job.id);
+    const completed = await processClaimedIndexingJob(job);
     return { processed: 1, job: completed };
   }
 
@@ -188,7 +205,7 @@ export class JobsService {
       resultJson: job.resultJson,
       createdAt: job.createdAt,
       updatedAt: job.updatedAt,
-      provider: smartReaderJob?.provider ?? (job.jobType === JobType.evidence_ocr ? 'vnpt_smartreader' : null),
+      provider: evidence?.evidenceCard?.provider ?? smartReaderJob?.provider ?? null,
       smartreaderJobId: smartReaderJob?.id ?? null,
       progress: {
         processedPages: smartReaderJob?.progressProcessedPages ?? null,
@@ -221,14 +238,28 @@ export async function runIndexingJob(jobId: string) {
     throw new AppError(409, ErrorCodes.JOB_ALREADY_RUNNING, 'Job is already running');
   }
 
-  const processingJob = await prisma.indexingJob.update({
-    where: { id: job.id },
-    data: {
-      status: JobStatus.processing,
-      attempts: { increment: 1 },
-      errorMessage: null,
+  if (job.status !== JobStatus.queued) {
+    throw new AppError(409, ErrorCodes.CONFLICT, 'Only queued jobs can be run directly');
+  }
+
+  const processingJob = await new JobsRepository().claimQueuedJobById(job.id);
+  if (!processingJob) {
+    throw new AppError(409, ErrorCodes.JOB_ALREADY_RUNNING, 'Job was already claimed');
+  }
+
+  return processClaimedIndexingJob(processingJob);
+}
+
+async function processClaimedIndexingJob(processingJob: IndexingJob) {
+  const evidence = await prisma.evidence.findUnique({
+    where: { id: processingJob.targetId },
+    include: {
+      application: { include: { student: true } },
+      collectiveProfile: { include: { representative: true } },
     },
   });
+  const decisionImport = await prisma.decisionImport.findUnique({ where: { id: processingJob.targetId } });
+  assertJobWorkspaceMatchesTarget(processingJob, resolveTargetWorkspaceId(evidence, decisionImport));
 
   if (evidence) {
     const actor = evidence.application?.student ?? evidence.collectiveProfile?.representative;
@@ -323,7 +354,8 @@ export async function runIndexingJob(jobId: string) {
 
     if (evidence) {
       const actor = evidence.application?.student ?? evidence.collectiveProfile?.representative;
-      const manualReview = code === ErrorCodes.OCR_EMPTY_TEXT;
+      const manualReview =
+        code === ErrorCodes.OCR_EMPTY_TEXT || code === ErrorCodes.EMPTY_EVIDENCE_DOCUMENT;
       await prisma.evidence.update({
         where: { id: evidence.id },
         data: manualReview

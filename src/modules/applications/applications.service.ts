@@ -5,7 +5,6 @@ import {
   Criterion,
   EvidenceStatus,
   FinalStatus,
-  IndexingStatus,
   Level,
   NotificationType,
   Prisma,
@@ -29,6 +28,7 @@ import {
   buildApplicationSummary,
   createApplicationAudit,
 } from './application.helpers';
+import { findProcessingEvidence, isApplicationPrecheckStale } from './application-freshness';
 import { ApplicationsRepository } from './applications.repository';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import type {
@@ -40,6 +40,8 @@ import type {
   TimelineQuery,
   UpdateTargetLevelInput,
 } from './applications.validation';
+
+export { hasActiveEvidenceProcessing } from './application-freshness';
 
 type SubmitApplicationContext = Prisma.ApplicationGetPayload<{
   include: {
@@ -303,7 +305,7 @@ export class ApplicationsService {
       );
     }
 
-    const processingEvidence = getProcessingEvidence(application);
+    const processingEvidence = findProcessingEvidence(application);
     if (processingEvidence) {
       throw new AppError(
         409,
@@ -322,7 +324,7 @@ export class ApplicationsService {
       where: { applicationId: application.id },
       orderBy: { createdAt: 'desc' },
     });
-    if (isPrecheckStale(application, latestPrecheck?.createdAt)) {
+    if (isApplicationPrecheckStale(application, latestPrecheck?.createdAt)) {
       await this.precheckService.run(user, application.id, { level: application.targetLevel });
       latestPrecheck = await prisma.precheckResult.findFirst({
         where: { applicationId: application.id },
@@ -394,7 +396,6 @@ export class ApplicationsService {
               officerSuggestedLevel: null,
               levelAssessmentJson: Prisma.JsonNull,
               decisionReason: null,
-              supplementRequestJson: Prisma.JsonNull,
             },
           });
           await tx.evidence.updateMany({
@@ -820,26 +821,6 @@ function hasPriorityPrecheckResult(value?: Prisma.JsonValue): boolean {
       result.evidenceRefs.length > 0
     );
   });
-}
-
-function getProcessingEvidence(application: SubmitApplicationContext) {
-  return application.evidences.find(
-    (evidence) =>
-      evidence.status === EvidenceStatus.pending_indexing ||
-      evidence.indexingStatus === IndexingStatus.pending_indexing ||
-      evidence.indexingStatus === IndexingStatus.ocr_processing,
-  );
-}
-
-function isPrecheckStale(application: SubmitApplicationContext, precheckCreatedAt?: Date | null) {
-  if (!precheckCreatedAt) return true;
-  const timestamps = [
-    application.updatedAt,
-    ...application.evidences.map((item) => item.updatedAt),
-    ...application.metrics.map((item) => item.updatedAt),
-    ...application.requirementResponses.map((item) => item.updatedAt),
-  ];
-  return timestamps.some((timestamp) => timestamp > precheckCreatedAt);
 }
 
 function buildSubmitWarningsFromPrecheck(

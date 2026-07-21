@@ -16,6 +16,11 @@ export async function listOfficialEvidenceLibrary(req: Request, res: Response): 
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function suggestEvidenceEvents(req: Request, res: Response): Promise<void> {
+  const data = await evidenceMatchingService.suggestions(req.user!, req.query as never);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function importEvidenceMatching(req: Request, res: Response): Promise<void> {
   const data = await eventRegistryService.importAsEvidence(req.user!, String(req.params.eventId), req.body);
   sendSuccess(res, data, { requestId: req.requestId }, 201);

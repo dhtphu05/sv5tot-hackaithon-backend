@@ -8,8 +8,10 @@ import {
   importEvidenceMatching,
   listOfficialEvidenceLibrary,
   searchEvidenceMatching,
+  suggestEvidenceEvents,
 } from './evidence-matching.controller';
 import {
+  evidenceEventSuggestionQuerySchema,
   evidenceMatchingLibraryQuerySchema,
   evidenceMatchingSearchQuerySchema,
   importEvidenceMatchingSchema,
@@ -23,6 +25,14 @@ evidenceMatchingRouter.get(
   requireRole(Role.student),
   validate({ query: evidenceMatchingLibraryQuerySchema }),
   asyncHandler(listOfficialEvidenceLibrary),
+);
+
+evidenceMatchingRouter.get(
+  '/suggestions',
+  requireAuth,
+  requireRole(Role.student, Role.class_representative),
+  validate({ query: evidenceEventSuggestionQuerySchema }),
+  asyncHandler(suggestEvidenceEvents),
 );
 
 evidenceMatchingRouter.get(

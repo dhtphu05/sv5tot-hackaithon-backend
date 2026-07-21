@@ -337,6 +337,59 @@ describe('precheck completion integration', () => {
     });
   });
 
+  it('prioritizes exact evidence confirmation actions over generic verification', () => {
+    const result = buildPrecheckFromCompletion({
+      application: application(),
+      level: Level.school,
+      criteriaWarnings: [],
+      completion: [
+        completion({
+          criterion: Criterion.volunteer,
+          status: 'needs_verification',
+          requirementGroups: [
+            {
+              key: 'volunteer_foundation',
+              title: 'Ngày tình nguyện',
+              operator: 'all_of',
+              optional: false,
+              requirements: [
+                {
+                  key: 'accumulated_volunteer_days',
+                  title: 'Tổng ngày tình nguyện',
+                  type: 'activity_aggregation',
+                  status: 'needs_verification',
+                  optional: false,
+                  acceptedSources: ['manual_evidence'],
+                  currentResponses: [
+                    {
+                      id: 'evidence-confirmation',
+                      responseKind: 'legacy_evidence',
+                      status: 'needs_verification',
+                      evidenceId: 'evidence-123',
+                      source: 'legacy',
+                      payloadJson: {
+                        needsEvidenceConfirmation: true,
+                        evidenceId: 'evidence-123',
+                        confirmationStatus: 'pending',
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+    });
+
+    expect(result.nextAction).toMatchObject({
+      type: 'confirm_evidence',
+      evidenceId: 'evidence-123',
+      destination: '/app/application?evidenceId=evidence-123&mode=confirm',
+      priority: 1,
+    });
+  });
+
   it('does not emit final result or confidence from precheck output', () => {
     const result = buildPrecheckFromCompletion({
       application: application({

@@ -523,4 +523,103 @@ describe('EvidenceMatchingService', () => {
       ),
     ).rejects.toBeInstanceOf(AppError);
   });
+
+  it('returns privacy-safe inline event suggestions without participant rows', async () => {
+    const applicationId = '22222222-2222-4222-8222-222222222222';
+    const db = {
+      application: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: applicationId,
+          studentId: baseUser.id,
+          workspaceId,
+        }),
+      },
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue([
+          event({
+            id: 'event-1',
+            eventName: 'Mùa hè xanh 2026',
+            aliases: [{ alias: 'MHX 2026', normalizedAliasKey: 'mhx 2026' }],
+          }),
+          event({
+            id: 'event-2',
+            eventName: 'Hiến máu nhân đạo',
+            criterion: Criterion.ethics,
+            aliases: [],
+          }),
+        ]),
+      },
+      evidence: {
+        findMany: vi.fn().mockResolvedValue([{ eventId: 'event-2' }]),
+      },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.suggestions(baseUser, {
+      applicationId,
+      query: 'MHX 2026',
+      criterion: Criterion.volunteer,
+      limit: 5,
+      excludeImported: true,
+    });
+
+    expect(db.eventRegistry.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId,
+          status: EventStatus.active,
+          rosterIndexed: true,
+          criterion: Criterion.volunteer,
+        }),
+        select: expect.not.objectContaining({
+          participants: expect.anything(),
+        }),
+      }),
+    );
+    expect(result).toMatchObject({
+      query: 'MHX 2026',
+      normalizedQuery: 'mhx 2026',
+      suggestions: [
+        {
+          eventId: 'event-1',
+          eventName: 'Mùa hè xanh 2026',
+          alreadyImported: false,
+          match: { level: 'exact' },
+          participantCheck: { required: true, state: 'eligible_to_check' },
+        },
+      ],
+      meta: { minimumQueryLength: 3, resultCount: 1, source: 'event_registry' },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/studentCode|participants|rawRow|filePath|confidence/i);
+  });
+
+  it('returns no suggestions before minimum query length unless exact eventId is supplied', async () => {
+    const applicationId = '22222222-2222-4222-8222-222222222222';
+    const db = {
+      application: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: applicationId,
+          studentId: baseUser.id,
+          workspaceId,
+        }),
+      },
+      eventRegistry: {
+        findMany: vi.fn(),
+      },
+      evidence: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.suggestions(baseUser, {
+      applicationId,
+      query: 'mh',
+      limit: 5,
+      excludeImported: true,
+    });
+
+    expect(result.suggestions).toEqual([]);
+    expect(db.eventRegistry.findMany).not.toHaveBeenCalled();
+  });
 });

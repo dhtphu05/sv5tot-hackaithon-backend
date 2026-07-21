@@ -1002,15 +1002,22 @@ export class CriteriaCompletionService {
     assertSameWorkspace(user, application, 'Application not found');
     if (user.role === Role.admin || user.role === Role.manager) return;
     if (application.studentId === user.id) {
+      if (application.status === ApplicationStatus.supplement_required) {
+        const hasSupplementTask = await prisma.reviewTask.findFirst({
+          where: {
+            applicationId: application.id,
+            criterion,
+            status: 'supplement_required',
+          },
+        });
+        if (hasSupplementTask) return;
+        throw new AppError(
+          403,
+          ErrorCodes.SUPPLEMENT_SCOPE_VIOLATION,
+          'Criterion is outside supplement scope',
+        );
+      }
       if (isEditableStatus(application.status)) return;
-      const hasSupplementTask = await prisma.reviewTask.findFirst({
-        where: {
-          applicationId: application.id,
-          criterion,
-          status: 'supplement_required',
-        },
-      });
-      if (hasSupplementTask) return;
     }
     throw new AppError(403, ErrorCodes.FORBIDDEN, 'Cannot change requirement responses');
   }

@@ -6,6 +6,11 @@ import {
   MetricType,
   VerificationStatus,
 } from '@prisma/client';
+import {
+  getTrustedEvidenceCardFields,
+  needsEvidenceConfirmation,
+  normalizeConfirmationStatus,
+} from '../evidences/evidence-card-confirmation';
 import type {
   CompletionEvaluationInput,
   CompletionEvidence,
@@ -331,9 +336,8 @@ function buildLegacyMetricEvidenceResponses(
         evidence.criterion === requirement.config?.criterion || !requirement.config?.criterion,
     )
     .map((evidence): RequirementResponseDto | null => {
-      const fields = asRecord(
-        evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson,
-      );
+      if (needsEvidenceConfirmation(evidence)) return evidenceNeedsConfirmationResponse(evidence, requirement);
+      const fields = getTrustedEvidenceCardFields(evidence);
       const value =
         metricType === MetricType.gpa
           ? numericValue(fields.gpa ?? fields.GPA ?? fields.academic_gpa ?? fields.academicGpa)
@@ -404,6 +408,27 @@ function buildAcademicNoFGradeResponses(
   ];
 }
 
+function evidenceNeedsConfirmationResponse(
+  evidence: CompletionEvidence,
+  requirement: RequirementDto,
+): RequirementResponseDto {
+  return {
+    id: `evidence-confirmation-${requirement.key}-${evidence.id}`,
+    responseKind: 'legacy_evidence' as const,
+    status: 'needs_verification',
+    evidenceId: evidence.id,
+    source: 'legacy' as const,
+    payloadJson: {
+      sourceType: evidence.sourceType,
+      indexingStatus: evidence.indexingStatus,
+      evidenceStatus: evidence.status,
+      needsEvidenceConfirmation: true,
+      evidenceId: evidence.id,
+      confirmationStatus: normalizeConfirmationStatus(evidence.evidenceCard?.confirmationStatus),
+    },
+  };
+}
+
 function buildAcademicPeriodResponses(input: CompletionEvaluationInput): RequirementResponseDto[] {
   const schoolYear = input.schoolYear;
   const candidates = academicGpaSchoolYears(input);
@@ -462,9 +487,17 @@ function buildLegacyAggregationResponses(
         response.responseKind === 'legacy_event' ? 'event_registry' : 'criteria_rule',
     },
   }));
-  return [...metricResponses, ...evidenceResponses].filter((response) => {
+  const confirmationResponses = input.evidences
+    .filter((evidence) => {
+      if (requirement.config?.criterion && evidence.criterion !== requirement.config.criterion) return false;
+      return needsEvidenceConfirmation(evidence);
+    })
+    .map((evidence) => evidenceNeedsConfirmationResponse(evidence, requirement));
+
+  return [...metricResponses, ...evidenceResponses, ...confirmationResponses].filter((response) => {
     const payload = asRecord(response.payloadJson);
     return (
+      payload.needsEvidenceConfirmation === true ||
       typeof payload.value === 'number' ||
       typeof payload.convertedValue === 'number' ||
       response.metricId
@@ -500,6 +533,15 @@ function buildLegacyEvidenceResponses(
         indexingStatus: evidence.indexingStatus,
         evidenceStatus: evidence.status,
         value: extractEvidenceAggregationValue(evidence, requirement.config?.valueField),
+        startDate: trustedEvidenceField(evidence, 'activity_date', 'activityDate', 'startDate'),
+        endDate: trustedEvidenceField(evidence, 'activity_date', 'activityDate', 'endDate'),
+        ...(needsEvidenceConfirmation(evidence)
+          ? {
+              needsEvidenceConfirmation: true,
+              evidenceId: evidence.id,
+              confirmationStatus: normalizeConfirmationStatus(evidence.evidenceCard?.confirmationStatus),
+            }
+          : {}),
       },
     }));
 }
@@ -1010,18 +1052,17 @@ function extractEvidenceAggregationValue(
     return evidence.event.convertedValue;
   }
   const fields = asRecord(
-    evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson,
+    getTrustedEvidenceCardFields(evidence),
   );
   const configured = valueField ? fields[valueField] : undefined;
   if (typeof configured === 'number') return configured;
+  if (typeof fields.volunteer_days === 'number') return fields.volunteer_days;
   if (typeof fields.volunteerDays === 'number') return fields.volunteerDays;
   return undefined;
 }
 
 function matchesEvidenceType(evidence: CompletionEvidence, evidenceType: string): boolean {
-  const fields = asRecord(
-    evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson,
-  );
+  const fields = getTrustedEvidenceCardFields(evidence);
   return (
     fields.evidenceType === evidenceType ||
     fields.ethicsAchievementType === evidenceType ||
@@ -1037,6 +1078,11 @@ function matchesEvidenceType(evidence: CompletionEvidence, evidenceType: string)
     fields.activityType === evidenceType ||
     fields.pathType === evidenceType
   );
+}
+
+function trustedEvidenceField(evidence: CompletionEvidence, ...keys: string[]): unknown {
+  const fields = getTrustedEvidenceCardFields(evidence);
+  return keys.map((key) => fields[key]).find((value) => value !== undefined && value !== null);
 }
 
 function numericValue(value: unknown): number | undefined {
@@ -1069,9 +1115,7 @@ function academicGpaSchoolYears(input: CompletionEvaluationInput): string[] {
     ...input.evidences
       .filter((evidence) => evidence.criterion === Criterion.academic)
       .map((evidence) => {
-        const fields = asRecord(
-          evidence.evidenceCard?.normalizedFieldsJson ?? evidence.evidenceCard?.extractedFieldsJson,
-        );
+        const fields = getTrustedEvidenceCardFields(evidence);
         return stringValue(fields.schoolYear ?? fields.academicYear);
       }),
   ];

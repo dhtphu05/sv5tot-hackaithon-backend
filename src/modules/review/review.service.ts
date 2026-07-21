@@ -7,10 +7,10 @@ import {
   FinalStatus,
   Level,
   NotificationType,
+  Prisma,
   ReviewDecision,
   ReviewTaskStatus,
   Role,
-  type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
@@ -715,10 +715,57 @@ export class ReviewService {
             ? input.evidenceDecisions.map((item) => item.evidenceId)
             : evidenceIds;
         const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
+        const supplementDeadline = readSupplementDeadline(input.supplementRequestJson);
+        const dueDate = supplementDeadline ? new Date(supplementDeadline) : null;
         await tx.application.update({
           where: { id: applicationId },
           data: { status: ApplicationStatus.supplement_required },
         });
+        if (dueDate) {
+          await tx.reviewTask.update({
+            where: { id: task.id },
+            data: { dueDate },
+          });
+        }
+        const activeSupplement = await tx.supplementRequest.findFirst({
+          where: { reviewTaskId: task.id, status: 'active' },
+          orderBy: { createdAt: 'desc' },
+        });
+        const supplementData = {
+          workspaceId: task.workspaceId,
+          applicationId,
+          reviewTaskId: task.id,
+          criterion: task.criterion,
+          officialMessage: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
+          requestedFieldsJson: (supplementRequest.requestedFields ?? []) as Prisma.InputJsonValue,
+          evidenceScopeJson: { evidenceIds: selectedEvidenceIds } as Prisma.InputJsonValue,
+          acceptedEvidenceTypesJson:
+            supplementRequest.acceptedEvidenceTypes === undefined
+              ? Prisma.JsonNull
+              : (supplementRequest.acceptedEvidenceTypes as Prisma.InputJsonValue),
+          deadline: dueDate,
+          createdByUserId: user.id,
+          historyJson: [
+            {
+              at: new Date().toISOString(),
+              actorId: user.id,
+              action: activeSupplement ? 'officer_updated_request' : 'officer_created_request',
+            },
+          ] as Prisma.InputJsonValue,
+        };
+        const savedSupplement = activeSupplement
+          ? await tx.supplementRequest.update({
+              where: { id: activeSupplement.id },
+              data: {
+                ...supplementData,
+                historyJson: appendSupplementHistory(activeSupplement.historyJson, {
+                  at: new Date().toISOString(),
+                  actorId: user.id,
+                  action: 'officer_updated_request',
+                }),
+              },
+            })
+          : await tx.supplementRequest.create({ data: supplementData });
         const notification = await this.notificationsService.create(
           {
             userId: application.studentId,
@@ -771,6 +818,23 @@ export class ReviewService {
           },
           tx,
         );
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: auditActions.SUPPLEMENT_REQUESTED,
+          targetType: 'supplement_request',
+          targetId: savedSupplement.id,
+          applicationId,
+          workspaceId: task.workspaceId,
+          afterStateJson: {
+            reviewTaskId: task.id,
+            criterion: task.criterion,
+            evidenceIds: selectedEvidenceIds,
+            requestedFields: supplementRequest.requestedFields ?? [],
+            deadline: supplementDeadline,
+          },
+          note: officerNote,
+        });
       }
 
       if (effectiveDecision === ReviewDecision.resolution_needed) {
@@ -1029,13 +1093,6 @@ export class ReviewService {
         requestedFields: input.requestedFields ?? [],
       },
     });
-
-    if (input.deadline) {
-      await prisma.reviewTask.update({
-        where: { id: taskId },
-        data: { dueDate: new Date(input.deadline) },
-      });
-    }
 
     await createApplicationAudit(prisma, {
       actorId: user.id,
@@ -2257,4 +2314,9 @@ function isActionablePriorityTask(
 ) {
   if (isFinalReviewTaskStatus(item.status)) return false;
   return Boolean(item.priorityReason || item.permissions.canAct || item.permissions.canClaim);
+}
+
+function appendSupplementHistory(history: Prisma.JsonValue | null, item: Record<string, unknown>) {
+  const current = Array.isArray(history) ? history : [];
+  return [...current, item] as Prisma.InputJsonValue;
 }

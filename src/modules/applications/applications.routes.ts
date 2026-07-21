@@ -14,6 +14,10 @@ import {
   updateApplicationTargetLevel,
 } from './applications.controller';
 import {
+  getCurrentAssistantContext,
+  streamCurrentAssistantNarrative,
+} from './student-assistant/student-assistant.controller';
+import {
   addAcademicAchievement,
   addEthicsAchievement,
   addIntegrationPathResponse,
@@ -31,6 +35,7 @@ import {
 } from '../criteria-completion/criteria-completion.controller';
 import {
   autosaveDraftSchema,
+  assistantContextStreamQuerySchema,
   getCurrentApplicationQuerySchema,
   reopenSupplementSchema,
   startApplicationSchema,
@@ -62,6 +67,20 @@ applicationsRouter.get(
   requireRole(Role.student),
   validate({ query: getCurrentApplicationQuerySchema }),
   asyncHandler(getCurrentApplication),
+);
+applicationsRouter.get(
+  '/current/assistant-context',
+  requireAuth,
+  requireRole(Role.student),
+  validate({ query: getCurrentApplicationQuerySchema }),
+  asyncHandler(getCurrentAssistantContext),
+);
+applicationsRouter.get(
+  '/current/assistant-context/stream',
+  requireAuth,
+  requireRole(Role.student),
+  validate({ query: assistantContextStreamQuerySchema }),
+  asyncHandler(streamCurrentAssistantNarrative),
 );
 applicationsRouter.post(
   '/current/start',
