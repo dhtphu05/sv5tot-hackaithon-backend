@@ -1010,6 +1010,81 @@ This section reflects the hardening pass for "Kho minh chứng / Kho sự kiện
   - Workspace code lookup showed the DDK school workspace code is `DHBK-DHDN`.
   - Dry-run for `--code=DHBK-DHDN` scanned 91 accepted evidence rows, found 91 candidates, 0 existing precedents, 0 missing approval source, 0 missing actor, and wrote 0 rows because `--apply` was not used.
 
+## Ethics Violation Reviewer-Owned Verification On 2026-07-20
+
+- Business decision implemented: `ethics.no_violation` remains in the requirement tree but is now reviewer-owned, not school-owned or student-owned.
+- No Prisma schema or migration was required. The canonical requirement DTO now supports additive optional metadata:
+  - `responsibility?: "student" | "system" | "reviewer" | "committee"`;
+  - `blocksSubmission?: boolean`;
+  - `verificationStage?: "draft" | "precheck" | "review" | "resolution"`.
+- Requirement parsing preserves this metadata from explicit criteria config when present. Existing Ethics criteria versions without ownership metadata are normalized so:
+  - `conduct_score` is student-owned, `blocksSubmission=true`, `verificationStage="draft"`;
+  - `no_violation` is reviewer-owned, `blocksSubmission=false`, `verificationStage="review"`;
+  - old/dead-end `wait_system_confirmation` next actions are replaced with reviewer verification wording.
+- Completion logic no longer treats unresolved non-blocking reviewer/committee requirements as missing student work or pending student verification. A verified conduct score can make Ethics `ready_for_precheck` while `no_violation` remains `not_started` for review-stage human verification.
+- Precheck now filters non-blocking reviewer/committee requirements out of `missingRequirements`, `needsVerification`, global `missingItems`, and student next action generation. Submit gate behavior follows from precheck and no longer blocks on missing `no_violation`.
+- A reviewer/officer decision can still verify or reject `no_violation` through the existing staff-only requirement response flow. Student self-verification remains forbidden.
+- No roles, workspaces, auth models, route names, school APIs, upload/OCR/event/supplement/resolution/finalization behavior, or workspace isolation rules were changed.
+- Verification:
+  - `npx prisma validate`: passed.
+  - `npx prisma generate`: initially failed with Windows `EPERM` because running backend `tsx watch` processes held Prisma's query engine DLL; after stopping backend watcher processes, passed.
+  - `npm run build`: passed.
+  - `npm run lint`: passed with pre-existing warnings outside this change (`any` in seed/knowledge-base/review-task-detail files).
+  - `npx vitest run tests/unit/criteria-completion.test.ts tests/unit/precheck-completion.test.ts`: passed, 2 files and 50 tests.
+
+## Evidence Knowledge UI Refactor Lock Audit On 2026-07-20
+
+- Documentation-only UI refactor lock was added at `D:\02_PROJECTS\5TOT\docs\evidence-knowledge\EVIDENCE_KNOWLEDGE_UI_REFACTOR_LOCK.md`; no runtime API, service, schema, migration, route, or component code was changed in this audit.
+- The root design contract file `D:\02_PROJECTS\5TOT\docs\ui-v2\MANDATORY_DESIGN_SYSTEM_AND_LAYOUT_CONTRACT.md` still contains only the earlier blocking placeholder rather than the complete upstream mandatory design contract.
+- Current student reference API facts verified from source:
+  - `GET /api/evidence-matching/library` is implemented in `src/modules/evidence-matching/evidence-matching.routes.ts`, `evidence-matching.controller.ts`, `evidence-matching.service.ts`, `evidence-matching.validation.ts`, and `evidence-matching.dto.ts`.
+  - The endpoint requires auth, student role, `applicationId`, same workspace, and application ownership.
+  - It reads `EventRegistry` rows with `status = active` and `rosterIndexed = true`; it does not read `ApprovedEvidencePrecedent` rows for the student reference projection.
+  - `projection=reference` currently returns `StudentReferenceEventLibraryItemDto` with only `eventId` and `title`.
+  - Full official-library projection returns `eventId`, `title`, `organizer`, `organizerLevel`, `criterion`, and `state`.
+  - Library ranking already has normalized text, abbreviation expansion, acronym scoring, token overlap, fuzzy scoring, and dedupe by normalized title.
+- Current officer knowledge API facts verified from source:
+  - `src/app.ts` mounts `src/modules/evidence-knowledge/evidence-knowledge.routes.ts` at `/api/evidence-knowledge`.
+  - `GET /api/evidence-knowledge/officer/search` and `GET /api/evidence-knowledge/officer/events/:eventId` require role `officer`, `manager`, `committee`, or `admin`.
+  - `src/modules/evidence-knowledge/evidence-knowledge.permissions.ts` enforces same-workspace access for non-admin users and active officer specialization for officers.
+  - `src/modules/evidence-knowledge/evidence-knowledge.service.ts` groups search results by `eventId` and currently sets `acceptedCount` to `records.length`, which is raw approved-precedent row count rather than distinct approved applications/students.
+  - `src/modules/evidence-knowledge/evidence-knowledge.dto.ts` currently exposes officer search fields `eventId`, `canonicalTitle`, `aliases`, `criterion`, `organizer`, `year`, `applicableLevel`, `acceptedCount`, `approvalSources`, `hasResolutionPrecedent`, and `matchReasons`.
+  - Officer detail currently exposes canonical metadata, aliases, resolution precedent metadata, accepted evidence, preview file metadata, OCR metadata, criteria version, approval source, audit summary, and created date, but no explicit canonical-vs-extracted conflict list.
+- Current review/Resolution precedent API facts verified from source:
+  - `src/modules/review/review.validation.ts` accepts optional `precedentEventId`, `precedentEvidenceId`, and `precedentId` on decision; escalation accepts `precedentGuardViewed`, `precedentGuardReason`, and `precedentId`.
+  - `src/modules/review/review.service.ts` validates precedent usability, audits accept-with-precedent metadata, publishes officer-accepted evidence through `EvidenceKnowledgePublisher`, and audits Resolution guard metadata.
+  - `src/modules/resolution/resolution.service.ts` publishes Resolution-accepted evidence through `EvidenceKnowledgePublisher`.
+- UI refactor is locked as not ready because the current backend contract lacks student-safe `criterion` plus distinct `approvedUsageCount`, Add Evidence autocomplete suggestion DTOs, and explicit canonical-vs-extracted conflict DTOs.
+
+## Evidence Knowledge UX Support Implementation On 2026-07-20
+
+- Student reference library support was extended additively in `src/modules/evidence-matching`:
+  - `StudentReferenceEventLibraryItemDto` now returns safe fields `eventId`, `title`, `criterion`, and `approvedUsageCount`.
+  - `projection=reference` still requires student role, `applicationId`, same workspace, and application ownership.
+  - `approvedUsageCount` counts distinct approved applications/students from active `ApprovedEvidencePrecedent` rows and falls back to 0 if the Evidence Knowledge schema is unavailable.
+  - No evidence file, OCR, reviewer, audit, Resolution, confidence, or approval-source fields are exposed to the student projection.
+- Student Smart Search ranking was strengthened without creating a duplicate event domain:
+  - existing Event Registry rows remain the source;
+  - normalized no-accent matching now also searches safe title variants such as `tình nguyện hè` <-> `mùa hè xanh` / `chiến dịch mùa hè xanh`;
+  - existing alias/acronym/fuzzy helpers now resolve `Mùa hè xanh 2025`, `mua he xanh 2025`, `MHX 2025`, `CD MHX`, and typo `mua he xnah` to the same reference event in the configured data.
+- Officer Evidence Knowledge counts were aligned with the UI contract:
+  - `src/modules/evidence-knowledge/evidence-knowledge.repository.ts` includes source application/student identifiers for accepted precedents.
+  - `src/modules/evidence-knowledge/evidence-knowledge.service.ts` reports `acceptedCount` as distinct approved application/student usage, with fallback row count for older mocks.
+- Real API verification against `http://127.0.0.1:8080`:
+  - student `GET /api/evidence-matching/library?projection=reference&applicationId=<current>&search=MHX%202025&limit=5` returned fields `approvedUsageCount,criterion,eventId,title` only.
+  - student internal-field scan over returned field names was false for OCR/file/reviewer/Resolution/confidence/approval internals.
+  - all five required student queries resolved to `Chương trình Tình nguyện Hè 2025`.
+  - officer physical search/detail with existing seed returned one accepted precedent and detail fields including protected preview metadata, OCR metadata, approval source, criteria version, and audit summary.
+- Verification:
+  - `npx prisma validate`: passed.
+  - `npx vitest run tests/unit/evidence-knowledge.service.test.ts tests/unit/evidence-matching.service.test.ts`: passed, 2 files and 17 tests.
+  - `npx vitest run tests/unit/evidence-matching.service.test.ts`: passed after the search-variant fix, 11 tests.
+  - Scoped backend ESLint for touched Evidence Matching/Knowledge files and tests: passed.
+  - `npm run build`: passed.
+- No Prisma schema, migration, existing submission/review/supplement/Resolution/finalization rule, or existing API response shape was destructively changed. Additive fields were added only to the student reference projection needed by the UI refactor.
+- Remaining verification limit:
+  - Full accept-with-precedent and pre-resolution mutation E2E was not run against the configured database because it would mutate real review data and no disposable matching fixture was available.
+
 ## Login Dashboard Readiness Patch On 2026-07-21
 
 - `src/modules/precheck/precheck.routes.ts` now exposes `GET /api/applications/current/precheck/latest` before the dynamic `/api/applications/:id/precheck/latest` route, so Express no longer treats the literal `current` segment as a UUID application id.

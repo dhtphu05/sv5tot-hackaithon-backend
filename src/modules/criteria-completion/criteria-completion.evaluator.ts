@@ -42,18 +42,19 @@ export function evaluateCriterionCompletion(
   );
   const rejected = requiredGroups.reduce((total, group) => total + groupRejectedCount(group), 0);
   const groupResults = requiredGroups.map(isGroupSatisfied);
+  const allGroupsSatisfied = groupResults.length > 0 && groupResults.every(Boolean);
   const hasAnyData = groups.some((group) =>
     group.requirements.some((requirement) =>
       requirement.currentResponses.some((response) => response.status !== 'superseded'),
     ),
   );
-  const pendingRequirement = findPendingRequirement(requiredGroups);
+  const pendingRequirement = allGroupsSatisfied ? undefined : findPendingRequirement(requiredGroups);
 
   const status = overlayReviewStatus(
     input.reviewStatus,
     deriveCriterionStatus({
       hasAnyData,
-      allGroupsSatisfied: groupResults.length > 0 && groupResults.every(Boolean),
+      allGroupsSatisfied,
       needsVerification,
       rejected,
     }),
@@ -107,6 +108,7 @@ function buildVolunteerNextAction(
       route: '/app/application',
     };
   }
+  if (!pendingRequirement) return null;
   const aggregationRequirements = groups.flatMap((group) =>
     group.requirements.filter((requirement) => requirement.type === 'activity_aggregation'),
   );
@@ -169,7 +171,12 @@ function buildIntegrationNextAction(
   const requirements = groups.flatMap((group) => group.requirements);
   const foreignLanguage = requirements.find((requirement) => requirement.key === 'foreign_language');
   const languagePayload = asRecord(getFirstActiveResponse(foreignLanguage)?.payloadJson);
-  if (foreignLanguage && getFirstActiveResponse(foreignLanguage) && !stringValue(languagePayload.issuedDate)) {
+  if (
+    pendingRequirement?.key === 'foreign_language' &&
+    foreignLanguage &&
+    getFirstActiveResponse(foreignLanguage) &&
+    !stringValue(languagePayload.issuedDate)
+  ) {
     return {
       type: 'complete_certificate_issue_date',
       label: 'Bổ sung ngày cấp chứng chỉ',
@@ -698,21 +705,22 @@ function isGroupSatisfied(group: RequirementGroupDto): boolean {
 function findPendingRequirement(groups: RequirementGroupDto[]): RequirementDto | undefined {
   for (const group of groups) {
     const requirements = group.requirements.filter((requirement) => !requirement.optional);
+    const studentRequirements = requirements.filter(isStudentActionableRequirement);
     if (group.operator === 'one_of') {
       const pending =
-        requirements.find((requirement) => requirement.status === 'needs_verification') ??
-        requirements.find((requirement) => requirement.status === 'declared');
+        studentRequirements.find((requirement) => requirement.status === 'needs_verification') ??
+        studentRequirements.find((requirement) => requirement.status === 'declared');
       if (pending) return pending;
       if (requirements.some(isRequirementSatisfied)) continue;
-      const missing = requirements.find((requirement) => !isRequirementSatisfied(requirement));
+      const missing = studentRequirements.find((requirement) => !isRequirementSatisfied(requirement));
       if (missing) return missing;
       continue;
     }
-    const missing = requirements.find((requirement) => !isRequirementSatisfied(requirement));
+    const missing = studentRequirements.find((requirement) => !isRequirementSatisfied(requirement));
     if (missing) return missing;
     const pending =
-      requirements.find((requirement) => requirement.status === 'needs_verification') ??
-      requirements.find((requirement) => requirement.status === 'declared');
+      studentRequirements.find((requirement) => requirement.status === 'needs_verification') ??
+      studentRequirements.find((requirement) => requirement.status === 'declared');
     if (pending) return pending;
   }
   return undefined;
@@ -720,9 +728,10 @@ function findPendingRequirement(groups: RequirementGroupDto[]): RequirementDto |
 
 function groupNeedsVerification(group: RequirementGroupDto): number {
   const requirements = group.requirements.filter((requirement) => !requirement.optional);
+  const studentRequirements = requirements.filter(isStudentActionableRequirement);
   if (group.operator === 'one_of') {
     if (requirements.some((requirement) => requirement.status === 'verified')) return 0;
-    return requirements.some(
+    return studentRequirements.some(
       (requirement) =>
         requirement.status === 'declared' || requirement.status === 'needs_verification',
     )
@@ -730,7 +739,7 @@ function groupNeedsVerification(group: RequirementGroupDto): number {
       : 0;
   }
   if (group.operator === 'at_least_n' && isGroupSatisfied(group)) return 0;
-  return requirements.filter(
+  return studentRequirements.filter(
     (requirement) =>
       requirement.status === 'declared' || requirement.status === 'needs_verification',
   ).length;
@@ -748,11 +757,17 @@ function groupRejectedCount(group: RequirementGroupDto): number {
 
 function isRequirementSatisfied(requirement: RequirementDto): boolean {
   if (requirement.optional) return true;
+  if (isNonBlockingReviewerVerification(requirement)) {
+    return requirement.status !== 'rejected';
+  }
   if (requirement.type === 'activity_aggregation') {
     const requiredValue = requirement.config?.requiredValue ?? requirement.config?.threshold;
     if (typeof requiredValue !== 'number') return requirement.currentResponses.length > 0;
+    const aggregateTotal =
+      (requirement.aggregation?.verifiedTotal ?? aggregateResponseValue(requirement)) +
+      (requirement.aggregation?.pendingVerificationTotal ?? 0);
     return compare(
-      requirement.aggregation?.verifiedTotal ?? aggregateResponseValue(requirement),
+      aggregateTotal,
       requirement.config?.operator ?? '>=',
       requiredValue,
     );
@@ -761,6 +776,17 @@ function isRequirementSatisfied(requirement: RequirementDto): boolean {
     requirement.status === 'verified' ||
     requirement.status === 'declared' ||
     requirement.status === 'needs_verification'
+  );
+}
+
+function isStudentActionableRequirement(requirement: RequirementDto): boolean {
+  return !isNonBlockingReviewerVerification(requirement);
+}
+
+function isNonBlockingReviewerVerification(requirement: RequirementDto): boolean {
+  return (
+    requirement.blocksSubmission === false &&
+    (requirement.responsibility === 'reviewer' || requirement.responsibility === 'committee')
   );
 }
 
@@ -782,9 +808,9 @@ function deriveCriterionStatus(input: {
 }): CriterionCompletionStatus {
   if (input.rejected > 0) return 'precheck_warning';
   if (!input.hasAnyData) return 'not_started';
+  if (input.allGroupsSatisfied) return 'ready_for_precheck';
   if (input.needsVerification > 0) return 'needs_verification';
-  if (!input.allGroupsSatisfied) return 'in_progress';
-  return 'ready_for_precheck';
+  return 'in_progress';
 }
 
 function overlayReviewStatus(

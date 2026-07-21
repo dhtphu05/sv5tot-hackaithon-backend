@@ -41,6 +41,7 @@ type ReviewTaskPermissionReason =
   | 'committee_resolution_view'
   | 'assigned_to_you'
   | 'claimable_by_specialization'
+  | 'demo_specialization_access'
   | 'assigned_to_other'
   | 'finalized'
   | 'out_of_scope'
@@ -529,6 +530,7 @@ export class ReviewService {
     const task = await this.getTask(taskId);
     await this.assertTaskAccess(user, task, true);
     const officerNote = input.officerNote ?? input.note;
+    const effectiveDecision = getEffectiveTaskDecision(input.decision, input.evidenceDecisions);
 
     if (task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected) {
       if (user.role !== Role.manager && user.role !== Role.admin) {
@@ -541,9 +543,9 @@ export class ReviewService {
     }
 
     if (
-      (input.decision === ReviewDecision.rejected ||
-        input.decision === ReviewDecision.supplement_required ||
-        input.decision === ReviewDecision.resolution_needed) &&
+      (effectiveDecision === ReviewDecision.rejected ||
+        effectiveDecision === ReviewDecision.supplement_required ||
+        effectiveDecision === ReviewDecision.resolution_needed) &&
       !officerNote
     ) {
       throw new AppError(
@@ -553,8 +555,8 @@ export class ReviewService {
       );
     }
     if (
-      (input.decision === ReviewDecision.rejected ||
-        input.decision === ReviewDecision.resolution_needed) &&
+      (effectiveDecision === ReviewDecision.rejected ||
+        effectiveDecision === ReviewDecision.resolution_needed) &&
       (officerNote?.trim().length ?? 0) < 10
     ) {
       throw new AppError(
@@ -563,7 +565,7 @@ export class ReviewService {
         'Decision note must be at least 10 characters',
       );
     }
-    if (input.decision === ReviewDecision.accepted && !input.officerSuggestedLevel) {
+    if (effectiveDecision === ReviewDecision.accepted && !input.officerSuggestedLevel) {
       throw new AppError(
         400,
         ErrorCodes.VALIDATION_ERROR,
@@ -611,7 +613,7 @@ export class ReviewService {
     const applicationId = task.applicationId;
     const application = task.application;
     const precedentContext =
-      input.decision === ReviewDecision.accepted
+      effectiveDecision === ReviewDecision.accepted
         ? await this.evidenceKnowledgeService.assertPrecedentUsableByOfficer(
             user,
             {
@@ -624,12 +626,12 @@ export class ReviewService {
         : null;
 
     const result = await prisma.$transaction(async (tx) => {
-      const status = mapDecisionToStatus(input.decision);
+      const status = mapDecisionToStatus(effectiveDecision);
       const saved = await tx.reviewTask.update({
         where: { id: task.id },
         data: {
           status,
-          decision: input.decision,
+          decision: effectiveDecision,
           officerNote,
           officerSuggestedLevel: input.officerSuggestedLevel ?? null,
           levelAssessmentJson: {
@@ -639,7 +641,7 @@ export class ReviewService {
           } as Prisma.InputJsonValue,
           decisionReason: officerNote,
           supplementRequestJson:
-            input.decision === ReviewDecision.supplement_required
+            effectiveDecision === ReviewDecision.supplement_required
               ? ((input.supplementRequestJson ?? { note: officerNote }) as Prisma.InputJsonValue)
               : undefined,
         },
@@ -657,13 +659,13 @@ export class ReviewService {
         }
       } else {
         let defaultEvidenceStatus: EvidenceStatus = EvidenceStatus.under_review;
-        if (input.decision === ReviewDecision.accepted)
+        if (effectiveDecision === ReviewDecision.accepted)
           defaultEvidenceStatus = EvidenceStatus.accepted;
-        if (input.decision === ReviewDecision.rejected)
+        if (effectiveDecision === ReviewDecision.rejected)
           defaultEvidenceStatus = EvidenceStatus.rejected;
-        if (input.decision === ReviewDecision.supplement_required)
+        if (effectiveDecision === ReviewDecision.supplement_required)
           defaultEvidenceStatus = EvidenceStatus.needs_supplement;
-        if (input.decision === ReviewDecision.resolution_needed)
+        if (effectiveDecision === ReviewDecision.resolution_needed)
           defaultEvidenceStatus = EvidenceStatus.resolution_needed;
 
         await tx.evidence.updateMany({
@@ -680,10 +682,13 @@ export class ReviewService {
         targetType: 'review_task',
         targetId: task.id,
         applicationId,
-        afterStateJson: { decision: input.decision },
+        afterStateJson: {
+          decision: effectiveDecision,
+          requestedDecision: input.decision,
+        },
       });
 
-      if (input.decision === ReviewDecision.accepted) {
+      if (effectiveDecision === ReviewDecision.accepted) {
         const acceptedEvidenceIds = input.evidenceDecisions.length
           ? input.evidenceDecisions
               .filter((item) => item.status === EvidenceStatus.accepted)
@@ -699,11 +704,16 @@ export class ReviewService {
         }
       }
 
-      if (input.decision === ReviewDecision.supplement_required) {
+      if (effectiveDecision === ReviewDecision.supplement_required) {
         const supplementRequest = (input.supplementRequestJson ?? {}) as Record<string, unknown>;
-        const selectedEvidenceIds = input.evidenceDecisions.length
-          ? input.evidenceDecisions.map((item) => item.evidenceId)
-          : evidenceIds;
+        const supplementEvidenceIds = input.evidenceDecisions
+          .filter((item) => item.status === EvidenceStatus.needs_supplement)
+          .map((item) => item.evidenceId);
+        const selectedEvidenceIds = supplementEvidenceIds.length
+          ? supplementEvidenceIds
+          : input.evidenceDecisions.length
+            ? input.evidenceDecisions.map((item) => item.evidenceId)
+            : evidenceIds;
         const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
         const supplementDeadline = readSupplementDeadline(input.supplementRequestJson);
         const dueDate = supplementDeadline ? new Date(supplementDeadline) : null;
@@ -827,10 +837,15 @@ export class ReviewService {
         });
       }
 
-      if (input.decision === ReviewDecision.resolution_needed) {
-        const selectedEvidenceIds = input.evidenceDecisions.length
-          ? input.evidenceDecisions.map((item) => item.evidenceId)
-          : evidenceIds;
+      if (effectiveDecision === ReviewDecision.resolution_needed) {
+        const resolutionEvidenceIds = input.evidenceDecisions
+          .filter((item) => item.status === EvidenceStatus.resolution_needed)
+          .map((item) => item.evidenceId);
+        const selectedEvidenceIds = resolutionEvidenceIds.length
+          ? resolutionEvidenceIds
+          : input.evidenceDecisions.length
+            ? input.evidenceDecisions.map((item) => item.evidenceId)
+            : evidenceIds;
         const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
         await tx.application.update({
           where: { id: applicationId },
@@ -938,10 +953,10 @@ export class ReviewService {
       });
 
       let auditActionName = 'REVIEW_DECISION_ACCEPTED';
-      if (input.decision === ReviewDecision.rejected) auditActionName = 'REVIEW_DECISION_REJECTED';
-      if (input.decision === ReviewDecision.supplement_required)
+      if (effectiveDecision === ReviewDecision.rejected) auditActionName = 'REVIEW_DECISION_REJECTED';
+      if (effectiveDecision === ReviewDecision.supplement_required)
         auditActionName = 'REVIEW_SUPPLEMENT_REQUESTED';
-      if (input.decision === ReviewDecision.resolution_needed)
+      if (effectiveDecision === ReviewDecision.resolution_needed)
         auditActionName = 'REVIEW_ESCALATED_TO_RESOLUTION';
 
       await createApplicationAudit(tx, {
@@ -953,7 +968,8 @@ export class ReviewService {
         applicationId,
         afterStateJson: {
           status,
-          decision: input.decision,
+          decision: effectiveDecision,
+          requestedDecision: input.decision,
           officerSuggestedLevel: input.officerSuggestedLevel ?? null,
           evidenceAssessments: input.evidenceAssessments,
         },
@@ -969,7 +985,8 @@ export class ReviewService {
           targetId: task.id,
           applicationId,
           afterStateJson: {
-            decision: input.decision,
+            decision: effectiveDecision,
+            requestedDecision: input.decision,
             precedentId: precedentContext.precedentId,
             precedentEventId: precedentContext.precedentEventId,
             precedentEvidenceId: precedentContext.precedentEvidenceId,
@@ -979,18 +996,18 @@ export class ReviewService {
       }
 
       if (
-        input.decision !== ReviewDecision.supplement_required &&
-        input.decision !== ReviewDecision.resolution_needed
+        effectiveDecision !== ReviewDecision.supplement_required &&
+        effectiveDecision !== ReviewDecision.resolution_needed
       ) {
         const notification = await this.notificationsService.create(
           {
             userId: application.studentId,
             applicationId,
             reviewTaskId: task.id,
-            metadata: { criterion: task.criterion, decision: input.decision },
+            metadata: { criterion: task.criterion, decision: effectiveDecision },
             type: NotificationType.review_updated,
             title: 'Đánh giá hồ sơ đã cập nhật',
-            message: `Tiêu chí ${task.criterion} đã được đánh giá: ${input.decision}.`,
+            message: `Tiêu chí ${task.criterion} đã được đánh giá: ${effectiveDecision}.`,
           },
           tx,
         );
@@ -1018,7 +1035,7 @@ export class ReviewService {
                 applicationId,
                 reviewTaskId: task.id,
                 status: ApplicationStatus.rejected,
-                decision: input.decision,
+                decision: effectiveDecision,
               }),
               actorId: user.id,
               actorRole: user.role,
@@ -1036,9 +1053,9 @@ export class ReviewService {
       application: {
         id: applicationId,
         status:
-          input.decision === ReviewDecision.supplement_required
+          effectiveDecision === ReviewDecision.supplement_required
             ? ApplicationStatus.supplement_required
-            : input.decision === ReviewDecision.resolution_needed
+            : effectiveDecision === ReviewDecision.resolution_needed
               ? ApplicationStatus.resolution_needed
               : (result.applicationOutcome?.status ?? application.status),
         finalStatus: result.applicationOutcome?.finalStatus ?? application.finalStatus,
@@ -1278,6 +1295,16 @@ export class ReviewService {
     }
 
     if (task.assignedOfficerId && specialized) {
+      if (isDemoOfficerReviewAccount(user)) {
+        return buildTaskPermissions({
+          canView: true,
+          canAct: !final,
+          canClaim: false,
+          canRequestSupport: false,
+          reason: final ? 'finalized' : 'demo_specialization_access',
+        });
+      }
+
       return buildTaskPermissions({
         canView: true,
         canAct: false,
@@ -1628,6 +1655,19 @@ function mapDecisionToStatus(decision: ReviewDecision): ReviewTaskStatus {
   return ReviewTaskStatus.resolution_needed;
 }
 
+function getEffectiveTaskDecision(
+  decision: ReviewDecision,
+  evidenceDecisions: TaskDecisionInput['evidenceDecisions'],
+): ReviewDecision {
+  if (evidenceDecisions.some((item) => item.status === EvidenceStatus.resolution_needed)) {
+    return ReviewDecision.resolution_needed;
+  }
+  if (evidenceDecisions.some((item) => item.status === EvidenceStatus.needs_supplement)) {
+    return ReviewDecision.supplement_required;
+  }
+  return decision;
+}
+
 async function syncApplicationReviewOutcome(tx: Prisma.TransactionClient, applicationId: string) {
   const tasks = await tx.reviewTask.findMany({
     where: { applicationId },
@@ -1907,6 +1947,8 @@ function taskPermissionReasonLabel(reason: ReviewTaskPermissionReason) {
     committee_resolution_view: 'Task đang ở trạng thái hội ý, được xem ở chế độ theo dõi.',
     assigned_to_you: 'Task được giao cho bạn.',
     claimable_by_specialization: 'Task chưa phân công và thuộc tiêu chí bạn phụ trách.',
+    demo_specialization_access:
+      'Tài khoản demo có thể xử lý task cùng tiêu chí trong workspace.',
     assigned_to_other: 'Task đã được giao cho cán bộ khác, bạn chỉ được xem.',
     finalized: 'Task đã có kết luận, chỉ được xem lại.',
     out_of_scope: 'Task không thuộc phạm vi phụ trách của bạn.',
@@ -1923,6 +1965,10 @@ function metricForCriterion(criterion: Criterion) {
   if (criterion === 'volunteer') return 'volunteer_days';
   if (criterion === 'integration') return 'foreign_language_score';
   return undefined;
+}
+
+function isDemoOfficerReviewAccount(user: AuthenticatedUser) {
+  return user.role === Role.officer && /^officer\.[^@]+@dut\.udn\.vn$/i.test(user.email);
 }
 
 function buildCriteriaChecklist(

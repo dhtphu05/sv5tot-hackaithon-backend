@@ -326,7 +326,7 @@ describe('criteria completion evaluator', () => {
     expect(result.completion).toMatchObject({ satisfied: 2, required: 2, needsVerification: 0 });
   });
 
-  it('keeps school ethics needs_verification for manual conduct score even when no_violation is verified', () => {
+  it('marks school ethics ready for precheck when manual conduct score is present', () => {
     const result = evaluate({
       criterion: Criterion.ethics,
       groups: ethicsGroups(),
@@ -334,7 +334,7 @@ describe('criteria completion evaluator', () => {
       responses: [explicitResponse('no_violation', RequirementResponseStatus.verified)],
     });
 
-    expect(result.status).toBe('needs_verification');
+    expect(result.status).toBe('ready_for_precheck');
     expect(result.completion).toMatchObject({ satisfied: 2, required: 2, needsVerification: 1 });
   });
 
@@ -362,15 +362,23 @@ describe('criteria completion evaluator', () => {
     expect(result.status).toBe('precheck_warning');
   });
 
-  it('does not complete school ethics when no_violation confirmation is missing', () => {
+  it('keeps reviewer-owned no_violation pending without blocking school ethics submission readiness', () => {
     const result = evaluate({
       criterion: Criterion.ethics,
       groups: ethicsGroups(),
       metrics: [metric(MetricType.conduct_score, 85, VerificationStatus.verified)],
     });
+    const noViolation = findRequirementInResult(result, 'no_violation');
 
-    expect(result.status).toBe('in_progress');
-    expect(result.nextAction?.label).toBe('Chờ nhà trường xác nhận tình trạng vi phạm');
+    expect(result.status).toBe('ready_for_precheck');
+    expect(result.completion).toMatchObject({ satisfied: 2, required: 2, needsVerification: 0 });
+    expect(result.nextAction).toBeNull();
+    expect(noViolation).toMatchObject({
+      status: 'not_started',
+      responsibility: 'reviewer',
+      blocksSubmission: false,
+      verificationStage: 'review',
+    });
   });
 
   it('does not let students verify no_violation', () => {
@@ -436,18 +444,18 @@ describe('criteria completion evaluator', () => {
     });
   });
 
-  it('keeps academic needs_verification when no_f_grade is not confirmed', () => {
+  it('keeps academic ready for precheck when only reviewer no_f_grade confirmation remains', () => {
     const result = evaluate({
       criterion: Criterion.academic,
       groups: academicGroups(),
       metrics: [metric(MetricType.gpa, 3.2, VerificationStatus.verified, 4, '2025-2026')],
     });
 
-    expect(result.status).toBe('needs_verification');
-    expect(result.nextAction?.requirementKey).toBe('no_f_grade');
+    expect(result.status).toBe('ready_for_precheck');
+    expect(result.nextAction).toBeNull();
   });
 
-  it('keeps academic needs_verification when GPA school year is missing or wrong', () => {
+  it('keeps academic ready for precheck when GPA exists but school year needs review', () => {
     const result = evaluate({
       criterion: Criterion.academic,
       groups: academicGroups(),
@@ -458,8 +466,8 @@ describe('criteria completion evaluator', () => {
       schoolYear: '2025-2026',
     });
 
-    expect(result.status).toBe('needs_verification');
-    expect(result.nextAction?.requirementKey).toBe('academic_period_valid');
+    expect(result.status).toBe('ready_for_precheck');
+    expect(result.nextAction).toBeNull();
   });
 
   it('returns precheck_warning when academic GPA is below threshold', () => {
@@ -590,7 +598,7 @@ describe('criteria completion evaluator', () => {
     expect(result.completion).toMatchObject({ satisfied: 1, required: 5, needsVerification: 0 });
   });
 
-  it('keeps physical needs_verification for sports award evidence waiting review', () => {
+  it('marks physical ready for precheck when sports award evidence is waiting review', () => {
     const result = evaluate({
       criterion: Criterion.physical,
       groups: physicalGroups(),
@@ -602,8 +610,8 @@ describe('criteria completion evaluator', () => {
       ],
     });
 
-    expect(result.status).toBe('needs_verification');
-    expect(result.nextAction?.label).toBe('Bổ sung thời gian tham gia giải thể thao');
+    expect(result.status).toBe('ready_for_precheck');
+    expect(result.nextAction).toBeNull();
   });
 
   it('asks for club confirmation when regular sports training is incomplete', () => {
@@ -617,8 +625,8 @@ describe('criteria completion evaluator', () => {
       ],
     });
 
-    expect(result.status).toBe('needs_verification');
-    expect(result.nextAction?.label).toBe('Tải giấy xác nhận CLB');
+    expect(result.status).toBe('ready_for_precheck');
+    expect(result.nextAction).toBeNull();
   });
 
   it('satisfies physical one_of when one of multiple paths is verified', () => {
@@ -729,7 +737,7 @@ describe('criteria completion evaluator', () => {
     });
   });
 
-  it('does not count pending volunteer activity toward verifiedTotal', () => {
+  it('does not count pending volunteer activity toward verifiedTotal but allows precheck submission', () => {
     const result = evaluate({
       criterion: Criterion.volunteer,
       groups: volunteerGroups(),
@@ -744,14 +752,14 @@ describe('criteria completion evaluator', () => {
     });
 
     const days = findRequirementInResult(result, 'accumulated_volunteer_days');
-    expect(result.status).toBe('needs_verification');
+    expect(result.status).toBe('ready_for_precheck');
     expect(days?.aggregation).toMatchObject({
       verifiedTotal: 0,
       pendingVerificationTotal: 2,
     });
   });
 
-  it('keeps legacy volunteer_days metric as needs_verification summary', () => {
+  it('keeps legacy volunteer_days metric as pending summary while allowing precheck submission', () => {
     const result = evaluate({
       criterion: Criterion.volunteer,
       groups: volunteerGroups(),
@@ -759,7 +767,7 @@ describe('criteria completion evaluator', () => {
     });
 
     const days = findRequirementInResult(result, 'accumulated_volunteer_days');
-    expect(result.status).toBe('needs_verification');
+    expect(result.status).toBe('ready_for_precheck');
     expect(days?.aggregation).toMatchObject({
       verifiedTotal: 0,
       pendingVerificationTotal: 3,
@@ -922,7 +930,7 @@ describe('criteria completion evaluator', () => {
     ).toThrow('Volunteer event has already been imported');
   });
 
-  it('keeps needs_verification when response data exists but is not verified', () => {
+  it('marks precheck ready when response data exists but is not verified', () => {
     const groups: RequirementGroupDto[] = [
       {
         key: 'manual',
@@ -948,7 +956,7 @@ describe('criteria completion evaluator', () => {
       responses: [explicitResponse('confirm', RequirementResponseStatus.needs_verification)],
     });
 
-    expect(result.status).toBe('needs_verification');
+    expect(result.status).toBe('ready_for_precheck');
     expect(result.completion.needsVerification).toBe(1);
   });
 
@@ -1061,7 +1069,7 @@ describe('criteria completion evaluator', () => {
     );
   });
 
-  it('keeps unmapped foreign language certificates as needs_verification instead of rejecting', () => {
+  it('keeps unmapped foreign language certificate data for review instead of blocking precheck', () => {
     const result = evaluate({
       criterion: Criterion.integration,
       groups: integrationGroups(),
@@ -1076,7 +1084,7 @@ describe('criteria completion evaluator', () => {
     });
 
     const response = findRequirementInResult(result, 'foreign_language')?.currentResponses[0];
-    expect(result.status).toBe('needs_verification');
+    expect(result.status).toBe('ready_for_precheck');
     expect(response?.status).toBe('needs_verification');
   });
 
@@ -1157,8 +1165,8 @@ describe('criteria completion evaluator', () => {
       ],
     });
 
-    expect(result.status).toBe('needs_verification');
-    expect(result.nextAction?.label).toBe('Bổ sung ngày cấp chứng chỉ');
+    expect(result.status).toBe('ready_for_precheck');
+    expect(result.nextAction).toBeNull();
   });
 
   it('evaluates foreign language thresholds by studyYear when configured', () => {
