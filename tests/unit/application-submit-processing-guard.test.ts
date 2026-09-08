@@ -25,6 +25,7 @@ describe('application submit evidence processing guard', () => {
     expect(
       hasActiveEvidenceProcessing({
         evidences: [
+          { status: EvidenceStatus.pending_indexing, indexingStatus: IndexingStatus.failed },
           { status: EvidenceStatus.indexed, indexingStatus: IndexingStatus.failed },
           { status: EvidenceStatus.needs_supplement, indexingStatus: IndexingStatus.needs_manual_review },
         ],

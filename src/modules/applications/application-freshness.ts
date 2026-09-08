@@ -33,7 +33,8 @@ export function hasActiveEvidenceProcessing(application: ProcessingEvidenceInput
   ]);
   return application.evidences.some(
     (evidence) =>
-      evidence.status === EvidenceStatus.pending_indexing ||
+      (evidence.status === EvidenceStatus.pending_indexing &&
+        activeStatuses.has(evidence.indexingStatus)) ||
       activeStatuses.has(evidence.indexingStatus),
   );
 }
