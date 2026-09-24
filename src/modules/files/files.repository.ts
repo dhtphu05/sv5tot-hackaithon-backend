@@ -45,6 +45,12 @@ export class FilesRepository {
         decisionImports: {
           select: { workspaceId: true },
         },
+        awardDecisionsAsDecisionFile: {
+          select: { issuerWorkspaceId: true },
+        },
+        awardDecisionsAsRosterFile: {
+          select: { issuerWorkspaceId: true },
+        },
         sampleCertificateEvents: {
           select: { workspaceId: true },
         },

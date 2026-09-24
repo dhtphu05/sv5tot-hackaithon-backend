@@ -60,6 +60,8 @@ function eventSourceFile(fileWorkspaceId = workspaceId) {
     eventFiles: [{ event: { workspaceId: fileWorkspaceId } }],
     decisionImports: [],
     sampleCertificateEvents: [],
+    awardDecisionsAsDecisionFile: [],
+    awardDecisionsAsRosterFile: [],
   };
 }
 
@@ -78,6 +80,38 @@ function serviceFor(file: ReturnType<typeof eventSourceFile>) {
 }
 
 describe('FilesService event source signed URLs', () => {
+  it('allows a data uploader to open Award Decision files in their own workspace only', async () => {
+    const file = {
+      ...eventSourceFile(),
+      eventFiles: [],
+      awardDecisionsAsDecisionFile: [{ issuerWorkspaceId: workspaceId }],
+    } as never;
+    const { service, storage } = serviceFor(file);
+    const uploader = user(Role.data_uploader);
+
+    await expect(service.getSignedUrl(uploader, 'file-1')).resolves.toBe(
+      'https://signed.example/file-1',
+    );
+    expect(storage.getSignedReadUrl).toHaveBeenCalledOnce();
+  });
+
+  it('does not grant a data uploader workspace-wide access to unrelated files', async () => {
+    const file = {
+      ...eventSourceFile(),
+      ownerId: 'data_uploader-user',
+      eventFiles: [],
+      awardDecisionsAsDecisionFile: [],
+      awardDecisionsAsRosterFile: [],
+    } as never;
+    const { service, storage } = serviceFor(file);
+    const uploader = user(Role.data_uploader);
+
+    await expect(service.getSignedUrl(uploader, 'file-1')).rejects.toMatchObject({
+      statusCode: 404,
+    });
+    expect(storage.getSignedReadUrl).not.toHaveBeenCalled();
+  });
+
   it('allows officers to open official event source files in their workspace', async () => {
     const { service, storage } = serviceFor(eventSourceFile());
 

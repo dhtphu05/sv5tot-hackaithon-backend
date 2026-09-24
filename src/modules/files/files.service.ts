@@ -31,7 +31,8 @@ export class FilesService {
           : this.canOfficerAccessEventSourceFile(user, file) ||
             (await this.canOfficerAccessEvidenceFile(user, file))
         : false;
-    const canViewAsOwner = file.ownerId === user.id && !isCityOfficerEvidenceFile;
+    const canViewAsOwner =
+      user.role !== Role.data_uploader && file.ownerId === user.id && !isCityOfficerEvidenceFile;
 
     if (!canViewAsOwner && !canViewAll && !canOfficerView) {
       throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
@@ -63,7 +64,8 @@ export class FilesService {
           : this.canOfficerAccessEventSourceFile(user, file) ||
             (await this.canOfficerAccessEvidenceFile(user, file))
         : false;
-    const canViewAsOwner = file.ownerId === user.id && !isCityOfficerEvidenceFile;
+    const canViewAsOwner =
+      user.role !== Role.data_uploader && file.ownerId === user.id && !isCityOfficerEvidenceFile;
 
     if (!canViewAsOwner && !canViewAll && !canOfficerView) {
       throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
@@ -171,6 +173,16 @@ export class FilesService {
       const cityExport =
         file.workspaceId === user.workspaceId && file.filePath.replace(/\\/g, '/').startsWith('exports/');
       return Boolean(schoolEvidence || cityEventFile || cityExport);
+    }
+    if (user.role === Role.data_uploader) {
+      const awardDecisionFiles = [
+        ...(file.awardDecisionsAsDecisionFile ?? []),
+        ...(file.awardDecisionsAsRosterFile ?? []),
+      ];
+      return (
+        this.sameWorkspace(user, file.workspaceId) &&
+        awardDecisionFiles.some(({ issuerWorkspaceId }) => issuerWorkspaceId === user.workspaceId)
+      );
     }
     if (user.role !== Role.manager && user.role !== Role.committee) return false;
     return this.sameWorkspace(user, resolveFileWorkspaceId(file));
