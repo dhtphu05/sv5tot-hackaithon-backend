@@ -32,6 +32,7 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
+import { canStudentAccessCityEvent } from '../event-registry/event-registry.scope';
 import { AuditService } from '../audit/audit.service';
 import { assertApplicationEditable, assertApplicationOwner, createApplicationAudit } from '../applications/application.helpers';
 import { evidenceCardConfirmationStatuses } from '../evidences/evidence-card-confirmation';
@@ -833,19 +834,23 @@ export async function importEventAsEvidence(input: {
   });
   if (!application) throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
   assertSameWorkspace(input.user, application, 'Application not found');
-  const event = await prisma.eventRegistry.findUnique({ where: { id: input.eventId } });
+  const event = await prisma.eventRegistry.findUnique({
+    where: { id: input.eventId },
+    include: { workspace: { select: { type: true, isActive: true } } },
+  });
   if (!event || event.status !== EventStatus.active) {
     throw new AppError(404, ErrorCodes.EVENT_NOT_APPROVED, 'Event is not approved');
   }
-  assertSameWorkspace(input.user, event, 'Event is not approved');
-  if (event.workspaceId !== application.workspaceId) {
+  const isStudent = input.user.role === Role.student || input.user.role === Role.class_representative;
+  const canImportCityEvent = canStudentAccessCityEvent(input.user, event);
+  if (!canImportCityEvent) assertSameWorkspace(input.user, event, 'Event is not approved');
+  if (event.workspaceId !== application.workspaceId && !canImportCityEvent) {
     throw new AppError(404, ErrorCodes.EVENT_OUT_OF_SCOPE, 'Event is out of scope for this application');
   }
   if (event.rosterIndexed === false) {
     throw new AppError(409, ErrorCodes.EVENT_ROSTER_NOT_CONFIRMED, 'Event roster is not confirmed');
   }
 
-  const isStudent = input.user.role === Role.student || input.user.role === Role.class_representative;
   if (isStudent) {
     assertApplicationOwner(application, input.user);
     if (application.status === ApplicationStatus.supplement_required) {
@@ -1063,15 +1068,22 @@ async function resolveParticipantForOfficialImport(input: {
     const participant = await prisma.eventParticipant.findUnique({ where: { id: input.participantId } });
     if (!participant || participant.eventId !== input.eventId) return null;
     if (
-      input.studentName &&
-      normalizeMatchingText(participant.studentName) !== normalizeMatchingText(input.studentName)
+      (input.studentName &&
+        normalizeMatchingText(participant.studentName) !== normalizeMatchingText(input.studentName)) ||
+      (input.studentCode && participant.studentCode !== input.studentCode)
     ) {
       return null;
     }
-    if (!input.studentName && input.studentCode && participant.studentCode !== input.studentCode) {
-      return null;
-    }
     return participant;
+  }
+
+  if (input.studentName && input.studentCode) {
+    const candidates = await prisma.eventParticipant.findMany({ where: { eventId: input.eventId } });
+    return candidates.find(
+      (participant) =>
+        participant.studentCode === input.studentCode &&
+        normalizeMatchingText(participant.studentName) === normalizeMatchingText(input.studentName!),
+    ) ?? null;
   }
 
   if (input.studentName) {

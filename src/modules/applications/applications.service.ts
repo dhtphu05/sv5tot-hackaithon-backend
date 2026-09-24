@@ -10,6 +10,7 @@ import {
   Prisma,
   Role,
   ReviewTaskStatus,
+  WorkspaceType,
   type Application,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
@@ -19,6 +20,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { normalizeSchoolYear } from '../../shared/utils/school-year';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
+import { assertReviewWorkspaceAccess } from '../../shared/utils/review-workspace-scope';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrecheckService } from '../precheck/precheck.service';
 import { ReviewAssignmentService } from '../review/review-assignment.service';
@@ -534,11 +536,30 @@ export class ApplicationsService {
     applicationId: string,
     input: ReopenSupplementInput,
   ) {
-    if (user.role !== Role.manager && user.role !== Role.admin) {
+    if (
+      user.role !== Role.manager &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.admin
+    ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager or admin can reopen supplement');
     }
 
-    const application = await this.getRequiredBareApplication(user, applicationId);
+    const application = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: { workspace: { select: { type: true, isActive: true } } },
+    });
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: application.workspaceId,
+        workspaceType: application.workspace.type as WorkspaceType,
+        workspaceIsActive: application.workspace.isActive,
+      },
+      'Application not found',
+    );
 
     await prisma.$transaction(async (tx) => {
       await tx.application.update({

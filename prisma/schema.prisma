@@ -14,6 +14,16 @@ enum Role {
   manager
   committee
   admin
+  data_uploader
+  city_officer
+  city_manager
+  city_committee
+}
+
+enum WorkspaceType {
+  CITY
+  UNIVERSITY_SYSTEM
+  SCHOOL
 }
 
 enum Criterion {
@@ -282,12 +292,16 @@ enum CollectiveStatus {
 model Workspace {
   id                         String                           @id @default(uuid()) @db.Uuid
   code                       String                           @unique
+  type                       WorkspaceType                    @default(SCHOOL)
+  parentWorkspaceId          String?                          @db.Uuid
   name                       String
   shortName                  String?
   isActive                   Boolean                          @default(true)
   registrationEnabled        Boolean                          @default(false)
   createdAt                  DateTime                         @default(now())
   updatedAt                  DateTime                         @updatedAt
+  parentWorkspace            Workspace?                       @relation("WorkspaceHierarchy", fields: [parentWorkspaceId], references: [id], onDelete: SetNull)
+  childWorkspaces             Workspace[]                      @relation("WorkspaceHierarchy")
   users                      User[]
   applications               Application[]
   requirementResponses       ApplicationRequirementResponse[]
@@ -312,6 +326,8 @@ model Workspace {
   supplementRequests         SupplementRequest[]
 
   @@index([isActive, registrationEnabled])
+  @@index([type, isActive])
+  @@index([parentWorkspaceId])
 }
 
 model User {

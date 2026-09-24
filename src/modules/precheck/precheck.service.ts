@@ -579,7 +579,9 @@ export function buildRuleContext(
 }
 
 export function assertPrecheckAccess(
-  application: Application & { student: User },
+  application: Pick<Application, 'workspaceId' | 'studentId'> & {
+    student: Pick<User, 'faculty'>;
+  },
   user: AuthenticatedUser,
   viewOnly: boolean,
 ): void {

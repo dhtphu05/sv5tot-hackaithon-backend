@@ -12,7 +12,7 @@ export const auditRouter = Router();
 auditRouter.get(
   '/logs',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: listAuditLogsQuerySchema }),
   asyncHandler(listAuditLogs),
 );

@@ -1,4 +1,4 @@
-import { Criterion, Level, Prisma, Role } from '@prisma/client';
+import { Criterion, Level, Prisma, Role, WorkspaceType } from '@prisma/client';
 import { env } from '../src/config/env';
 import { logger } from '../src/config/logger';
 import { prisma } from '../src/infrastructure/database/prisma';
@@ -8,6 +8,8 @@ import { defaultCriteriaUnitScope, fallbackRulesByLevel } from '../src/modules/r
 const passwordService = new PasswordService();
 const defaultWorkspaceCode = 'DHBK-DHDN';
 const economicsWorkspaceCode = 'DHKTE-DHDN';
+const cityWorkspaceCode = 'DANANG_CITY';
+const universityWorkspaceCode = 'UDN';
 const economicsTrialCriteriaVersionName =
   'Bộ tiêu chí thử nghiệm - không sử dụng cho xét duyệt chính thức';
 
@@ -199,6 +201,33 @@ const economicsDemoUsers: SeedUser[] = [
   },
 ];
 
+const cityDemoUsers: SeedUser[] = [
+  {
+    email: 'officer@danang.city',
+    role: Role.city_officer,
+    fullName: 'Cán bộ xét duyệt cấp thành phố',
+    specializations: [Criterion.academic, Criterion.ethics, Criterion.volunteer],
+  },
+  {
+    email: 'manager@danang.city',
+    role: Role.city_manager,
+    fullName: 'Quản lý cấp thành phố',
+  },
+  {
+    email: 'committee@danang.city',
+    role: Role.city_committee,
+    fullName: 'Hội đồng cấp thành phố',
+  },
+];
+
+const universityDemoUsers: SeedUser[] = [
+  {
+    email: 'uploader@udn.vn',
+    role: Role.data_uploader,
+    fullName: 'Cán bộ tải dữ liệu Đại học Đà Nẵng',
+  },
+];
+
 const criteriaRules = Object.entries(fallbackRulesByLevel).flatMap(([level, rules]) =>
   rules.map((rule) => ({ level: level as Level, ...rule })),
 );
@@ -206,16 +235,65 @@ const criteriaRules = Object.entries(fallbackRulesByLevel).flatMap(([level, rule
 async function seedWorkspaces() {
   const workspaces = new Map<string, Awaited<ReturnType<typeof prisma.workspace.upsert>>>();
 
+  const cityWorkspace = await prisma.workspace.upsert({
+    where: { code: cityWorkspaceCode },
+    update: {
+      name: 'Thành phố Đà Nẵng',
+      shortName: 'Đà Nẵng',
+      type: WorkspaceType.CITY,
+      parentWorkspaceId: null,
+      isActive: true,
+      registrationEnabled: false,
+    },
+    create: {
+      code: cityWorkspaceCode,
+      name: 'Thành phố Đà Nẵng',
+      shortName: 'Đà Nẵng',
+      type: WorkspaceType.CITY,
+      isActive: true,
+      registrationEnabled: false,
+    },
+  });
+  const universityWorkspace = await prisma.workspace.upsert({
+    where: { code: universityWorkspaceCode },
+    update: {
+      name: 'Đại học Đà Nẵng',
+      shortName: 'ĐHĐN',
+      type: WorkspaceType.UNIVERSITY_SYSTEM,
+      parentWorkspaceId: cityWorkspace.id,
+      isActive: true,
+      registrationEnabled: false,
+    },
+    create: {
+      code: universityWorkspaceCode,
+      name: 'Đại học Đà Nẵng',
+      shortName: 'ĐHĐN',
+      type: WorkspaceType.UNIVERSITY_SYSTEM,
+      parentWorkspaceId: cityWorkspace.id,
+      isActive: true,
+      registrationEnabled: false,
+    },
+  });
+
   for (const workspaceSeed of udnWorkspaces) {
+    const isUdnSchool =
+      workspaceSeed.code === defaultWorkspaceCode || workspaceSeed.code === economicsWorkspaceCode;
+    const school = {
+      ...workspaceSeed,
+      type: WorkspaceType.SCHOOL,
+      parentWorkspaceId: isUdnSchool ? universityWorkspace.id : null,
+    };
     const workspace = await prisma.workspace.upsert({
       where: { code: workspaceSeed.code },
-      update: workspaceSeed,
-      create: workspaceSeed,
+      update: school,
+      create: school,
     });
     workspaces.set(workspace.code, workspace);
   }
 
   return {
+    cityWorkspace,
+    universityWorkspace,
     defaultWorkspace: getSeededWorkspace(workspaces, defaultWorkspaceCode),
     economicsWorkspace: getSeededWorkspace(workspaces, economicsWorkspaceCode),
   };
@@ -262,7 +340,7 @@ async function seedUserList(users: SeedUser[], workspaceId: string | null): Prom
     });
 
     const specializations = seedUser.specializations ?? (seedUser.specialization ? [seedUser.specialization] : []);
-    if (seedUser.role === Role.officer) {
+    if (seedUser.role === Role.officer || seedUser.role === Role.city_officer) {
       await prisma.officerSpecialization.updateMany({
         where: { officerId: user.id },
         data: { isActive: false },
@@ -296,9 +374,12 @@ async function seedUserList(users: SeedUser[], workspaceId: string | null): Prom
 }
 
 async function seedUsers(): Promise<void> {
-  const { defaultWorkspace, economicsWorkspace } = await seedWorkspaces();
+  const { cityWorkspace, universityWorkspace, defaultWorkspace, economicsWorkspace } =
+    await seedWorkspaces();
   await seedUserList(demoUsers, defaultWorkspace.id);
   await seedUserList(economicsDemoUsers, economicsWorkspace.id);
+  await seedUserList(cityDemoUsers, cityWorkspace.id);
+  await seedUserList(universityDemoUsers, universityWorkspace.id);
 }
 
 async function seedCriteriaRules(): Promise<void> {

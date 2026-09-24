@@ -31,14 +31,22 @@ export const reviewRouter = Router();
 reviewRouter.get(
   '/dashboard',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   asyncHandler(getReviewDashboard),
 );
 
 reviewRouter.post(
   '/applications/:applicationId/tasks/ensure',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.city_manager, Role.admin),
   validate({ body: ensureTasksSchema }),
   asyncHandler(ensureReviewTasks),
 );
@@ -46,26 +54,58 @@ reviewRouter.post(
 reviewRouter.get(
   '/tasks',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   validate({ query: listReviewTasksQuerySchema }),
   asyncHandler(listReviewTasks),
 );
 reviewRouter.get(
   '/tasks/:id',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   asyncHandler(getReviewTaskDetail),
 );
 reviewRouter.get(
   '/tasks/:id/criterion-level-assessment',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   asyncHandler(getCriterionLevelAssessment),
 );
 reviewRouter.get(
   '/tasks/:id/timeline',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   asyncHandler(getReviewTaskTimeline),
 );
 reviewRouter.get(
@@ -78,27 +118,51 @@ reviewRouter.get(
 reviewRouter.post(
   '/tasks/:id/claim',
   requireAuth,
-  requireRole(Role.officer),
+  requireRole(Role.officer, Role.city_officer),
   asyncHandler(claimReviewTask),
 );
 reviewRouter.post(
   '/tasks/:id/decision',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   validate({ body: taskDecisionSchema }),
   asyncHandler(decideReviewTask),
 );
 reviewRouter.post(
   '/tasks/:id/request-supplement',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   validate({ body: requestSupplementSchema }),
   asyncHandler(requestReviewTaskSupplement),
 );
 reviewRouter.post(
   '/tasks/:id/escalate-resolution',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   validate({ body: escalateResolutionSchema }),
   asyncHandler(escalateReviewTaskResolution),
 );

@@ -213,12 +213,13 @@ export async function computeActiveCascadeSnapshot(
 }
 
 export function canRunCascade(role: Role): boolean {
-  return [
+  const allowedRoles: Role[] = [
     Role.student,
     Role.class_representative,
     Role.officer,
     Role.manager,
     Role.committee,
     Role.admin,
-  ].includes(role);
+  ];
+  return allowedRoles.includes(role);
 }

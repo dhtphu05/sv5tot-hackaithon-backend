@@ -8,14 +8,21 @@ import {
   ResolutionStatus,
   ReviewTaskStatus,
   Role,
+  WorkspaceType,
 } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
   application: { findUnique: vi.fn() },
   evidence: { findMany: vi.fn() },
-  reviewTask: { findMany: vi.fn(), updateMany: vi.fn(), groupBy: vi.fn() },
+  reviewTask: {
+    findMany: vi.fn(),
+    updateMany: vi.fn(),
+    groupBy: vi.fn(),
+    findUniqueOrThrow: vi.fn(),
+  },
   officerSpecialization: { findMany: vi.fn(), findFirst: vi.fn() },
+  auditLog: { create: vi.fn() },
   resolutionCase: { findUnique: vi.fn() },
   $transaction: vi.fn(),
 }));
@@ -26,6 +33,7 @@ import { EvidencesService } from '../../src/modules/evidences/evidences.service'
 import { EventRegistryService } from '../../src/modules/event-registry/event-registry.service';
 import { ResolutionService } from '../../src/modules/resolution/resolution.service';
 import { ReviewAssignmentService } from '../../src/modules/review/review-assignment.service';
+import { ReviewRepository } from '../../src/modules/review/review.repository';
 import { ReviewService } from '../../src/modules/review/review.service';
 import { ErrorCodes } from '../../src/shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
@@ -56,10 +64,144 @@ beforeEach(() => {
   prismaMock.reviewTask.updateMany.mockRejectedValue(new Error('claim write reached'));
   prismaMock.officerSpecialization.findMany.mockResolvedValue([]);
   prismaMock.officerSpecialization.findFirst.mockResolvedValue(null);
+  prismaMock.auditLog.create.mockResolvedValue({ id: 'audit-1' });
   prismaMock.$transaction.mockRejectedValue(new Error('mutation transaction reached'));
 });
 
 describe('security baseline workspace boundaries', () => {
+  it('builds City Officer task queries against active School workspaces and specializations', async () => {
+    prismaMock.officerSpecialization.findMany.mockResolvedValue([
+      { criterion: Criterion.academic },
+    ]);
+    const cityOfficer = {
+      ...user(Role.city_officer, 'city-workspace'),
+      workspace: {
+        id: 'city-workspace',
+        code: 'DANANG_CITY',
+        type: WorkspaceType.CITY,
+        name: 'Da Nang',
+        shortName: 'DN',
+      },
+    };
+    const where = await new ReviewRepository().buildTaskWhere(cityOfficer, {
+      page: 1,
+      limit: 10,
+    } as never);
+
+    expect(where).toMatchObject({
+      AND: expect.arrayContaining([
+        { workspace: { is: { type: 'SCHOOL', isActive: true } } },
+      ]),
+      criterion: { in: [Criterion.academic] },
+    });
+  });
+
+  it('lets a specialized City Officer claim an unassigned active School task atomically', async () => {
+    const schoolTask = {
+      id: 'task-school-a',
+      workspaceId: workspaceA,
+      workspace: { type: 'SCHOOL', isActive: true },
+      applicationId: 'application-a',
+      collectiveProfileId: null,
+      assignedOfficerId: null,
+      criterion: Criterion.academic,
+      status: 'waiting',
+      decision: null,
+      officerNote: null,
+      officerSuggestedLevel: null,
+      levelAssessmentJson: null,
+      decisionReason: null,
+      supplementRequestJson: null,
+      dueDate: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      assignedOfficer: null,
+      collectiveProfile: null,
+      _count: { evidences: 0 },
+      application: {
+        id: 'application-a',
+        workspaceId: workspaceA,
+        schoolYear: '2025-2026',
+        targetLevel: 'city',
+        applicationType: 'individual',
+        status: 'under_review',
+        student: {
+          id: 'student-a',
+          fullName: 'Student A',
+          studentCode: 'S001',
+          className: 'A1',
+          faculty: 'Faculty A',
+          email: 'student@example.test',
+        },
+        metrics: [],
+        precheckResults: [],
+        cascadeReviews: [],
+      },
+      evidences: [],
+    };
+    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-1' });
+    prismaMock.reviewTask.updateMany.mockResolvedValue({ count: 1 });
+    prismaMock.reviewTask.findUniqueOrThrow.mockResolvedValue({
+      ...schoolTask,
+      assignedOfficerId: 'actor-a',
+      status: 'reviewing',
+    });
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(schoolTask) } as never,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
+    );
+    const cityOfficer = {
+      ...user(Role.city_officer, 'city-workspace'),
+      workspace: {
+        id: 'city-workspace',
+        code: 'DANANG_CITY',
+        type: WorkspaceType.CITY,
+        name: 'Da Nang',
+        shortName: 'DN',
+      },
+    };
+
+    await service.claimTask(cityOfficer, schoolTask.id);
+
+    expect(prismaMock.reviewTask.updateMany).toHaveBeenCalledWith({
+      where: { id: schoolTask.id, assignedOfficerId: null },
+      data: { assignedOfficerId: cityOfficer.id, status: 'reviewing' },
+    });
+  });
+
+  it.each([
+    ['assigned', 'other-officer', ReviewTaskStatus.reviewing],
+    ['final', null, ReviewTaskStatus.accepted],
+  ])('rejects City Officer claims for %s School tasks before mutation', async (_case, assignedOfficerId, status) => {
+    const task = {
+      id: 'task-school-a',
+      workspaceId: workspaceA,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      assignedOfficerId,
+      status,
+      criterion: Criterion.academic,
+      application: { student: { faculty: 'Faculty A' } },
+      collectiveProfile: null,
+    };
+    const cityOfficer = {
+      ...user(Role.city_officer, 'city-workspace'),
+      workspace: {
+        id: 'city-workspace',
+        code: 'DANANG_CITY',
+        type: WorkspaceType.CITY,
+        name: 'Da Nang',
+        shortName: 'DN',
+      },
+    };
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(task) } as never,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
+    );
+
+    await expect(service.claimTask(cityOfficer, task.id)).rejects.toMatchObject({ statusCode: 403 });
+    expect(prismaMock.reviewTask.updateMany).not.toHaveBeenCalled();
+  });
+
   it('rejects staff evidence upload before storage or database side effects', async () => {
     const evidence = {
       id: 'evidence-b',
@@ -135,7 +277,7 @@ describe('security baseline workspace boundaries', () => {
 
       await expect(
         service.ensureReviewTasks(user(role), 'application-b', {}),
-      ).rejects.toMatchObject({ statusCode: 404 });
+      ).rejects.toMatchObject({ statusCode: 403 });
 
       expect(prismaMock.evidence.findMany).not.toHaveBeenCalled();
       expect(prismaMock.$transaction).not.toHaveBeenCalled();
@@ -146,6 +288,7 @@ describe('security baseline workspace boundaries', () => {
     const task = {
       id: 'task-b',
       workspaceId: workspaceB,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
       assignedOfficerId: null,
       status: ReviewTaskStatus.waiting,
       criterion: Criterion.ethics,
@@ -173,6 +316,7 @@ describe('security baseline workspace boundaries', () => {
     prismaMock.resolutionCase.findUnique.mockResolvedValue({
       id: 'case-b',
       workspaceId: workspaceB,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
       applicationId: 'application-b',
       status: ResolutionStatus.resolved,
       committeeDecision: null,
@@ -226,8 +370,8 @@ describe('security baseline workspace boundaries', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           officer: expect.objectContaining({
-            workspaceId: workspaceA,
-            role: Role.officer,
+            workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+            role: Role.city_officer,
           }),
         }),
       }),
@@ -251,7 +395,10 @@ describe('security baseline workspace boundaries', () => {
     expect(prismaMock.officerSpecialization.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          officer: expect.objectContaining({ workspaceId: workspaceA }),
+          officer: expect.objectContaining({
+            role: Role.city_officer,
+            workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+          }),
         }),
       }),
     );

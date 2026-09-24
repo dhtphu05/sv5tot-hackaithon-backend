@@ -18,7 +18,12 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
+import {
+  assertReviewWorkspaceAccess,
+  isCityReviewRole,
+  reviewKnowledgeWorkspaceFilterFor,
+  reviewWorkspaceFilterFor,
+} from '../../shared/utils/review-workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { EvidenceKnowledgePublisher } from '../evidence-knowledge/evidence-knowledge.publisher';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
@@ -31,6 +36,7 @@ import type {
 } from './resolution.validation';
 
 const resolutionInclude = {
+  workspace: { select: { type: true, isActive: true } },
   application: { include: { student: true } },
   evidence: { include: { evidenceCard: true, evidenceFiles: { include: { file: true } } } },
   reviewTask: { include: { assignedOfficer: true } },
@@ -71,7 +77,7 @@ export class ResolutionService {
   }
 
   async listMyEscalatedCases(user: AuthenticatedUser, query: ListResolutionCasesQuery) {
-    if (user.role !== Role.officer) {
+    if (user.role !== Role.officer && user.role !== Role.city_officer) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only officers can view their escalated cases');
     }
 
@@ -115,20 +121,24 @@ export class ResolutionService {
       resolutionCase.evidence
         ? prisma.knowledgeBaseItem.findMany({
             where: {
-              ...workspaceFilterFor(user),
-              criterion: resolutionCase.evidence.criterion,
-              OR: [
+              AND: [
+                reviewKnowledgeWorkspaceFilterFor(user),
                 {
-                  evidenceName: {
-                    contains: resolutionCase.evidence.evidenceName,
-                    mode: 'insensitive',
-                  },
-                },
-                {
-                  eventName: {
-                    contains: resolutionCase.evidence.evidenceName,
-                    mode: 'insensitive',
-                  },
+                  criterion: resolutionCase.evidence.criterion,
+                  OR: [
+                    {
+                      evidenceName: {
+                        contains: resolutionCase.evidence.evidenceName,
+                        mode: 'insensitive',
+                      },
+                    },
+                    {
+                      eventName: {
+                        contains: resolutionCase.evidence.evidenceName,
+                        mode: 'insensitive',
+                      },
+                    },
+                  ],
                 },
               ],
             },
@@ -138,7 +148,7 @@ export class ResolutionService {
         : [],
       prisma.auditLog.findMany({
         where: {
-          ...workspaceFilterFor(user),
+          ...reviewWorkspaceFilterFor(user),
           OR: [
             { targetType: 'resolution_case', targetId: resolutionCase.id },
             { applicationId: resolutionCase.applicationId },
@@ -287,7 +297,9 @@ export class ResolutionService {
                   eventName: resolutionCase.evidence.eventId ? 'Verified event evidence' : null,
                   criterion: resolutionCase.evidence.criterion,
                   level: resolutionCase.application.targetLevel,
-                  workspaceId: resolutionCase.application.workspaceId,
+                  workspaceId: isCityReviewRole(user.role)
+                    ? user.workspaceId!
+                    : resolutionCase.application.workspaceId,
                   decision: mapKnowledgeDecision(input.decision),
                   reason: input.note,
                   requiredFieldsJson: {
@@ -488,17 +500,31 @@ export class ResolutionService {
     user: AuthenticatedUser,
     resolutionCase: ResolutionCaseWithInclude,
   ) {
-    assertSameWorkspace(user, resolutionCase, 'Resolution case not found');
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: resolutionCase.workspaceId,
+        workspaceType: resolutionCase.workspace.type,
+        workspaceIsActive: resolutionCase.workspace.isActive,
+      },
+      'Resolution case not found',
+    );
     if (canManageResolution(user)) return;
-    if (user.role !== Role.officer) {
+    if (user.role !== Role.officer && user.role !== Role.city_officer) {
       throw new AppError(
         403,
         ErrorCodes.FORBIDDEN,
         'You do not have access to this resolution case',
       );
     }
-    if (resolutionCase.createdBy === user.id) return;
     const relatedTask = await findRelatedReviewTask(resolutionCase);
+    if (user.role === Role.city_officer) {
+      if (!await canOfficerHandleResolutionCriterion(user.id, resolutionCase, relatedTask?.criterion)) {
+        throw new AppError(403, ErrorCodes.FORBIDDEN, 'You do not have access to this resolution case');
+      }
+      return;
+    }
+    if (resolutionCase.createdBy === user.id) return;
     if (relatedTask?.assignedOfficerId === user.id) return;
     if (await canOfficerHandleResolutionCriterion(user.id, resolutionCase, relatedTask?.criterion))
       return;
@@ -511,7 +537,7 @@ async function buildListWhere(
   query: ListResolutionCasesQuery,
 ): Promise<Prisma.ResolutionCaseWhereInput> {
   const filters: Prisma.ResolutionCaseWhereInput[] = [];
-  filters.push(workspaceFilterFor(user));
+  filters.push(reviewWorkspaceFilterFor(user));
   const statusFilter = statusWhere(query.status);
   if (statusFilter) filters.push(statusFilter);
   if (query.applicationId) filters.push({ applicationId: query.applicationId });
@@ -552,6 +578,31 @@ async function accessWhere(
   user: AuthenticatedUser,
 ): Promise<Prisma.ResolutionCaseWhereInput | null> {
   if (canManageResolution(user)) return null;
+  if (user.role === Role.city_officer) {
+    const specializations = await prisma.officerSpecialization.findMany({
+      where: { officerId: user.id, isActive: true },
+      select: { criterion: true },
+    });
+    const criteria = specializations.map((specialization) => specialization.criterion);
+    if (criteria.length === 0) return { id: '00000000-0000-0000-0000-000000000000' };
+    return {
+      AND: [
+        {
+          OR: [
+            { evidence: { criterion: { in: criteria } } },
+            { evidenceId: null, reviewTask: { criterion: { in: criteria } } },
+          ],
+        },
+        {
+          OR: [
+            { createdBy: user.id },
+            { evidence: { criterion: { in: criteria }, assignedOfficerId: user.id } },
+            { reviewTask: { criterion: { in: criteria }, assignedOfficerId: user.id } },
+          ],
+        },
+      ],
+    };
+  }
   if (user.role !== Role.officer) {
     return { id: '00000000-0000-0000-0000-000000000000' };
   }
@@ -565,7 +616,13 @@ async function accessWhere(
 }
 
 function canManageResolution(user: AuthenticatedUser) {
-  return user.role === Role.manager || user.role === Role.committee || user.role === Role.admin;
+  return (
+    user.role === Role.manager ||
+    user.role === Role.committee ||
+    user.role === Role.city_manager ||
+    user.role === Role.city_committee ||
+    user.role === Role.admin
+  );
 }
 
 async function canOfficerHandleResolutionCriterion(

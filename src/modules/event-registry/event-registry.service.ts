@@ -28,6 +28,7 @@ import {
 } from './event-participant.normalizer';
 import { toStaffEventWorkspaceDto } from './event-registry.dto';
 import { EventRegistryRepository } from './event-registry.repository';
+import { canStudentAccessCityEvent } from './event-registry.scope';
 import type {
   CheckParticipantInput,
   ConfirmIndexInput,
@@ -56,7 +57,9 @@ export class EventRegistryService {
   async list(user: AuthenticatedUser, query: ListEventsQuery) {
     const { items, total } = await this.repository.list(user, query);
     return {
-      items: items.map(this.toEventDto),
+      items: items.map((event) =>
+        this.toEventDto(event, canStudentAccessCityEvent(user, event)),
+      ),
       pagination: {
         page: query.page,
         limit: query.limit,
@@ -71,7 +74,7 @@ export class EventRegistryService {
     if (input.status === 'confirmed') {
       status = EventStatus.active;
     } else if (input.status === 'archived') {
-      if (user.role === Role.officer) {
+      if (user.role === Role.officer || user.role === Role.city_officer) {
         status = EventStatus.draft;
       } else {
         status = EventStatus.archived;
@@ -113,7 +116,7 @@ export class EventRegistryService {
   async getDetail(user: AuthenticatedUser, eventId: string) {
     const event = await this.getRequiredEvent(user, eventId);
     this.assertCanViewEvent(user, event);
-    return this.toEventDto(event);
+    return this.toEventDto(event, canStudentAccessCityEvent(user, event));
   }
 
   async getStaffWorkspace(user: AuthenticatedUser, eventId: string) {
@@ -695,7 +698,9 @@ export class EventRegistryService {
   private async getRequiredEvent(user: AuthenticatedUser, eventId: string) {
     const event = await this.repository.findById(eventId);
     if (!event) throw new AppError(404, ErrorCodes.EVENT_NOT_FOUND, 'Event not found');
-    assertSameWorkspace(user, event, 'Event not found');
+    if (!canStudentAccessCityEvent(user, event)) {
+      assertSameWorkspace(user, event, 'Event not found');
+    }
     return event;
   }
 
@@ -709,6 +714,7 @@ export class EventRegistryService {
 
   private toEventDto(
     event: EventRegistry & { eventFiles?: unknown[]; sampleCertificateFile?: unknown },
+    hideFileMetadata = false,
   ) {
     let apiStatus: 'draft' | 'confirmed' | 'archived' = 'draft';
     if (event.status === EventStatus.active) {
@@ -731,8 +737,8 @@ export class EventRegistryService {
       participantCount: event.participantCount,
       rosterIndexed: event.rosterIndexed,
       status: apiStatus,
-      eventFiles: event.eventFiles,
-      sampleCertificateFile: event.sampleCertificateFile,
+      eventFiles: hideFileMetadata ? [] : event.eventFiles,
+      sampleCertificateFile: hideFileMetadata ? null : event.sampleCertificateFile,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
     };

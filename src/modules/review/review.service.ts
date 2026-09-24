@@ -11,6 +11,7 @@ import {
   ReviewDecision,
   ReviewTaskStatus,
   Role,
+  WorkspaceType,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { env } from '../../config/env';
@@ -19,7 +20,12 @@ import { buildReadableSummary } from '../../shared/dto/evidence-student-status';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
+import {
+  assertReviewWorkspaceAccess,
+  isCityReviewRole,
+  reviewKnowledgeWorkspaceFilterFor,
+} from '../../shared/utils/review-workspace-scope';
+import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { buildEvidenceCardFieldLayers } from '../evidences/evidence-card-field-presenter';
 import { EvidenceKnowledgePublisher } from '../evidence-knowledge/evidence-knowledge.publisher';
@@ -85,7 +91,7 @@ export class ReviewService {
 
   async getDashboard(user: AuthenticatedUser) {
     const officer =
-      user.role === Role.officer
+      user.role === Role.officer || user.role === Role.city_officer
         ? await prisma.user.findUnique({
             where: { id: user.id },
             include: {
@@ -249,7 +255,12 @@ export class ReviewService {
     ];
     const matchedEvents = matchedEventIds.length
       ? await prisma.eventRegistry.findMany({
-          where: { id: { in: matchedEventIds }, ...workspaceFilterFor(user) },
+          where: {
+            id: { in: matchedEventIds },
+            ...(isCityReviewRole(user.role)
+              ? { workspaceId: task.workspaceId }
+              : workspaceFilterFor(user)),
+          },
           select: {
             id: true,
             eventName: true,
@@ -266,7 +277,7 @@ export class ReviewService {
         evidenceId: evidence.id,
         matches: await prisma.knowledgeBaseItem.findMany({
           where: {
-            ...workspaceFilterFor(user),
+            ...reviewKnowledgeWorkspaceFilterFor(user),
             criterion: evidence.criterion,
             OR: [
               { evidenceName: { contains: evidence.evidenceName, mode: 'insensitive' } },
@@ -427,7 +438,15 @@ export class ReviewService {
 
   async claimTask(user: AuthenticatedUser, taskId: string) {
     const task = await this.getTask(taskId);
-    assertSameWorkspace(user, task, 'Review task not found');
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: task.workspaceId,
+        workspaceType: task.workspace.type,
+        workspaceIsActive: task.workspace.isActive,
+      },
+      'Review task not found',
+    );
     const permissions = await this.getTaskPermissions(user, task);
 
     if (!permissions.canClaim) {
@@ -535,7 +554,11 @@ export class ReviewService {
     const effectiveDecision = getEffectiveTaskDecision(input.decision, input.evidenceDecisions);
 
     if (task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected) {
-      if (user.role !== Role.manager && user.role !== Role.admin) {
+      if (
+        user.role !== Role.manager &&
+        user.role !== Role.city_manager &&
+        user.role !== Role.admin
+      ) {
         throw new AppError(
           409,
           ErrorCodes.REVIEW_TASK_ALREADY_DECIDED,
@@ -917,6 +940,7 @@ export class ReviewService {
         await notifyManagers(
           tx,
           applicationId,
+          task.workspaceId,
           resolutionCaseId,
           'Có hồ sơ cần xử lý đối sánh',
           officerNote ?? 'Một task được chuyển sang cần hội đồng xem xét.',
@@ -1197,7 +1221,15 @@ export class ReviewService {
     task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
     decision: boolean,
   ) {
-    assertSameWorkspace(user, task, 'Review task not found');
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: task.workspaceId,
+        workspaceType: task.workspace.type,
+        workspaceIsActive: task.workspace.isActive,
+      },
+      'Review task not found',
+    );
     if (!(await this.canAccessTask(user, task, decision))) {
       throw new AppError(
         403,
@@ -1236,7 +1268,7 @@ export class ReviewService {
   ): Promise<ReviewTaskPermissions> {
     const final = isFinalReviewTaskStatus(task.status);
 
-    if (user.role === Role.manager || user.role === Role.admin) {
+    if (user.role === Role.manager || user.role === Role.city_manager || user.role === Role.admin) {
       return buildTaskPermissions({
         canView: true,
         canAct: true,
@@ -1246,7 +1278,7 @@ export class ReviewService {
       });
     }
 
-    if (user.role === Role.committee) {
+    if (user.role === Role.committee || user.role === Role.city_committee) {
       const canView = task.status === ReviewTaskStatus.resolution_needed;
       return buildTaskPermissions({
         canView,
@@ -1257,7 +1289,7 @@ export class ReviewService {
       });
     }
 
-    if (user.role !== Role.officer) {
+    if (user.role !== Role.officer && user.role !== Role.city_officer) {
       return buildTaskPermissions({
         canView: false,
         canAct: false,
@@ -1275,6 +1307,16 @@ export class ReviewService {
       faculty,
       permissionCache,
     );
+
+    if (user.role === Role.city_officer && !specialized) {
+      return buildTaskPermissions({
+        canView: false,
+        canAct: false,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: 'out_of_scope',
+      });
+    }
 
     if (task.assignedOfficerId === user.id) {
       return buildTaskPermissions({
@@ -1332,14 +1374,26 @@ export class ReviewService {
     permissionCache?: OfficerCriterionAccessCache,
   ): Promise<boolean> {
     if (!permissionCache) {
-      return this.assignmentService.canOfficerHandleCriterion(user.id, criterion, faculty);
+      return this.assignmentService.canOfficerHandleCriterion(
+        user.id,
+        criterion,
+        faculty,
+        undefined,
+        user.role,
+      );
     }
 
     const key = `${user.id}:${criterion}:${faculty ?? ''}`;
     const cached = permissionCache.get(key);
     if (cached) return cached;
 
-    const result = this.assignmentService.canOfficerHandleCriterion(user.id, criterion, faculty);
+    const result = this.assignmentService.canOfficerHandleCriterion(
+      user.id,
+      criterion,
+      faculty,
+      undefined,
+      user.role,
+    );
     permissionCache.set(key, result);
     return result;
   }
@@ -1459,13 +1513,24 @@ export class ReviewService {
   ) {
     const application = await prisma.application.findUnique({
       where: { id: applicationId },
-      include: { student: true },
+      include: { student: true, workspace: { select: { type: true, isActive: true } } },
     });
 
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
-    assertSameWorkspace(user, application, 'Application not found');
+    if (user.role !== Role.city_manager && user.role !== Role.admin) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only City Managers and admins may ensure tasks');
+    }
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: application.workspaceId,
+        workspaceType: application.workspace.type,
+        workspaceIsActive: application.workspace.isActive,
+      },
+      'Application not found',
+    );
 
     const allowedStatuses = [
       'submitted',
@@ -1601,13 +1666,17 @@ export class ReviewService {
   private async findAssignedOfficer(
     criterion: Criterion,
     faculty: string | null | undefined,
-    workspaceId: string,
+    _workspaceId: string,
   ): Promise<string | null> {
     const specs = await prisma.officerSpecialization.findMany({
       where: {
         criterion,
         isActive: true,
-        officer: { role: Role.officer, isActive: true, workspaceId },
+        officer: {
+          role: Role.city_officer,
+          isActive: true,
+          workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+        },
       },
       include: {
         officer: {
@@ -1763,13 +1832,27 @@ function decisionAuditAction(decision: ReviewDecision): string {
 async function notifyManagers(
   tx: Prisma.TransactionClient,
   applicationId: string,
+  schoolWorkspaceId: string,
   resolutionCaseId: string | null,
   title: string,
   message: string,
   metadata?: unknown,
 ) {
   const managers = await tx.user.findMany({
-    where: { role: { in: [Role.manager, Role.committee, Role.admin] }, isActive: true },
+    where: {
+      isActive: true,
+      OR: [
+        {
+          role: { in: [Role.manager, Role.committee] },
+          workspaceId: schoolWorkspaceId,
+        },
+        { role: Role.admin },
+        {
+          role: { in: [Role.city_manager, Role.city_committee] },
+          workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+        },
+      ],
+    },
     select: { id: true },
   });
 

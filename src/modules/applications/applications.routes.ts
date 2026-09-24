@@ -113,7 +113,15 @@ applicationsRouter.get(
 applicationsRouter.get(
   '/:id/criteria-completion',
   requireAuth,
-  requireRole(Role.student, Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.student,
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   asyncHandler(getApplicationCriteriaCompletion),
 );
 applicationsRouter.post(
@@ -140,7 +148,7 @@ applicationsRouter.post(
 applicationsRouter.post(
   '/:id/ethics/no-violation/confirmation',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_manager, Role.admin),
   validate({ body: confirmNoViolationSchema }),
   asyncHandler(confirmEthicsNoViolation),
 );
@@ -161,7 +169,7 @@ applicationsRouter.post(
 applicationsRouter.post(
   '/:id/academic/no-f-grade/confirmation',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_manager, Role.admin),
   validate({ body: confirmNoFGradeSchema }),
   asyncHandler(confirmAcademicNoFGrade),
 );
@@ -217,7 +225,7 @@ applicationsRouter.post(
 applicationsRouter.post(
   '/:id/reopen-supplement',
   requireAuth,
-  requireRole(Role.manager, Role.admin),
+  requireRole(Role.manager, Role.city_manager, Role.admin),
   validate({ body: reopenSupplementSchema }),
   asyncHandler(reopenApplicationSupplement),
 );

@@ -6,6 +6,7 @@ import {
   IndexingStatus,
   Level,
   Role,
+  WorkspaceType,
 } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppError } from '../../src/shared/errors/app-error';
@@ -162,5 +163,59 @@ describe('importEventAsEvidence participant name matching', () => {
     } satisfies Partial<AppError>);
 
     expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a participant id whose student code differs even when the name matches', async () => {
+    prismaMock.application.findUnique.mockResolvedValue({
+      ...application,
+      student: { ...application.student, studentCode: 'S-100' },
+    });
+    prismaMock.eventParticipant.findUnique.mockResolvedValue({
+      ...participant,
+      studentCode: 'S-999',
+    });
+
+    await expect(
+      importEventAsEvidence({
+        user,
+        eventId: event.id,
+        applicationId: application.id,
+        participantId: participant.id,
+      }),
+    ).rejects.toMatchObject({
+      code: ErrorCodes.EVENT_PARTICIPANT_NOT_FOUND,
+      statusCode: 404,
+    } satisfies Partial<AppError>);
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('lets a student import a confirmed event from the active City Registry into their School application', async () => {
+    const cityEvent = {
+      ...event,
+      workspaceId: 'city-workspace',
+      workspace: { type: WorkspaceType.CITY, isActive: true },
+    };
+    const student = {
+      ...user,
+      id: application.studentId,
+      role: Role.student,
+      studentCode: null,
+      workspaceId: application.workspaceId,
+    };
+    prismaMock.eventRegistry.findUnique.mockResolvedValue(cityEvent as never);
+    prismaMock.eventParticipant.findMany.mockResolvedValue([participant] as never);
+
+    const result = await importEventAsEvidence({
+      user: student,
+      eventId: cityEvent.id,
+      applicationId: application.id,
+    });
+
+    expect(result).toMatchObject({
+      evidence: { eventId: cityEvent.id, applicationId: application.id },
+      alreadyImported: false,
+    });
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1);
   });
 });
