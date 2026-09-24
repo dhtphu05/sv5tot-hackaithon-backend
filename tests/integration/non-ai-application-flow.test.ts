@@ -8,6 +8,7 @@ import {
   ReviewDecision,
   ReviewTaskStatus,
   Role,
+  WorkspaceType,
 } from '@prisma/client';
 import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -21,6 +22,7 @@ const schoolYear = '2098-2099';
 const faculty = 'E2E Faculty';
 const workspaceCode = 'E2E-NON-AI';
 let workspaceId: string;
+let cityWorkspaceId: string;
 
 const accounts = {
   student: 'e2e.student@dut.udn.vn',
@@ -65,6 +67,7 @@ async function seedUser(input: {
   email: string;
   role: Role;
   fullName: string;
+  workspaceId?: string;
   studentCode?: string;
   className?: string;
   specialization?: Criterion;
@@ -74,7 +77,7 @@ async function seedUser(input: {
   const user = await prisma.user.upsert({
     where: { email: input.email },
     update: {
-      workspaceId,
+      workspaceId: input.workspaceId ?? workspaceId,
       fullName: input.fullName,
       role: input.role,
       passwordHash,
@@ -85,7 +88,7 @@ async function seedUser(input: {
     },
     create: {
       email: input.email,
-      workspaceId,
+      workspaceId: input.workspaceId ?? workspaceId,
       passwordHash,
       fullName: input.fullName,
       role: input.role,
@@ -120,11 +123,31 @@ async function seedUser(input: {
 
 describe('non-AI individual application end-to-end flow', () => {
   beforeAll(async () => {
+    const cityWorkspace = await prisma.workspace.upsert({
+      where: { code: 'E2E-NON-AI-CITY' },
+      update: {
+        name: 'E2E Non-AI City Workspace',
+        shortName: 'E2E City',
+        type: WorkspaceType.CITY,
+        isActive: true,
+      },
+      create: {
+        code: 'E2E-NON-AI-CITY',
+        name: 'E2E Non-AI City Workspace',
+        shortName: 'E2E City',
+        type: WorkspaceType.CITY,
+        isActive: true,
+      },
+    });
+    cityWorkspaceId = cityWorkspace.id;
+
     const workspace = await prisma.workspace.upsert({
       where: { code: workspaceCode },
       update: {
         name: 'E2E Non-AI Workspace',
         shortName: 'E2E',
+        type: WorkspaceType.SCHOOL,
+        parentWorkspaceId: cityWorkspaceId,
         isActive: true,
         registrationEnabled: true,
       },
@@ -132,6 +155,8 @@ describe('non-AI individual application end-to-end flow', () => {
         code: workspaceCode,
         name: 'E2E Non-AI Workspace',
         shortName: 'E2E',
+        type: WorkspaceType.SCHOOL,
+        parentWorkspaceId: cityWorkspaceId,
         isActive: true,
         registrationEnabled: true,
       },
@@ -147,8 +172,9 @@ describe('non-AI individual application end-to-end flow', () => {
     });
     await seedUser({
       email: accounts.manager,
-      role: Role.manager,
+      role: Role.city_manager,
       fullName: 'E2E Manager',
+      workspaceId: cityWorkspaceId,
     });
     await seedUser({
       email: accounts.committee,
@@ -159,9 +185,10 @@ describe('non-AI individual application end-to-end flow', () => {
     for (const criterion of criteria) {
       await seedUser({
         email: accounts.officers[criterion],
-        role: Role.officer,
+        role: Role.city_officer,
         fullName: `E2E Officer ${criterion}`,
         specialization: criterion,
+        workspaceId: cityWorkspaceId,
       });
     }
 

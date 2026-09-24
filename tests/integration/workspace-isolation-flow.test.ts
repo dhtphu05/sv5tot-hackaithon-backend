@@ -15,6 +15,7 @@ import {
   ReviewTaskStatus,
   Role,
   RosterPreviewValidationStatus,
+  WorkspaceType,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -75,6 +76,10 @@ type Side = {
 type Fixture = {
   a: Side;
   b: Side;
+  cityWorkspaceId: string;
+  cityManagerId: string;
+  cityManagerToken: string;
+  cityOfficerId: string;
   adminEmail: string;
   adminId: string;
   adminToken: string;
@@ -173,7 +178,11 @@ async function seedUser(input: {
   });
 }
 
-async function seedSide(label: 'A' | 'B', createdFilePaths: string[]): Promise<Side> {
+async function seedSide(
+  label: 'A' | 'B',
+  createdFilePaths: string[],
+  cityWorkspaceId: string,
+): Promise<Side> {
   const lower = label.toLowerCase();
   const workspaceCode = `AB-${label}-${runId}`.toUpperCase();
   const faculty = `Faculty ${label} ${runId}`;
@@ -186,6 +195,8 @@ async function seedSide(label: 'A' | 'B', createdFilePaths: string[]): Promise<S
       code: workspaceCode,
       name: `Workspace ${label} ${runId}`,
       shortName: `W${label}`,
+      type: WorkspaceType.SCHOOL,
+      parentWorkspaceId: cityWorkspaceId,
       isActive: true,
       registrationEnabled: true,
     },
@@ -547,8 +558,38 @@ async function seedSide(label: 'A' | 'B', createdFilePaths: string[]): Promise<S
 
 async function seedFixture(): Promise<Fixture> {
   const createdFilePaths: string[] = [];
-  const a = await seedSide('A', createdFilePaths);
-  const b = await seedSide('B', createdFilePaths);
+  const cityWorkspace = await prisma.workspace.create({
+    data: {
+      code: `AB-CITY-${runId}`.toUpperCase(),
+      name: `City Workspace ${runId}`,
+      shortName: 'AB City',
+      type: WorkspaceType.CITY,
+      isActive: true,
+    },
+  });
+  const a = await seedSide('A', createdFilePaths, cityWorkspace.id);
+  const b = await seedSide('B', createdFilePaths, cityWorkspace.id);
+
+  const cityManager = await seedUser({
+    workspaceId: cityWorkspace.id,
+    email: `workspace-city-manager-${runId}@example.test`,
+    role: Role.city_manager,
+    fullName: `City Manager ${runId}`,
+  });
+  const cityOfficer = await seedUser({
+    workspaceId: cityWorkspace.id,
+    email: `workspace-city-officer-${runId}@example.test`,
+    role: Role.city_officer,
+    fullName: `City Officer ${runId}`,
+  });
+  await prisma.officerSpecialization.create({
+    data: {
+      officerId: cityOfficer.id,
+      criterion: Criterion.academic,
+      facultyScope: a.faculty,
+      isActive: true,
+    },
+  });
 
   const adminEmail = `workspace-admin-${runId}@example.test`;
   const admin = await seedUser({
@@ -571,9 +612,14 @@ async function seedFixture(): Promise<Fixture> {
   });
 
   const adminLogin = await login(adminEmail);
+  const cityManagerLogin = await login(cityManager.email);
   return {
     a,
     b,
+    cityWorkspaceId: cityWorkspace.id,
+    cityManagerId: cityManager.id,
+    cityManagerToken: cityManagerLogin.accessToken,
+    cityOfficerId: cityOfficer.id,
     adminEmail,
     adminId: admin.id,
     adminToken: adminLogin.accessToken,
@@ -586,7 +632,7 @@ async function seedFixture(): Promise<Fixture> {
 
 async function cleanupFixture(current: Fixture | null) {
   if (!current) return;
-  const workspaceIds = [current.a.workspaceId, current.b.workspaceId];
+  const workspaceIds = [current.a.workspaceId, current.b.workspaceId, current.cityWorkspaceId];
   const userIds = [
     current.a.studentId,
     current.a.officerId,
@@ -596,6 +642,8 @@ async function cleanupFixture(current: Fixture | null) {
     current.b.officerId,
     current.b.managerId,
     current.b.committeeId,
+    current.cityManagerId,
+    current.cityOfficerId,
     current.adminId,
   ];
   const applicationIds = [current.a.applicationId, current.b.applicationId];
@@ -843,15 +891,15 @@ describe('workspace A/B HTTP isolation flow', () => {
     const bTaskCountBeforeEnsure = await prisma.reviewTask.count({
       where: { applicationId: b.applicationId },
     });
-    expectNotFound(
-      await request(app)
-        .post(`/api/review/applications/${b.applicationId}/tasks/ensure`)
-        .set(auth(a.officerToken))
-        .send({}),
-    );
+    const ensuredForB = await request(app)
+      .post(`/api/review/applications/${b.applicationId}/tasks/ensure`)
+      .set(auth(fixture!.cityManagerToken))
+      .send({})
+      .expect(200);
+    expect(ensuredForB.body.data.ensuredCount).toBeGreaterThan(0);
     expect(
       await prisma.reviewTask.count({ where: { applicationId: b.applicationId } }),
-    ).toBe(bTaskCountBeforeEnsure);
+    ).toBeGreaterThan(bTaskCountBeforeEnsure);
 
     await prisma.officerSpecialization.createMany({
       data: [a, b].map((side) => ({
@@ -872,14 +920,14 @@ describe('workspace A/B HTTP isolation flow', () => {
     });
     await request(app)
       .post(`/api/review/applications/${a.applicationId}/tasks/ensure`)
-      .set(auth(a.officerToken))
+      .set(auth(fixture!.cityManagerToken))
       .send({})
       .expect(200);
     const academicTask = await prisma.reviewTask.findFirstOrThrow({
       where: { applicationId: a.applicationId, criterion: Criterion.academic },
       select: { assignedOfficerId: true },
     });
-    expect(academicTask.assignedOfficerId).toBe(a.officerId);
+    expect(academicTask.assignedOfficerId).toBe(fixture!.cityOfficerId);
 
     const originalTask = await prisma.reviewTask.findUniqueOrThrow({
       where: { id: a.reviewTaskId },
