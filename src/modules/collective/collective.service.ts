@@ -766,6 +766,7 @@ export class CollectiveService {
     const officer = await this.assignmentService.assignOfficerForCriterion({
       criterion: Criterion.collective,
       faculty: user.faculty,
+      workspaceId: profile.workspaceId,
     });
 
     const reviewTask = await prisma.$transaction(async (tx) => {

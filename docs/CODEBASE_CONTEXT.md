@@ -1085,6 +1085,22 @@ This section reflects the hardening pass for "Kho minh chứng / Kho sự kiện
 - Remaining verification limit:
   - Full accept-with-precedent and pre-resolution mutation E2E was not run against the configured database because it would mutate real review data and no disposable matching fixture was available.
 
+## Phase 1 Security Baseline On 2026-09-23
+
+- `EvidencesService.uploadFile` checks the parent application's workspace before object storage, file/job creation, or upload audit side effects. Student and class-representative uploads still require application ownership; admins retain the shared workspace-helper bypass.
+- `ReviewService.ensureReviewTasks` checks application workspace before reading evidence or creating/linking tasks. The officer/manager/admin route allowlist is unchanged.
+- `ReviewService.claimTask` checks task workspace before permission evaluation. Claimability remains an unassigned task with an active matching criterion specialization and a non-final status; the atomic `updateMany` compare-and-set remains in place.
+- Both automatic review-assignment paths (application submission and `ensureReviewTasks`) filter active specialization candidates to the application workspace before applying the existing faculty preference and workload ordering.
+- `facultyScope` remains an automatic/manual assignment preference; criterion specialization governs officer claim/view eligibility. It does not grant or restrict those permissions.
+- Resolution status updates and reopen operations reuse the existing `assertCanViewCase` workspace/visibility guard before any transaction or early return.
+- Event roster confirmation verifies that the selected `EventFile.eventId` matches the scoped event before loading its indexing job or mutating participants. A mismatch returns the existing `EVENT_FILE_NOT_FOUND` response.
+- `ENABLE_DEMO_REVIEW_BYPASS` is parsed as a boolean, defaults to `false`, and gates the legacy demo-officer permission exception. Set it to `true` only for environments that need the tested demo behavior.
+- F06 inspection of `KnowledgeBaseService.searchApprovedEvidenceNames`: student/class-representative items contain `id`, `title`, and `criterion`; staff items additionally contain `eventName`, `level`, `usageCount`, and `updatedAt`. The selected fields do not include a person identifier, reviewer identity, file, or OCR content. Titles and event names are free text. The repository query currently has no workspace predicate, so its approved names are global; this was reported without code changes because no direct personal-data field is selected.
+- No role, Prisma schema, migration, frontend, route allowlist, or review-engine boundary changed in this baseline.
+- Regression coverage was added to `tests/unit/security-baseline-scope.test.ts`, `tests/unit/review-task-detail.test.ts`, `tests/unit/smartbot-env.test.ts`, and `tests/integration/workspace-isolation-flow.test.ts`.
+- Verification in the isolated `phase1-security-baseline` worktree: focused unit tests passed (3 files, 20 tests), `npm run build` passed, and `npm run lint` passed with 27 `no-explicit-any` warnings. The workspace-isolation integration suite could not seed its fixture because the configured PostgreSQL credentials are invalid; no integration assertions ran.
+- Committed-HEAD baseline: build passed; 4 unit tests passed, while both requested integration suites were blocked during PostgreSQL setup by the same invalid credentials. `npm ci` also failed because the committed lockfile does not resolve the declared `openai@6.49.0` package.
+
 ## Login Dashboard Readiness Patch On 2026-07-21
 
 - `src/modules/precheck/precheck.routes.ts` now exposes `GET /api/applications/current/precheck/latest` before the dynamic `/api/applications/:id/precheck/latest` route, so Express no longer treats the literal `current` segment as a UUID application id.

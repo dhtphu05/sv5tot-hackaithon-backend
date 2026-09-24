@@ -16,6 +16,7 @@ export class ReviewAssignmentService {
     input: {
       criterion: Criterion;
       faculty?: string | null;
+      workspaceId: string;
       excludeOfficerIds?: string[];
     },
     db: DbClient = prisma,
@@ -27,6 +28,7 @@ export class ReviewAssignmentService {
         officer: {
           role: Role.officer,
           isActive: true,
+          workspaceId: input.workspaceId,
         },
       },
       include: { officer: true },
@@ -94,6 +96,7 @@ export class ReviewAssignmentService {
     _faculty?: string | null,
     db: DbClient = prisma,
   ): Promise<boolean> {
+    // facultyScope is an assignment preference; criterion specialization governs access.
     const specialization = await db.officerSpecialization.findFirst({
       where: {
         officerId,

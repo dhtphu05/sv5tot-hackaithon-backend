@@ -80,6 +80,8 @@ type Fixture = {
   adminToken: string;
   mismatchJobId: string;
   createdFilePaths: string[];
+  createdUploadFileIds: string[];
+  createdUploadJobIds: string[];
 };
 
 let fixture: Fixture | null = null;
@@ -577,6 +579,8 @@ async function seedFixture(): Promise<Fixture> {
     adminToken: adminLogin.accessToken,
     mismatchJobId: mismatchJob.id,
     createdFilePaths,
+    createdUploadFileIds: [],
+    createdUploadJobIds: [],
   };
 }
 
@@ -601,6 +605,7 @@ async function cleanupFixture(current: Fixture | null) {
     current.a.exportFileId,
     current.b.fileId,
     current.b.exportFileId,
+    ...current.createdUploadFileIds,
   ];
   const eventIds = [current.a.eventId, current.b.eventId];
   const decisionImportIds = [current.a.decisionImportId, current.b.decisionImportId];
@@ -617,7 +622,9 @@ async function cleanupFixture(current: Fixture | null) {
     prisma.notification.deleteMany({ where: { workspaceId: { in: workspaceIds } } }),
     prisma.resolutionCase.deleteMany({ where: { workspaceId: { in: workspaceIds } } }),
     prisma.reviewTaskEvidence.deleteMany({ where: { reviewTaskId: { in: reviewTaskIds } } }),
-    prisma.reviewTask.deleteMany({ where: { id: { in: reviewTaskIds } } }),
+    prisma.reviewTask.deleteMany({
+      where: { OR: [{ id: { in: reviewTaskIds } }, { applicationId: { in: applicationIds } }] },
+    }),
     prisma.precheckResult.deleteMany({ where: { applicationId: { in: applicationIds } } }),
     prisma.cascadeReview.deleteMany({ where: { applicationId: { in: applicationIds } } }),
     prisma.applicationMetric.deleteMany({ where: { applicationId: { in: applicationIds } } }),
@@ -631,7 +638,11 @@ async function cleanupFixture(current: Fixture | null) {
     prisma.decisionTable.deleteMany({ where: { decisionImportId: { in: decisionImportIds } } }),
     prisma.decisionDocument.deleteMany({ where: { decisionImportId: { in: decisionImportIds } } }),
     prisma.indexingJob.deleteMany({
-      where: { id: { in: [current.a.jobId, current.b.jobId, current.mismatchJobId] } },
+      where: {
+        id: {
+          in: [current.a.jobId, current.b.jobId, current.mismatchJobId, ...current.createdUploadJobIds],
+        },
+      },
     }),
     prisma.smartReaderJob.deleteMany({ where: { workspaceId: { in: workspaceIds } } }),
     prisma.evidence.deleteMany({ where: { id: { in: evidenceIds } } }),
@@ -725,7 +736,8 @@ describe('workspace A/B HTTP isolation flow', () => {
   });
 
   it('isolates evidence and file access across workspaces', async () => {
-    const { a, b } = fixture!;
+    const current = fixture!;
+    const { a, b } = current;
 
     expectNotFound(
       await request(app)
@@ -763,6 +775,44 @@ describe('workspace A/B HTTP isolation flow', () => {
     expectNotFound(
       await request(app).delete(`/api/evidences/${b.evidenceId}`).set(auth(a.studentToken)),
     );
+
+    const filesBefore = await prisma.file.count({ where: { workspaceId: b.workspaceId } });
+    const evidenceFilesBefore = await prisma.evidenceFile.count({ where: { evidenceId: b.evidenceId } });
+    const jobsBefore = await prisma.indexingJob.count({
+      where: { targetId: b.evidenceId, jobType: JobType.evidence_ocr },
+    });
+    expectNotFound(
+      await request(app)
+        .post(`/api/evidences/${b.evidenceId}/files`)
+        .set(auth(a.officerToken))
+        .attach('file', Buffer.from('%PDF-1.4 test'), {
+          filename: 'cross-workspace.pdf',
+          contentType: 'application/pdf',
+        }),
+    );
+    expect(await prisma.file.count({ where: { workspaceId: b.workspaceId } })).toBe(filesBefore);
+    expect(await prisma.evidenceFile.count({ where: { evidenceId: b.evidenceId } })).toBe(
+      evidenceFilesBefore,
+    );
+    expect(
+      await prisma.indexingJob.count({
+        where: { targetId: b.evidenceId, jobType: JobType.evidence_ocr },
+      }),
+    ).toBe(jobsBefore);
+
+    const sameWorkspaceUpload = await request(app)
+      .post(`/api/evidences/${a.evidenceId}/files`)
+      .set(auth(a.officerToken))
+      .attach('file', Buffer.from('%PDF-1.4 test'), {
+        filename: 'same-workspace.pdf',
+        contentType: 'application/pdf',
+      })
+      .expect(201);
+    current.createdUploadFileIds.push(sameWorkspaceUpload.body.data.file.id);
+    current.createdUploadJobIds.push(sameWorkspaceUpload.body.data.jobId);
+    current.createdFilePaths.push(
+      path.resolve(uploadRoot, sameWorkspaceUpload.body.data.file.storageKey),
+    );
   });
 
   it('isolates review and resolution flows across workspaces', async () => {
@@ -790,6 +840,107 @@ describe('workspace A/B HTTP isolation flow', () => {
         }),
     );
 
+    const bTaskCountBeforeEnsure = await prisma.reviewTask.count({
+      where: { applicationId: b.applicationId },
+    });
+    expectNotFound(
+      await request(app)
+        .post(`/api/review/applications/${b.applicationId}/tasks/ensure`)
+        .set(auth(a.officerToken))
+        .send({}),
+    );
+    expect(
+      await prisma.reviewTask.count({ where: { applicationId: b.applicationId } }),
+    ).toBe(bTaskCountBeforeEnsure);
+
+    await prisma.officerSpecialization.createMany({
+      data: [a, b].map((side) => ({
+        officerId: side.officerId,
+        criterion: Criterion.academic,
+        facultyScope: a.faculty,
+        isActive: true,
+      })),
+    });
+    await prisma.reviewTask.createMany({
+      data: [Criterion.physical, Criterion.volunteer].map((criterion) => ({
+        workspaceId: a.workspaceId,
+        applicationId: a.applicationId,
+        criterion,
+        assignedOfficerId: a.officerId,
+        status: ReviewTaskStatus.waiting,
+      })),
+    });
+    await request(app)
+      .post(`/api/review/applications/${a.applicationId}/tasks/ensure`)
+      .set(auth(a.officerToken))
+      .send({})
+      .expect(200);
+    const academicTask = await prisma.reviewTask.findFirstOrThrow({
+      where: { applicationId: a.applicationId, criterion: Criterion.academic },
+      select: { assignedOfficerId: true },
+    });
+    expect(academicTask.assignedOfficerId).toBe(a.officerId);
+
+    const originalTask = await prisma.reviewTask.findUniqueOrThrow({
+      where: { id: a.reviewTaskId },
+      select: { assignedOfficerId: true, status: true },
+    });
+    try {
+      await prisma.reviewTask.update({
+        where: { id: b.reviewTaskId },
+        data: { assignedOfficerId: null },
+      });
+      expectNotFound(
+        await request(app)
+          .post(`/api/review/tasks/${b.reviewTaskId}/claim`)
+          .set(auth(a.officerToken)),
+      );
+      expect(
+        (await prisma.reviewTask.findUniqueOrThrow({
+          where: { id: b.reviewTaskId },
+          select: { assignedOfficerId: true },
+        })).assignedOfficerId,
+      ).toBeNull();
+
+      await prisma.reviewTask.update({
+        where: { id: a.reviewTaskId },
+        data: { assignedOfficerId: null, status: ReviewTaskStatus.waiting },
+      });
+      await request(app)
+        .post(`/api/review/tasks/${a.reviewTaskId}/claim`)
+        .set(auth(a.officerToken))
+        .expect(200);
+
+      await prisma.reviewTask.update({
+        where: { id: a.reviewTaskId },
+        data: { assignedOfficerId: b.officerId, status: ReviewTaskStatus.reviewing },
+      });
+      expectRejected(
+        await request(app)
+          .post(`/api/review/tasks/${a.reviewTaskId}/claim`)
+          .set(auth(a.officerToken)),
+      );
+
+      await prisma.reviewTask.update({
+        where: { id: a.reviewTaskId },
+        data: { assignedOfficerId: null, status: ReviewTaskStatus.accepted },
+      });
+      expectRejected(
+        await request(app)
+          .post(`/api/review/tasks/${a.reviewTaskId}/claim`)
+          .set(auth(a.officerToken)),
+      );
+    } finally {
+      await prisma.reviewTask.update({
+        where: { id: a.reviewTaskId },
+        data: originalTask,
+      });
+      await prisma.reviewTask.update({
+        where: { id: b.reviewTaskId },
+        data: { assignedOfficerId: b.officerId },
+      });
+    }
+
     const assignResponse = await request(app)
       .post(`/api/manager/review-tasks/${a.reviewTaskId}/assign`)
       .set(auth(a.managerToken))
@@ -813,6 +964,50 @@ describe('workspace A/B HTTP isolation flow', () => {
         .set(auth(a.committeeToken))
         .send({ decision: 'accepted', note: 'cross workspace decision attempt' }),
     );
+
+    const caseBefore = await prisma.resolutionCase.findUniqueOrThrow({
+      where: { id: b.resolutionCaseId },
+      select: { status: true, closedAt: true },
+    });
+    const applicationBefore = await prisma.application.findUniqueOrThrow({
+      where: { id: b.applicationId },
+      select: { status: true },
+    });
+    expectNotFound(
+      await request(app)
+        .patch(`/api/resolution/cases/${b.resolutionCaseId}/status`)
+        .set(auth(a.managerToken))
+        .send({ status: 'closed', note: 'cross workspace status attempt' }),
+    );
+    expectNotFound(
+      await request(app)
+        .post(`/api/resolution/cases/${b.resolutionCaseId}/reopen`)
+        .set(auth(a.committeeToken))
+        .send({ reason: 'cross workspace reopen attempt' }),
+    );
+    expect(
+      await prisma.resolutionCase.findUniqueOrThrow({
+        where: { id: b.resolutionCaseId },
+        select: { status: true, closedAt: true },
+      }),
+    ).toEqual(caseBefore);
+    expect(
+      await prisma.application.findUniqueOrThrow({
+        where: { id: b.applicationId },
+        select: { status: true },
+      }),
+    ).toEqual(applicationBefore);
+
+    await request(app)
+      .patch(`/api/resolution/cases/${a.resolutionCaseId}/status`)
+      .set(auth(a.managerToken))
+      .send({ status: 'resolved', note: 'same workspace status update' })
+      .expect(200);
+    await request(app)
+      .post(`/api/resolution/cases/${a.resolutionCaseId}/reopen`)
+      .set(auth(a.committeeToken))
+      .send({ reason: 'same workspace reopen' })
+      .expect(200);
   });
 
   it('isolates event registry and decision imports across workspaces', async () => {
@@ -876,6 +1071,84 @@ describe('workspace A/B HTTP isolation flow', () => {
         .set(auth(a.managerToken))
         .send({ includeWarningRows: true, includeInvalidRows: true }),
     );
+
+    const eventFileA = await prisma.eventFile.create({
+      data: { eventId: a.eventId, fileId: a.fileId },
+    });
+    const eventFileB = await prisma.eventFile.create({
+      data: { eventId: b.eventId, fileId: b.fileId },
+    });
+    const rosterJob = await prisma.indexingJob.create({
+      data: {
+        workspaceId: a.workspaceId,
+        jobType: JobType.event_roster_indexing,
+        targetId: eventFileA.id,
+        status: JobStatus.completed,
+        resultJson: {
+          columns: ['code', 'name', 'class', 'faculty', 'status', 'value'],
+          rows: [
+            {
+              code: a.studentCode,
+              name: `Updated participant ${runId}`,
+              class: a.className,
+              faculty: a.faculty,
+              status: 'confirmed',
+              value: 1,
+            },
+          ],
+          suggestedMapping: {
+            studentCode: 'code',
+            studentName: 'name',
+            className: 'class',
+            faculty: 'faculty',
+            participationStatus: 'status',
+            convertedValue: 'value',
+          },
+          quality: {
+            rowCount: 1,
+            missingStudentCodeRows: 0,
+            duplicateStudentCodes: [],
+            confidence: 1,
+          },
+        },
+      },
+    });
+    const participantsBefore = await prisma.eventParticipant.findMany({
+      where: { eventId: a.eventId },
+      orderBy: { studentCode: 'asc' },
+      select: { studentCode: true, studentName: true },
+    });
+    try {
+      expectNotFound(
+        await request(app)
+          .post(`/api/events/${a.eventId}/confirm-index`)
+          .set(auth(a.managerToken))
+          .send({
+            eventFileId: eventFileB.id,
+            replaceExisting: true,
+            columnMapping: { studentCode: 'code', studentName: 'name' },
+          }),
+      );
+      expect(
+        await prisma.eventParticipant.findMany({
+          where: { eventId: a.eventId },
+          orderBy: { studentCode: 'asc' },
+          select: { studentCode: true, studentName: true },
+        }),
+      ).toEqual(participantsBefore);
+
+      await request(app)
+        .post(`/api/events/${a.eventId}/confirm-index`)
+        .set(auth(a.managerToken))
+        .send({
+          eventFileId: eventFileA.id,
+          replaceExisting: false,
+          columnMapping: { studentCode: 'code', studentName: 'name' },
+        })
+        .expect(200);
+    } finally {
+      await prisma.indexingJob.delete({ where: { id: rosterJob.id } });
+    }
   });
 
   it('isolates knowledge base, evidence matching and criteria selection across workspaces', async () => {

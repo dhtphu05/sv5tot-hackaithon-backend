@@ -381,7 +381,7 @@ export class EventRegistryService {
     const eventFile = input.eventFileId
       ? await this.repository.findEventFile(input.eventFileId)
       : await this.repository.findLatestEventFile(event.id);
-    if (!eventFile)
+    if (!eventFile || eventFile.eventId !== event.id)
       throw new AppError(404, ErrorCodes.EVENT_FILE_NOT_FOUND, 'Event file not found');
 
     const job = await this.repository.findLatestCompletedRosterJob(eventFile.id);

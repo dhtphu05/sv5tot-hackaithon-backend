@@ -629,6 +629,7 @@ export class ApplicationsService {
         {
           criterion,
           faculty: application.student.faculty,
+          workspaceId: application.workspaceId,
         },
         tx,
       );

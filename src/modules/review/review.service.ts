@@ -13,6 +13,7 @@ import {
   Role,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
+import { env } from '../../config/env';
 import { auditActions } from '../../shared/constants/application';
 import { buildReadableSummary } from '../../shared/dto/evidence-student-status';
 import { AppError } from '../../shared/errors/app-error';
@@ -426,6 +427,7 @@ export class ReviewService {
 
   async claimTask(user: AuthenticatedUser, taskId: string) {
     const task = await this.getTask(taskId);
+    assertSameWorkspace(user, task, 'Review task not found');
     const permissions = await this.getTaskPermissions(user, task);
 
     if (!permissions.canClaim) {
@@ -1295,7 +1297,7 @@ export class ReviewService {
     }
 
     if (task.assignedOfficerId && specialized) {
-      if (isDemoOfficerReviewAccount(user)) {
+      if (env.ENABLE_DEMO_REVIEW_BYPASS && isDemoOfficerReviewAccount(user)) {
         return buildTaskPermissions({
           canView: true,
           canAct: !final,
@@ -1463,6 +1465,7 @@ export class ReviewService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
+    assertSameWorkspace(user, application, 'Application not found');
 
     const allowedStatuses = [
       'submitted',
@@ -1518,6 +1521,7 @@ export class ReviewService {
         const assignedOfficerId = await this.findAssignedOfficer(
           criterion,
           application.student?.faculty,
+          application.workspaceId,
         );
 
         // Create the task
@@ -1596,13 +1600,14 @@ export class ReviewService {
 
   private async findAssignedOfficer(
     criterion: Criterion,
-    faculty?: string | null,
+    faculty: string | null | undefined,
+    workspaceId: string,
   ): Promise<string | null> {
     const specs = await prisma.officerSpecialization.findMany({
       where: {
         criterion,
         isActive: true,
-        officer: { isActive: true },
+        officer: { role: Role.officer, isActive: true, workspaceId },
       },
       include: {
         officer: {

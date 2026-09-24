@@ -11,6 +11,7 @@ import {
   Role,
 } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { env } from '../../src/config/env';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
 const prismaMock = vi.hoisted(() => ({
@@ -118,9 +119,10 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
 describe('ReviewService demo officer permissions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    env.ENABLE_DEMO_REVIEW_BYPASS = false;
   });
 
-  it('allows a demo officer with matching specialization to act on a task assigned to another officer', async () => {
+  it('does not let a demo email bypass another officer assignment by default', async () => {
     const reviewRepository = {
       list: vi.fn().mockResolvedValue({
         items: [
@@ -144,6 +146,39 @@ describe('ReviewService demo officer permissions', () => {
     } as any);
 
     expect(result.items).toHaveLength(1);
+    expect(result.items[0].permissions).toMatchObject({
+      canView: true,
+      canAct: false,
+      canClaim: false,
+      canRequestSupport: true,
+      reason: 'assigned_to_other',
+    });
+  });
+
+  it('preserves legacy demo access only when explicitly enabled', async () => {
+    env.ENABLE_DEMO_REVIEW_BYPASS = true;
+    const reviewRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [
+          buildTask({
+            matchedEventId: null,
+            assignedOfficerId,
+            criterion: Criterion.ethics,
+          }),
+        ],
+        total: 1,
+      }),
+    };
+    const assignmentService = {
+      canOfficerHandleCriterion: vi.fn().mockResolvedValue(true),
+    };
+    const service = new ReviewService(reviewRepository as any, assignmentService as any);
+
+    const result = await service.listTasks(buildOfficerUser('officer.ethics@dut.udn.vn'), {
+      page: 1,
+      limit: 10,
+    } as any);
+
     expect(result.items[0].permissions).toMatchObject({
       canView: true,
       canAct: true,

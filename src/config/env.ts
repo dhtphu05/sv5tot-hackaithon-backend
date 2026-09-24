@@ -127,6 +127,7 @@ const rawEnvSchema = z.object({
   SMARTBOT_USE_DYNAMIC_PROMPT: booleanFromEnv,
   SMARTBOT_WEBHOOK_TOKEN: z.string().optional().default(''),
   SMARTBOT_LOG_RAW_RESPONSE: booleanFromEnv,
+  ENABLE_DEMO_REVIEW_BYPASS: booleanFromEnv,
   GEMINI_ENABLED: booleanFromEnv,
   GEMINI_API_KEY: z.string().optional().default(''),
   GEMINI_MODEL: z.string().min(1).default('gemini-2.5-flash'),
@@ -336,5 +337,6 @@ export const env = {
       : rawEnv.SMARTBOT_USE_DYNAMIC_PROMPT,
   SMARTBOT_LOG_RAW_RESPONSE:
     process.env.SMARTBOT_LOG_RAW_RESPONSE === undefined ? false : rawEnv.SMARTBOT_LOG_RAW_RESPONSE,
+  ENABLE_DEMO_REVIEW_BYPASS: rawEnv.ENABLE_DEMO_REVIEW_BYPASS,
 };
 export type Env = typeof env;

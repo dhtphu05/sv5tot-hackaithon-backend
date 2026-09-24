@@ -395,6 +395,7 @@ export class ResolutionService {
     input: ResolutionStatusUpdateInput,
   ) {
     const resolutionCase = await this.getCase(caseId);
+    await this.assertCanViewCase(user, resolutionCase);
     const dbStatus = mapStatusInput(input.status);
     const isClosed =
       input.status === 'closed' || input.status === 'resolved' || input.status === 'rejected';
@@ -435,6 +436,7 @@ export class ResolutionService {
 
   async reopenCase(user: AuthenticatedUser, caseId: string, input: ReopenResolutionCaseInput) {
     const resolutionCase = await this.getCase(caseId);
+    await this.assertCanViewCase(user, resolutionCase);
     if (
       resolutionCase.status === ResolutionStatus.open ||
       resolutionCase.status === ResolutionStatus.in_review
