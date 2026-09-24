@@ -11,6 +11,7 @@ import {
   ReviewDecision,
   ReviewTaskStatus,
   Role,
+  WorkspaceType,
   type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
@@ -226,10 +227,12 @@ export class ResolutionService {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only staff can update knowledge base');
     }
 
-    const relatedTask = await findRelatedReviewTask(
-      resolutionCase,
-      input.evidenceDecisions.map((item) => item.evidenceId),
-    );
+    const relatedTask = await findRelatedReviewTask(resolutionCase);
+    const relatedEvidences = await findRelatedEvidences(resolutionCase, relatedTask);
+    const relatedEvidenceIds = new Set(relatedEvidences.map((evidence) => evidence.id));
+    if (input.evidenceDecisions.some(({ evidenceId }) => !relatedEvidenceIds.has(evidenceId))) {
+      throw new AppError(404, ErrorCodes.NOT_FOUND, 'Evidence not found');
+    }
     const closedStatus = mapCaseStatus(input.decision);
     const committeeDecision = JSON.stringify({
       decision: input.decision,
@@ -370,6 +373,8 @@ export class ResolutionService {
         });
         await notifyResolutionWatchers(tx, {
           actorId: user.id,
+          sourceWorkspaceId: resolutionCase.workspaceId,
+          cityWorkspaceId: isCityReviewRole(user.role) ? user.workspaceId : null,
           applicationId: resolutionCase.applicationId,
           evidenceId: updatedEvidenceIds[0] ?? resolutionCase.evidenceId,
           reviewTaskId: relatedTask?.id,
@@ -522,7 +527,8 @@ export class ResolutionService {
       if (!await canOfficerHandleResolutionCriterion(user.id, resolutionCase, relatedTask?.criterion)) {
         throw new AppError(403, ErrorCodes.FORBIDDEN, 'You do not have access to this resolution case');
       }
-      return;
+      if (resolutionCase.createdBy === user.id || relatedTask?.assignedOfficerId === user.id) return;
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'You do not have access to this resolution case');
     }
     if (resolutionCase.createdBy === user.id) return;
     if (relatedTask?.assignedOfficerId === user.id) return;
@@ -645,7 +651,6 @@ async function findRelatedReviewTask(
     reviewTaskId?: string | null;
     reviewTask?: { id: string; assignedOfficer?: unknown } | null;
   },
-  evidenceIds: string[] = [],
 ) {
   if (resolutionCase.reviewTaskId) {
     const task = await prisma.reviewTask.findFirst({
@@ -656,7 +661,7 @@ async function findRelatedReviewTask(
   }
 
   const candidateEvidenceIds = Array.from(
-    new Set([resolutionCase.evidenceId, ...evidenceIds].filter((id): id is string => Boolean(id))),
+    new Set([resolutionCase.evidenceId].filter((id): id is string => Boolean(id))),
   );
 
   if (candidateEvidenceIds.length > 0) {
@@ -1020,6 +1025,8 @@ async function notifyResolutionWatchers(
   tx: Prisma.TransactionClient,
   input: {
     actorId: string;
+    sourceWorkspaceId: string;
+    cityWorkspaceId: string | null;
     applicationId: string;
     evidenceId: string | null;
     reviewTaskId?: string | null;
@@ -1033,7 +1040,25 @@ async function notifyResolutionWatchers(
   },
 ) {
   const managers = await tx.user.findMany({
-    where: { role: { in: [Role.manager, Role.admin] }, isActive: true },
+    where: {
+      isActive: true,
+      OR: [
+        { role: Role.admin },
+        {
+          workspaceId: input.sourceWorkspaceId,
+          role: { in: [Role.manager, Role.committee] },
+        },
+        ...(input.cityWorkspaceId
+          ? [
+              {
+                workspaceId: input.cityWorkspaceId,
+                workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+                role: { in: [Role.city_manager, Role.city_committee] },
+              },
+            ]
+          : []),
+      ],
+    },
     select: { id: true },
   });
   const recipients = new Set(managers.map((manager) => manager.id));

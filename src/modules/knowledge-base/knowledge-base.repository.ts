@@ -62,6 +62,7 @@ export class KnowledgeBaseRepository {
   }
 
   async searchApprovedEvidenceNames(
+    user: AuthenticatedUser,
     query: ApprovedEvidenceNamesQuery,
     allowedCriteria?: Criterion[],
   ) {
@@ -73,6 +74,9 @@ export class KnowledgeBaseRepository {
     }
 
     const where: Prisma.KnowledgeBaseItemWhereInput = {
+      AND: [
+        reviewKnowledgeWorkspaceFilterFor(user),
+        {
       decision: KnowledgeDecision.accepted,
       ...(query.criterion
         ? { criterion: query.criterion }
@@ -86,7 +90,9 @@ export class KnowledgeBaseRepository {
               { eventName: { contains: query.q, mode: 'insensitive' } },
             ],
           }
-        : {}),
+          : {}),
+        },
+      ],
     };
     const skip = (query.page - 1) * query.limit;
 

@@ -124,6 +124,14 @@ describe('City resolution authorization', () => {
     };
     vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
     vi.mocked(prisma.officerSpecialization.findFirst).mockResolvedValue({ id: 'spec-1' } as never);
+    vi.mocked(prisma.reviewTask.findFirst).mockResolvedValue({
+      id: 'task-1',
+      applicationId: 'application-1',
+      criterion: 'volunteer',
+      assignedOfficerId: 'city-staff',
+      status: 'resolution_needed',
+      updatedAt: new Date(),
+    } as never);
 
     const result = await new ResolutionService().getCaseDetail(
       cityUser(Role.city_officer),
@@ -146,6 +154,101 @@ describe('City resolution authorization', () => {
         },
       }),
     );
+  });
+
+  it('rejects resolution decisions that target evidence outside the case', async () => {
+    const caseRecord = {
+      ...resolutionCase(WorkspaceType.SCHOOL, true),
+      evidenceId: 'case-evidence',
+      evidence: {
+        id: 'case-evidence',
+        evidenceName: 'Case evidence',
+        criterion: 'volunteer',
+        eventId: null,
+      },
+    };
+    vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
+
+    await expect(
+      new ResolutionService().resolveCase(cityUser(Role.city_manager), 'case-1', {
+        decision: 'rejected',
+        note: 'Reviewed',
+        evidenceDecisions: [{ evidenceId: 'foreign-evidence', decision: 'rejected' }],
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('scopes resolution watchers to the source School and active City workspace', async () => {
+    const caseRecord = {
+      ...resolutionCase(WorkspaceType.SCHOOL, true),
+      application: {
+        ...(resolutionCase(WorkspaceType.SCHOOL, true).application as Record<string, unknown>),
+        studentId: 'student-1',
+        student: {
+          fullName: 'Student Example',
+          email: 'student@example.com',
+          studentCode: '1001',
+          className: 'Class 1',
+          faculty: 'Faculty',
+        },
+      },
+    };
+    vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
+    const watcherQuery = vi.fn().mockResolvedValue([]);
+    const tx = {
+      resolutionCase: {
+        update: vi.fn().mockResolvedValue(caseRecord),
+        count: vi.fn().mockResolvedValue(0),
+        findUnique: vi.fn().mockResolvedValue(caseRecord),
+      },
+      auditLog: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'opened-audit' }),
+        create: vi.fn().mockResolvedValue({ id: 'audit' }),
+      },
+      application: {
+        findUnique: vi.fn().mockResolvedValue({ workspaceId: schoolId }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      reviewTask: { findMany: vi.fn().mockResolvedValue([]) },
+      user: { findMany: watcherQuery },
+      notification: {
+        create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({
+            ...data,
+            id: 'notification',
+            createdAt: new Date(),
+            readAt: null,
+          }),
+        ),
+      },
+    };
+    vi.mocked(prisma.$transaction).mockImplementation(
+      ((callback: (transaction: unknown) => Promise<unknown>) => callback(tx)) as never,
+    );
+
+    await new ResolutionService().resolveCase(cityUser(Role.city_manager), 'case-1', {
+      decision: 'closed_no_action',
+      note: 'Reviewed',
+      evidenceDecisions: [],
+    } as never);
+
+    expect(watcherQuery).toHaveBeenCalledWith({
+      where: {
+        isActive: true,
+        OR: [
+          { role: Role.admin },
+          { workspaceId: schoolId, role: { in: [Role.manager, Role.committee] } },
+          {
+            workspaceId: cityId,
+            workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+            role: { in: [Role.city_manager, Role.city_committee] },
+          },
+        ],
+      },
+      select: { id: true },
+    });
   });
 
   it('lets City Manager and Committee resolve active School cases, but rejects inactive Schools before writes', async () => {

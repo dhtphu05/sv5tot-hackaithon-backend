@@ -236,6 +236,41 @@ describe('City staff Knowledge Base scope', () => {
     );
   });
 
+  it('scopes approved evidence names to the user workspace while preserving text search', async () => {
+    const db = {
+      knowledgeBaseItem: {
+        findMany: vi.fn().mockResolvedValue([]),
+        count: vi.fn().mockResolvedValue(0),
+      },
+      $transaction: vi.fn().mockResolvedValue([[], 0]),
+    };
+    const repository = new KnowledgeBaseRepository(db as never);
+
+    await repository.searchApprovedEvidenceNames(cityManager(), { page: 1, limit: 10, q: 'award' } as never);
+
+    expect(db.knowledgeBaseItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          AND: [
+            {
+              OR: [
+                { workspaceId: cityId },
+                { workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } } },
+              ],
+            },
+            expect.objectContaining({
+              decision: 'accepted',
+              OR: [
+                { evidenceName: { contains: 'award', mode: 'insensitive' } },
+                { eventName: { contains: 'award', mode: 'insensitive' } },
+              ],
+            }),
+          ],
+        },
+      }),
+    );
+  });
+
   it('limits City Officer approved evidence names by active criterion specialization', async () => {
     vi.mocked(prisma.officerSpecialization.findMany).mockResolvedValue([
       { criterion: Criterion.volunteer },
@@ -249,6 +284,7 @@ describe('City staff Knowledge Base scope', () => {
     );
 
     expect(repository.searchApprovedEvidenceNames).toHaveBeenCalledWith(
+      { ...cityManager(), role: Role.city_officer },
       { page: 1, limit: 10 },
       [Criterion.volunteer],
     );

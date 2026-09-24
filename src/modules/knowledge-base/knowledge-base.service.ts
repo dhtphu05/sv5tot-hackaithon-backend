@@ -46,6 +46,7 @@ export class KnowledgeBaseService {
         ? await this.getOfficerActiveCriteria(user.id)
         : undefined;
     const { items, total } = await this.repository.searchApprovedEvidenceNames(
+      user,
       query,
       allowedCriteria,
     );

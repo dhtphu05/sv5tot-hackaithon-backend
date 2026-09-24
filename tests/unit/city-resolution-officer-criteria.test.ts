@@ -99,4 +99,28 @@ describe('City Officer resolution criterion scope', () => {
       statusCode: 403,
     });
   });
+
+  it('rejects direct detail access to an unassigned case even when its criterion matches', async () => {
+    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'specialization-1' });
+    prismaMock.resolutionCase.findUnique.mockResolvedValue({
+      id: 'case-2',
+      workspaceId: 'school-1',
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      applicationId: 'application-2',
+      evidenceId: 'evidence-2',
+      reviewTaskId: 'task-2',
+      createdBy: 'student-2',
+      evidence: { id: 'evidence-2', criterion: 'volunteer' },
+    });
+    prismaMock.reviewTask.findFirst.mockResolvedValue({
+      id: 'task-2',
+      applicationId: 'application-2',
+      criterion: 'volunteer',
+      assignedOfficerId: 'another-city-officer',
+    });
+
+    await expect(new ResolutionService().getCaseDetail(user, 'case-2')).rejects.toMatchObject({
+      statusCode: 403,
+    });
+  });
 });
