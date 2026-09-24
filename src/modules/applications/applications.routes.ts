@@ -14,6 +14,10 @@ import {
   updateApplicationTargetLevel,
 } from './applications.controller';
 import {
+  evaluateApplicationCriteria,
+  getApplicationCriteriaGap,
+} from '../criteria/criteria.controller';
+import {
   getCurrentAssistantContext,
   streamCurrentAssistantNarrative,
 } from './student-assistant/student-assistant.controller';
@@ -43,6 +47,10 @@ import {
   timelineQuerySchema,
   updateTargetLevelSchema,
 } from './applications.validation';
+import {
+  criteriaEvaluationQuerySchema,
+  criteriaGapQuerySchema,
+} from '../criteria/criteria.validation';
 import {
   addAcademicAchievementSchema,
   addEthicsAchievementSchema,
@@ -123,6 +131,20 @@ applicationsRouter.get(
     Role.admin,
   ),
   asyncHandler(getApplicationCriteriaCompletion),
+);
+applicationsRouter.get(
+  '/:id/criteria-evaluation',
+  requireAuth,
+  requireRole(Role.student, Role.class_representative, Role.officer, Role.manager, Role.committee, Role.admin),
+  validate({ query: criteriaEvaluationQuerySchema }),
+  asyncHandler(evaluateApplicationCriteria),
+);
+applicationsRouter.get(
+  '/:id/criteria-gap',
+  requireAuth,
+  requireRole(Role.student, Role.class_representative, Role.officer, Role.manager, Role.committee, Role.admin),
+  validate({ query: criteriaGapQuerySchema }),
+  asyncHandler(getApplicationCriteriaGap),
 );
 applicationsRouter.post(
   '/:id/requirement-responses',

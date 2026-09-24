@@ -310,6 +310,7 @@ model Workspace {
   decisionImports            DecisionImport[]
   knowledgeBaseItems         KnowledgeBaseItem[]
   criteriaVersions           CriteriaVersion[]
+  criteriaConfigs            CriteriaConfig[]
   reviewTasks                ReviewTask[]
   resolutionCases            ResolutionCase[]
   eventRegistryAliases       EventRegistryAlias[]
@@ -586,6 +587,10 @@ model EvidenceCard {
   extractedFieldsJson        Json?
   normalizedFieldsJson       Json?                       @map("normalized_fields_json")
   warningsJson               Json?
+  documentType               String?                     @map("document_type")
+  suggestedCriteriaJson      Json?                       @map("suggested_criteria_json")
+  evidencePrecheckJson       Json?                       @map("evidence_precheck_json")
+  evidencePrecheckedAt       DateTime?                   @map("evidence_prechecked_at")
   matchedEventId             String?                     @db.Uuid
   matchedParticipantId       String?                     @map("matched_participant_id") @db.Uuid
   matchedKnowledgeItemIds    Json?
@@ -593,6 +598,10 @@ model EvidenceCard {
   provider                   String?
   providerModel              String?                     @map("provider_model")
   promptVersion              String?                     @map("prompt_version")
+  sourceEvidenceFileId       String?                     @map("source_evidence_file_id") @db.Uuid
+  sourceFileId               String?                     @map("source_file_id") @db.Uuid
+  analysisRevision           Int                         @default(0) @map("analysis_revision")
+  analysedAt                 DateTime?                   @map("analysed_at")
   fieldConfidenceJson        Json?                       @map("field_confidence_json")
   requiresHumanConfirmation  Boolean                     @default(false) @map("requires_human_confirmation")
   confirmationStatus         String                      @default("pending") @map("confirmation_status")
@@ -611,6 +620,8 @@ model EvidenceCard {
   approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 
   @@index([confirmationStatus])
+  @@index([sourceEvidenceFileId])
+  @@index([sourceFileId])
 }
 
 model EventRegistry {
@@ -935,6 +946,57 @@ model CriteriaVersion {
   @@unique([workspaceId, schoolYear, level, versionName])
   @@index([workspaceId, level, isActive])
   @@index([level, isActive])
+}
+
+model CriteriaConfig {
+  id                   String                   @id @default(uuid()) @db.Uuid
+  scope                Level
+  workspaceId          String?                  @db.Uuid
+  code                 String                   @unique
+  title                String
+  description          String?
+  sourceDocumentName   String
+  sourceDocumentNumber String?
+  sourceIssuedAt       DateTime?
+  sourcePeriodLabel    String?
+  sourceOrganization   String
+  sourceFileName       String?
+  sourceNote           String?
+  isActive             Boolean                  @default(true)
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  workspace            Workspace?               @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  rules                NormalizedCriteriaRule[]
+
+  @@index([scope, workspaceId, isActive])
+  @@index([isActive])
+}
+
+model NormalizedCriteriaRule {
+  id                       String         @id @default(uuid()) @db.Uuid
+  criteriaConfigId         String         @db.Uuid
+  criterion                Criterion
+  ruleKey                  String
+  title                    String
+  requirementJson          Json
+  mandatory                Boolean        @default(true)
+  priorityRule             Boolean        @default(false)
+  studentFriendlyText      String
+  officerFriendlyText      String?
+  acceptedEvidenceHintsJson Json?
+  missingActionHintsJson   Json?
+  sourcePage               Int?
+  sourceSection            String?
+  sourceQuote              String?
+  sortOrder                Int            @default(0)
+  isActive                 Boolean        @default(true)
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+  criteriaConfig           CriteriaConfig @relation(fields: [criteriaConfigId], references: [id], onDelete: Cascade)
+
+  @@unique([criteriaConfigId, ruleKey])
+  @@index([criteriaConfigId, criterion, isActive])
+  @@index([criteriaConfigId, mandatory, priorityRule, isActive])
 }
 
 model CriteriaRule {

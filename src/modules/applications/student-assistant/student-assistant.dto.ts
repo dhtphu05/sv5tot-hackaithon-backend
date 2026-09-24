@@ -96,9 +96,9 @@ export type StudentAssistantContext = {
 };
 
 export type AssistantStreamEventCallbacks = {
-  onMeta: (data: { contextVersion: string; requestId: string; cached: boolean }) => void | Promise<void>;
-  onStatus: (data: { stage: 'preparing_explanation' }) => void | Promise<void>;
-  onDelta: (data: { text: string }) => void | Promise<void>;
-  onComplete: (data: { text: string; contextVersion: string }) => void | Promise<void>;
-  onError: (data: { code: string; recoverable: boolean }) => void | Promise<void>;
+  onMeta: (data: { contextVersion: string; requestId: string; cached: boolean; sequence?: number }) => void | Promise<void>;
+  onStatus: (data: { stage: 'preparing_explanation'; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onDelta: (data: { text: string; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onComplete: (data: { text: string; finalText: string; contextVersion: string; fallback?: boolean; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onError: (data: { code: string; recoverable: boolean; requestId?: string; sequence?: number }) => void | Promise<void>;
 };

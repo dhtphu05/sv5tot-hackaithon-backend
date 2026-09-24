@@ -1032,6 +1032,11 @@ export class EvidencesService {
     const studentCard = {
       id: card.id,
       provider: card.provider,
+      sourceFileId: card.sourceFileId,
+      analysisRevision: card.analysisRevision,
+      documentType: card.documentType,
+      suggestedCriteria: Array.isArray(card.suggestedCriteriaJson) ? card.suggestedCriteriaJson : [],
+      evidencePrecheck: card.evidencePrecheckJson ?? null,
       confirmationStatus: normalizeConfirmationStatus(card.confirmationStatus),
       requiresHumanConfirmation: card.requiresHumanConfirmation,
       confirmedFields: fieldState.confirmedFields,

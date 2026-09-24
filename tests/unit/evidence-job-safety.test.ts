@@ -4,6 +4,7 @@ import {
   buildEvidenceAnalysisJobInput,
   parseEvidenceAnalysisJobInput,
   isStaleEvidenceAnalysisJob,
+  recoverEvidenceAnalysisJobInputFromCurrentFile,
 } from '../../src/modules/jobs/evidence-analysis-job-input';
 import { JobsRepository } from '../../src/modules/jobs/jobs.repository';
 
@@ -25,6 +26,56 @@ describe('evidence analysis job input', () => {
   it('rejects missing or malformed job payloads', () => {
     expect(() => parseEvidenceAnalysisJobInput(null)).toThrow();
     expect(() => parseEvidenceAnalysisJobInput({ evidenceId: 'evidence-1' })).toThrow();
+  });
+
+  it('normalizes persisted JSON objects and ignores unrelated metadata', () => {
+    const input = Object.assign(Object.create(null), {
+      evidenceId: 'evidence-1',
+      evidenceFileId: 'evidence-file-1',
+      fileId: 'file-1',
+      requestId: 'internal-metadata',
+    });
+
+    expect(parseEvidenceAnalysisJobInput(input)).toEqual({
+      evidenceId: 'evidence-1',
+      evidenceFileId: 'evidence-file-1',
+      fileId: 'file-1',
+    });
+  });
+
+  it('accepts snake_case binding keys from legacy job payloads', () => {
+    expect(
+      parseEvidenceAnalysisJobInput({
+        evidence_id: 'evidence-1',
+        evidence_file_id: 'evidence-file-1',
+        file_id: 'file-1',
+      }),
+    ).toEqual({
+      evidenceId: 'evidence-1',
+      evidenceFileId: 'evidence-file-1',
+      fileId: 'file-1',
+    });
+  });
+
+  it('recovers missing binding only when one current evidence file exists', () => {
+    expect(
+      recoverEvidenceAnalysisJobInputFromCurrentFile('evidence-1', [
+        { id: 'evidence-file-1', fileId: 'file-1' },
+      ]),
+    ).toEqual({
+      evidenceId: 'evidence-1',
+      evidenceFileId: 'evidence-file-1',
+      fileId: 'file-1',
+      provider: 'openai',
+      trigger: 'manual_retry',
+    });
+
+    expect(
+      recoverEvidenceAnalysisJobInputFromCurrentFile('evidence-1', [
+        { id: 'old-evidence-file', fileId: 'old-file' },
+        { id: 'new-evidence-file', fileId: 'new-file' },
+      ]),
+    ).toBeNull();
   });
 
   it('detects stale evidence jobs before card persistence', () => {

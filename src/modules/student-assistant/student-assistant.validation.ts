@@ -1,4 +1,4 @@
-import { Criterion } from '@prisma/client';
+import { Criterion, Level } from '@prisma/client';
 import { z } from 'zod';
 
 const contextTypeSchema = z.enum([
@@ -7,6 +7,7 @@ const contextTypeSchema = z.enum([
   'precheck',
   'event_registry',
   'supplement',
+  'criteria',
 ]);
 
 export const studentAssistantContextQuerySchema = z.object({
@@ -17,6 +18,7 @@ export const studentAssistantContextQuerySchema = z.object({
   evidenceId: z.string().uuid().optional(),
   eventId: z.string().uuid().optional(),
   reviewTaskId: z.string().uuid().optional(),
+  scope: z.nativeEnum(Level).optional(),
   schoolYear: z
     .string()
     .regex(/^\d{4}-\d{4}$/)
@@ -26,6 +28,9 @@ export const studentAssistantContextQuerySchema = z.object({
 export const studentAssistantStreamSchema = studentAssistantContextQuerySchema.extend({
   contextVersion: z.string().min(8).max(128),
   message: z.string().trim().min(1).max(600),
+  clientConversationId: z.string().trim().min(1).max(128).optional(),
+  clientTurnId: z.string().trim().min(1).max(128).optional(),
+  clientAttemptId: z.string().trim().min(1).max(128).optional(),
   recentMessages: z
     .array(
       z.object({

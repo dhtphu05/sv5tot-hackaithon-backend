@@ -1124,3 +1124,32 @@ This section reflects the hardening pass for "Kho minh chứng / Kho sự kiện
 - Verification on 2026-09-24 in the isolated worktree: `prisma validate`, `prisma generate`, `npm run build`, and `npm run lint` passed. The final `npm test` run reported 64 files passing (367 tests), with 12 skipped; three integration suites failed before assertions because PostgreSQL at `localhost:5432` rejected the configured `postgres` credentials. The dedicated workspace-isolation suite likewise ran no assertions for this reason. No migration was applied to that database. ESLint reports 33 `no-explicit-any` warnings and zero errors.
 - Phase 1 Part 1 status in this branch: F01 evidence upload workspace/owner checks, F02 task-creation scope, F03 claim scope and claimability, F04 resolution visibility, F05 event/file integrity, F07 workspace-filtered automatic assignment, F08 `facultyScope` routing-only semantics, and F09 opt-in demo bypass have regression coverage. F06 remains an inspection-only finding: student name projections expose `id`, `title`, and `criterion`; staff projections additionally expose `eventName`, `level`, `usageCount`, and `updatedAt`. No direct student or reviewer identifier is selected; title/event text is free text.
 - No hierarchy CRUD API, new role framework, frontend change, upload feature, DecisionImport permission, JWT change, or review-engine algorithm change was added. The Part 2 migration remains unapplied until a database with valid test credentials is configured.
+
+## Normalized Criteria Advisor Foundation On 2026-07-21
+
+- Added additive current-criteria persistence separate from legacy `CriteriaVersion`:
+  - `CriteriaConfig` stores one current config by `scope + workspaceId/null`, stable `code`, display metadata, and official source metadata.
+  - `NormalizedCriteriaRule` stores active logical rule trees, mandatory/priority separation, student-facing copy, hints, and source refs.
+  - Legacy `CriteriaVersion` and `CriteriaRule` remain for backward compatibility, but the normalized criteria advisor/evaluator does not select by `schoolYear`, version name, effective dates, or historical snapshot.
+- Added seed modules under `prisma/seeds/criteria`:
+  - Stable configs: `DUT_SCHOOL_CURRENT`, `UDN_UNIVERSITY_CURRENT`, `DANANG_CITY_CURRENT`, and `CENTRAL_CURRENT`.
+  - Seed data is explicit TypeScript, does not parse PDFs, stores source filenames only, and validates duplicate keys, official five-criterion coverage, empty logical groups, priority/mandatory separation, manual-review nodes, and source metadata.
+  - `prisma/seed.ts` still runs the legacy criteria seed for existing registration/readiness behavior, then runs the normalized criteria seed additively.
+- Added `src/modules/criteria`:
+  - `GET /api/criteria/configs/active`
+  - `GET /api/applications/:id/criteria-evaluation`
+  - `GET /api/applications/:id/criteria-gap`
+  - Evaluation is deterministic, never calls OpenAI, does not update final status, and only trusts verified metrics, confirmed/corrected Evidence Cards, and trusted Event Registry imports.
+  - Status language is `READY`, `INCOMPLETE`, `NEEDS_CONFIRMATION`, and `NEEDS_MANUAL_REVIEW`; no official pass/fail is returned.
+- Extended common Student Assistant additively:
+  - New `criteria` context type, criteria facts/source refs, and allowlisted tools `get_active_criteria`, `evaluate_my_application`, and `compare_criteria_levels`.
+  - Criteria questions without criteria facts fall back instead of being answered from model memory.
+  - Criteria model answers are rejected when they reference unknown facts/actions or introduce numeric values not present in backend facts.
+- Verification:
+  - `pnpm exec prisma validate`: passed.
+  - `pnpm prisma:generate`: passed.
+  - `pnpm build`: passed.
+  - Bounded ESLint over criteria, student-assistant, app/routes/constants/errors, seed, and touched tests: passed.
+  - `pnpm exec vitest run tests/unit/normalized-criteria-seed.test.ts tests/unit/criteria-precheck-adapter.test.ts tests/unit/student-communication-assistant-answer.test.ts`: passed, 3 files and 15 tests.
+  - Pure seed validation reported 4 configs, 27 rules, 23 mandatory rules, 4 priority rules, 4 manual-review rules, and 0 validation errors.
+  - Running `pnpm test -- ...` invoked the repo integration suite and failed on local PostgreSQL authentication for pre-existing integration fixtures; targeted unit tests were rerun directly with `pnpm exec vitest run ...` and passed.

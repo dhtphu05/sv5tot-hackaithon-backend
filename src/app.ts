@@ -18,6 +18,7 @@ import { authRouter } from './modules/auth/auth.routes';
 import { cascadeRouter } from './modules/cascade/cascade.routes';
 import { chatbotRouter } from './modules/chatbot/chatbot.routes';
 import { collectiveRouter } from './modules/collective/collective.routes';
+import { criteriaRouter } from './modules/criteria/criteria.routes';
 import { decisionImportsRouter } from './modules/decision-imports/decision-imports.routes';
 import { evidenceMatchingRouter } from './modules/evidence-matching/evidence-matching.routes';
 import { evidenceKnowledgeRouter } from './modules/evidence-knowledge/evidence-knowledge.routes';
@@ -88,6 +89,7 @@ export function createApp() {
   app.use('/api/manager', managerRouter);
   app.use('/api/committee', committeeRouter);
   app.use('/api/collective', collectiveRouter);
+  app.use('/api/criteria', criteriaRouter);
   app.use('/api/resolution', resolutionRouter);
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/audit', auditRouter);

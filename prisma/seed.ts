@@ -4,6 +4,7 @@ import { logger } from '../src/config/logger';
 import { prisma } from '../src/infrastructure/database/prisma';
 import { PasswordService } from '../src/modules/auth/password.service';
 import { defaultCriteriaUnitScope, fallbackRulesByLevel } from '../src/modules/rules/criteria.constants';
+import { seedNormalizedCriteria } from './seeds/criteria/seed-criteria';
 
 const passwordService = new PasswordService();
 const defaultWorkspaceCode = 'DHBK-DHDN';
@@ -517,6 +518,7 @@ function toSeedJson(value: unknown): Prisma.InputJsonValue | undefined {
 async function main(): Promise<void> {
   await seedUsers();
   await seedCriteriaRules();
+  const normalizedCriteriaSeed = await seedNormalizedCriteria(prisma);
   logger.info(
     {
       workspaceCount: udnWorkspaces.length,
@@ -527,6 +529,14 @@ async function main(): Promise<void> {
       demoUserCount: demoUsers.length + economicsDemoUsers.length,
       economicsDemoUserCount: economicsDemoUsers.length,
       economicsTrialCriteriaVersionName,
+      normalizedCriteria: {
+        configCount: normalizedCriteriaSeed.configCount,
+        ruleCount: normalizedCriteriaSeed.ruleCount,
+        mandatoryCount: normalizedCriteriaSeed.mandatoryCount,
+        priorityCount: normalizedCriteriaSeed.priorityCount,
+        manualReviewCount: normalizedCriteriaSeed.manualReviewCount,
+        deactivatedRuleCount: normalizedCriteriaSeed.deactivatedRuleCount,
+      },
     },
     'Seed completed',
   );
