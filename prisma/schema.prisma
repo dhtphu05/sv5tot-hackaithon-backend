@@ -141,6 +141,7 @@ enum JobStatus {
 enum JobType {
   evidence_ocr
   event_roster_indexing
+  award_roster_ingestion
   evidence_card_generation
   smartreader_extract
   decision_metadata

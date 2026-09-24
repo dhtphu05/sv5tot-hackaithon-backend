@@ -45,6 +45,22 @@ export const updateAwardDecisionSchema = z
   .strict()
   .refine((value) => Object.keys(value).length > 0, 'At least one field must be provided');
 
+export const awardRosterMappingSchema = z
+  .object({
+    studentCode: z.string().trim().min(1),
+    fullName: z.string().trim().min(1),
+    className: z.string().trim().min(1).optional(),
+    institution: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
+export const awardRosterPageQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
 export type ListAwardDecisionsQuery = z.infer<typeof listAwardDecisionsQuerySchema>;
 export type CreateAwardDecisionInput = z.infer<typeof createAwardDecisionSchema>;
 export type UpdateAwardDecisionInput = z.infer<typeof updateAwardDecisionSchema>;
+export type AwardRosterMappingInput = z.infer<typeof awardRosterMappingSchema>;
+export type AwardRosterPageQuery = z.infer<typeof awardRosterPageQuerySchema>;

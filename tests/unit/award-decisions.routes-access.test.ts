@@ -3,7 +3,7 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Role } from '@prisma/client';
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn() }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), processRoster: vi.fn() }));
 
 vi.mock('../../src/middlewares/auth.middleware', () => ({
   requireAuth: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
@@ -32,6 +32,12 @@ vi.mock('../../src/middlewares/auth.middleware', () => ({
 
 vi.mock('../../src/modules/award-decisions/award-decisions.service', () => ({
   AwardDecisionsService: vi.fn(function AwardDecisionsService() {
+    return mocks;
+  }),
+}));
+
+vi.mock('../../src/modules/award-decisions/award-roster.service', () => ({
+  AwardRosterService: vi.fn(function AwardRosterService() {
     return mocks;
   }),
 }));
@@ -67,6 +73,19 @@ describe('Award Decision and legacy import route roles', () => {
     expect(mocks.list).toHaveBeenCalledOnce();
   });
 
+  it('allows data uploader to start processing through the Award API without opening the generic jobs API', async () => {
+    mocks.processRoster.mockResolvedValue({ status: 'processing' });
+
+    const response = await request(buildApp())
+      .post('/api/award-decisions/decision-1/process-roster')
+      .set('x-test-role', Role.data_uploader)
+      .expect(202);
+
+    expect(response.body.data).toEqual({ status: 'processing' });
+    expect(JSON.stringify(response.body)).not.toContain('jobId');
+    expect(mocks.processRoster).toHaveBeenCalledOnce();
+  });
+
   it.each([Role.student, Role.city_officer, Role.city_manager, Role.city_committee, Role.manager])(
     'denies %s access to Award Decision routes',
     async (role) => {
@@ -79,6 +98,15 @@ describe('Award Decision and legacy import route roles', () => {
       expect(mocks.list).not.toHaveBeenCalled();
     },
   );
+
+  it('denies City roles before calling Award roster processing actions', async () => {
+    await request(buildApp())
+      .post('/api/award-decisions/decision-1/process-roster')
+      .set('x-test-role', Role.city_officer)
+      .expect(403);
+
+    expect(mocks.processRoster).not.toHaveBeenCalled();
+  });
 
   it('keeps data uploader out of Event Registry and DecisionImport routes', async () => {
     const app = buildApp();

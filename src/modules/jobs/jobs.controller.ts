@@ -22,5 +22,9 @@ export async function retryJob(req: Request, res: Response): Promise<void> {
 
 export async function runWorkerTick(req: Request, res: Response): Promise<void> {
   const data = await jobsService.runWorkerTick();
-  sendSuccess(res, data, { requestId: req.requestId });
+  const safeData =
+    data.job?.jobType === 'award_roster_ingestion'
+      ? { ...data, job: { jobType: data.job.jobType, status: data.job.status } }
+      : data;
+  sendSuccess(res, safeData, { requestId: req.requestId });
 }

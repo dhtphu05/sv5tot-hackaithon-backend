@@ -14,13 +14,13 @@ import {
   type CollectiveProfile,
   type Prisma,
 } from '@prisma/client';
-import { readSheet } from 'read-excel-file/node';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { normalizeSchoolYear } from '../../shared/utils/school-year';
+import { readRosterTable } from '../../shared/utils/roster-table-reader';
 import { assertReviewWorkspaceAccess, reviewWorkspaceFilterFor } from '../../shared/utils/review-workspace-scope';
 import {
   assertSameWorkspace,
@@ -1152,14 +1152,12 @@ async function parseRosterFile(file: UploadedFile): Promise<RosterParseResult> {
   const isXlsx =
     file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
     file.originalname.toLowerCase().endsWith('.xlsx');
-  const matrix: string[][] = isXlsx
-    ? (await readSheet(file.buffer)).map((row) => row.map((cell) => String(cell ?? '').trim()))
-    : file.buffer
-        .toString('utf8')
-        .replace(/^\uFEFF/, '')
-        .split(/\r?\n/)
-        .filter((line) => line.trim())
-        .map(parseCsvLine);
+  const table = await readRosterTable({
+    buffer: file.buffer,
+    format: isXlsx ? 'xlsx' : 'csv',
+    preserveBlankRows: true,
+  });
+  const matrix: string[][] = [table.columns, ...table.rows.map((row) => row.map((cell) => String(cell ?? '').trim()))];
   if (matrix.length < 2) return { rows: [], totalRows: 0, invalidRows: [] };
   const headers = matrix[0].map((value) => canonicalHeader(normalizeHeader(value)));
   const rows: UpsertCollectiveMemberInput[] = [];
@@ -1241,28 +1239,6 @@ function canonicalHeader(value: string): string {
     ghichu: 'note',
   };
   return aliases[value] ?? value;
-}
-
-function parseCsvLine(line: string): string[] {
-  const values: string[] = [];
-  let current = '';
-  let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if (character === '"' && line[index + 1] === '"') {
-      current += '"';
-      index += 1;
-    } else if (character === '"') {
-      quoted = !quoted;
-    } else if (character === ',' && !quoted) {
-      values.push(current.trim());
-      current = '';
-    } else {
-      current += character;
-    }
-  }
-  values.push(current.trim());
-  return values;
 }
 
 function normalizeParticipation(value?: string): string {

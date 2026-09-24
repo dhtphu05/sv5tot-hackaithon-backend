@@ -1,6 +1,8 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { ListAwardDecisionsQuery } from './award-decisions.validation';
+import { AppError } from '../../shared/errors/app-error';
+import { ErrorCodes } from '../../shared/errors/error-codes';
 
 export const awardDecisionInclude = {
   issuerWorkspace: { select: { id: true, code: true, name: true, shortName: true, type: true } },
@@ -64,7 +66,18 @@ export class AwardDecisionsRepository {
   }
 
   update(id: string, data: Prisma.AwardDecisionUpdateInput) {
-    return this.db.awardDecision.update({ where: { id }, data, include: awardDecisionInclude });
+    return this.db.$transaction(async (tx) => {
+      const updated = await tx.awardDecision.updateMany({
+        where: { id, status: 'DRAFT' },
+        data,
+      });
+      if (updated.count !== 1) {
+        const exists = await tx.awardDecision.findUnique({ where: { id }, select: { id: true } });
+        if (!exists) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Award decision not found');
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Only draft award decisions can be edited');
+      }
+      return tx.awardDecision.findUniqueOrThrow({ where: { id }, include: awardDecisionInclude });
+    });
   }
 
   attachFile(input: {

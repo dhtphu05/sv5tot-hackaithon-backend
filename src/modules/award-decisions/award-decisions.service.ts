@@ -24,7 +24,6 @@ const decisionFileTypes = new Set(['application/pdf', 'image/jpeg', 'image/png',
 const rosterFileTypes = new Set([
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-excel',
   'text/csv',
 ]);
 

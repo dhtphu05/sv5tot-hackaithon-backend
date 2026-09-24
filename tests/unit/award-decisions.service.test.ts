@@ -197,6 +197,13 @@ describe('AwardDecisionsService', () => {
       mimetype: 'text/csv',
     })).rejects.toMatchObject({ statusCode: 400 });
     expect(storageService.saveFile).not.toHaveBeenCalled();
+
+    await expect(service.uploadFile(user(Role.data_uploader), 'decision-1', 'roster', {
+      ...file,
+      originalname: 'roster.xls',
+      mimetype: 'application/vnd.ms-excel',
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(storageService.saveFile).not.toHaveBeenCalled();
   });
 
   it('stores an authorized draft file in its issuer workspace without starting jobs', async () => {
