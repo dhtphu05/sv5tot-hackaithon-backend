@@ -147,7 +147,7 @@ describe('non-AI individual application end-to-end flow', () => {
         name: 'E2E Non-AI Workspace',
         shortName: 'E2E',
         type: WorkspaceType.SCHOOL,
-        parentWorkspaceId: cityWorkspaceId,
+        parentWorkspaceId: null,
         isActive: true,
         registrationEnabled: true,
       },
@@ -156,7 +156,7 @@ describe('non-AI individual application end-to-end flow', () => {
         name: 'E2E Non-AI Workspace',
         shortName: 'E2E',
         type: WorkspaceType.SCHOOL,
-        parentWorkspaceId: cityWorkspaceId,
+        parentWorkspaceId: null,
         isActive: true,
         registrationEnabled: true,
       },
@@ -220,20 +220,20 @@ describe('non-AI individual application end-to-end flow', () => {
     const started = await request(app)
       .post('/api/applications/current/start')
       .set('Authorization', `Bearer ${student.accessToken}`)
-      .send({ schoolYear, targetLevel: Level.school })
+      .send({ schoolYear, targetLevel: Level.city })
       .expect(201);
     const applicationId = started.body.data.id as string;
     expect(started.body.data).toMatchObject({
       id: applicationId,
       status: 'draft',
-      targetLevel: Level.school,
+      targetLevel: Level.city,
     });
 
     const draft = await request(app)
       .patch(`/api/applications/${applicationId}/draft`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .send({
-        targetLevel: Level.school,
+        targetLevel: Level.city,
         basicInfo: {
           fullName: 'E2E Student',
           studentCode: 'E2E209899',

@@ -14,7 +14,7 @@ import {
   type Application,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-import { auditActions } from '../../shared/constants/application';
+import { auditActions, editableApplicationStatuses } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -33,6 +33,7 @@ import {
 import { findProcessingEvidence, isApplicationPrecheckStale } from './application-freshness';
 import { ApplicationsRepository } from './applications.repository';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
+import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
 import type {
   AutosaveDraftInput,
   GetCurrentApplicationQuery,
@@ -62,6 +63,7 @@ export class ApplicationsService {
     private readonly reviewAssignmentService = new ReviewAssignmentService(),
     private readonly emailOutboxService = new EmailOutboxService(),
     private readonly precheckService = new PrecheckService(),
+    private readonly citySubmissionEligibilityService = new CitySubmissionEligibilityService(),
   ) {}
 
   async getCurrent(user: AuthenticatedUser, query: GetCurrentApplicationQuery) {
@@ -154,13 +156,18 @@ export class ApplicationsService {
     await prisma.$transaction(async (tx) => {
       const newVersion = application.currentDraftVersion + 1;
 
-      await tx.application.update({
-        where: { id: application.id },
+      const updateResult = await tx.application.updateMany({
+        where: {
+          id: application.id,
+          status: { in: [...editableApplicationStatuses] },
+          currentDraftVersion: application.currentDraftVersion,
+        },
         data: {
           targetLevel: input.targetLevel,
           currentDraftVersion: newVersion,
         },
       });
+      assertDraftWriteSucceeded(updateResult.count);
 
       await tx.applicationDraftSnapshot.create({
         data: {
@@ -198,13 +205,18 @@ export class ApplicationsService {
     const savedAt = new Date();
 
     await prisma.$transaction(async (tx) => {
-      await tx.application.update({
-        where: { id: application.id },
+      const updateResult = await tx.application.updateMany({
+        where: {
+          id: application.id,
+          status: { in: [...editableApplicationStatuses] },
+          currentDraftVersion: application.currentDraftVersion,
+        },
         data: {
           ...(input.targetLevel ? { targetLevel: input.targetLevel } : {}),
           currentDraftVersion: newVersion,
         },
       });
+      assertDraftWriteSucceeded(updateResult.count);
 
       await tx.applicationDraftSnapshot.create({
         data: {
@@ -307,6 +319,15 @@ export class ApplicationsService {
       );
     }
 
+    if (
+      user.role === Role.student &&
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city &&
+      (application.status !== ApplicationStatus.supplement_required || application.submittedAt === null)
+    ) {
+      await this.assertCitySubmissionEligible(user, application.id);
+    }
+
     const processingEvidence = findProcessingEvidence(application);
     if (processingEvidence) {
       throw new AppError(
@@ -350,8 +371,46 @@ export class ApplicationsService {
       );
     }
 
+    const submissionState = await prisma.application.findUnique({
+      where: { id: application.id },
+      select: {
+        applicationType: true,
+        targetLevel: true,
+        status: true,
+        submittedAt: true,
+        currentDraftVersion: true,
+        updatedAt: true,
+      },
+    });
+    if (
+      !submissionState ||
+      submissionState.applicationType !== application.applicationType ||
+      submissionState.targetLevel !== application.targetLevel ||
+      submissionState.currentDraftVersion !== application.currentDraftVersion ||
+      submissionState.submittedAt?.getTime() !== application.submittedAt?.getTime() ||
+      !editableApplicationStatuses.includes(submissionState.status as never)
+    ) {
+      throw new AppError(
+        409,
+        ErrorCodes.APPLICATION_LOCKED,
+        'Application changed while submission was being prepared. Refresh and try again.',
+      );
+    }
+
+    if (
+      user.role === Role.student &&
+      submissionState.applicationType === ApplicationType.individual &&
+      submissionState.targetLevel === Level.city &&
+      (submissionState.status !== ApplicationStatus.supplement_required ||
+        submissionState.submittedAt === null)
+    ) {
+      await this.assertCitySubmissionEligible(user, application.id);
+    }
+
     const existingTasks = application.reviewTasks;
-    const isSupplementResubmit = application.status === ApplicationStatus.supplement_required;
+    const isSupplementResubmit =
+      submissionState.status === ApplicationStatus.supplement_required &&
+      submissionState.submittedAt !== null;
     const supplementTasks = existingTasks.filter(
       (task) => task.status === ReviewTaskStatus.supplement_required,
     );
@@ -361,14 +420,22 @@ export class ApplicationsService {
         const submittedAt = new Date();
         const newVersion = application.currentDraftVersion + 1;
 
-        await tx.application.update({
-          where: { id: application.id },
+        const updateResult = await tx.application.updateMany({
+          where: {
+            id: application.id,
+            status: submissionState.status,
+            targetLevel: submissionState.targetLevel,
+            currentDraftVersion: submissionState.currentDraftVersion,
+            submittedAt: submissionState.submittedAt,
+            updatedAt: submissionState.updatedAt,
+          },
           data: {
             status: ApplicationStatus.under_review,
             submittedAt: application.submittedAt ?? submittedAt,
             currentDraftVersion: newVersion,
           },
         });
+        assertDraftWriteSucceeded(updateResult.count);
 
         if (isSupplementResubmit && supplementTasks.length > 0) {
           const taskEvidenceLinks = supplementTasks.flatMap((task) =>
@@ -450,7 +517,7 @@ export class ApplicationsService {
           targetType: 'application',
           targetId: application.id,
           applicationId: application.id,
-          beforeStateJson: { status: application.status },
+          beforeStateJson: { status: submissionState.status },
           afterStateJson: {
             status: ApplicationStatus.under_review,
             submittedAt: submittedAt.toISOString(),
@@ -468,7 +535,7 @@ export class ApplicationsService {
           targetType: 'application',
           targetId: application.id,
           applicationId: application.id,
-          beforeStateJson: { status: application.status },
+          beforeStateJson: { status: submissionState.status },
           afterStateJson: { status: ApplicationStatus.under_review },
         });
 
@@ -725,6 +792,29 @@ export class ApplicationsService {
     return application;
   }
 
+  private async assertCitySubmissionEligible(user: AuthenticatedUser, applicationId: string) {
+    const eligibility = await this.citySubmissionEligibilityService.getEligibility(
+      user,
+      applicationId,
+    );
+    if (eligibility.status === 'NOT_ELIGIBLE') {
+      throw new AppError(
+        409,
+        ErrorCodes.CITY_SUBMISSION_NOT_ELIGIBLE,
+        'Hồ sơ chưa đáp ứng điều kiện tiên quyết để nộp xét cấp Thành phố.',
+        { route: eligibility.route, reasons: eligibility.reasons },
+      );
+    }
+    if (eligibility.status === 'NEEDS_VERIFICATION') {
+      throw new AppError(
+        409,
+        ErrorCodes.CITY_SUBMISSION_NEEDS_VERIFICATION,
+        'Hệ thống chưa thể tự động xác minh thông tin của bạn với danh sách công nhận. Hồ sơ cần được kiểm tra lại.',
+        { route: eligibility.route, reasons: eligibility.reasons },
+      );
+    }
+  }
+
   private async getApplicationForResponse(applicationId: string) {
     const application = await this.applicationsRepository.findById(applicationId);
     if (!application) {
@@ -802,6 +892,16 @@ export class ApplicationsService {
       evidences: [],
     };
   }
+}
+
+function assertDraftWriteSucceeded(updateCount: number): void {
+  if (updateCount === 1) return;
+
+  throw new AppError(
+    409,
+    ErrorCodes.APPLICATION_LOCKED,
+    'Application changed before this operation completed. Refresh and try again.',
+  );
 }
 
 function buildSubmitCriteria(
