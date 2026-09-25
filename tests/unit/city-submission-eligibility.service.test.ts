@@ -2,6 +2,7 @@ import { Role, WorkspaceType } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 import { CitySubmissionEligibilityService } from '../../src/modules/applications/city-submission-eligibility.service';
+import { UsersService } from '../../src/modules/users/users.service';
 
 const schoolWorkspaceId = 'school-a';
 const universityWorkspaceId = 'udn';
@@ -29,7 +30,11 @@ function user(overrides: Partial<AuthenticatedUser> = {}): AuthenticatedUser {
 }
 
 function createRepository() {
+  const state: { manualVerification: Record<string, unknown> | null } = {
+    manualVerification: null,
+  };
   return {
+    state,
     findApplication: vi.fn().mockResolvedValue({
       id: 'application-a',
       studentId: 'student-a',
@@ -46,7 +51,7 @@ function createRepository() {
     findConfirmedUniversityRecipients: vi.fn().mockResolvedValue([
       { studentCode: '000123', fullName: 'Student A', className: '24CTT1' },
     ]),
-    findManualVerification: vi.fn().mockResolvedValue(null),
+    findManualVerification: vi.fn().mockImplementation(async () => state.manualVerification),
     findApplicationForVerification: vi.fn().mockResolvedValue({
       id: 'application-a',
       studentId: 'student-a',
@@ -64,10 +69,13 @@ function createRepository() {
       fullName: 'Student A',
       className: '24CTT1',
     }),
-    saveVerification: vi.fn().mockImplementation(async (input) => ({
-      ...input,
-      decidedAt: new Date('2026-09-01T00:00:00.000Z'),
-    })),
+    saveVerification: vi.fn().mockImplementation(async (input) => {
+      state.manualVerification = {
+        decision: input.decision,
+        verificationBasisHash: input.verificationBasisHash,
+      };
+      return { ...input, decidedAt: new Date('2026-09-01T00:00:00.000Z') };
+    }),
   };
 }
 
@@ -216,7 +224,7 @@ describe('CitySubmissionEligibilityService', () => {
   });
 
   it('uses an approved manual verification only when automatic eligibility needs verification', async () => {
-    repository.findManualVerification.mockResolvedValue({
+    await service.verifyEligibility(cityManager(), 'application-a', {
       decision: 'APPROVED',
       reason: 'Matched against the signed decision',
     });
@@ -229,7 +237,7 @@ describe('CitySubmissionEligibilityService', () => {
   });
 
   it('uses a rejected manual verification as NOT_ELIGIBLE only for an automatic verification signal', async () => {
-    repository.findManualVerification.mockResolvedValue({
+    await service.verifyEligibility(cityManager(), 'application-a', {
       decision: 'REJECTED',
       reason: 'Identity could not be confirmed',
     });
@@ -243,15 +251,153 @@ describe('CitySubmissionEligibilityService', () => {
 
   it('does not allow manual approval to override automatic NOT_ELIGIBLE', async () => {
     repository.findConfirmedUniversityRecipients.mockResolvedValue([]);
-    repository.findManualVerification.mockResolvedValue({
+    repository.state.manualVerification = {
       decision: 'APPROVED',
-      reason: 'Should not override a definitive result',
-    });
+      verificationBasisHash: 'old-basis',
+    };
 
     const result = await service.getEligibility(user(), 'application-a');
 
     expect(result.status).toBe('NOT_ELIGIBLE');
     expect(result.reasons).toEqual(['MISSING_UNIVERSITY_SYSTEM_AWARD']);
+  });
+
+  it('invalidates an approval after the student changes an identity field through /api/me', async () => {
+    let identity = {
+      workspaceId: schoolWorkspaceId,
+      studentCode: null,
+      fullName: 'Student A',
+      className: '24CTT1',
+    };
+    repository.findStudentIdentity.mockImplementation(async () => identity);
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([
+      { studentCode: '111111', fullName: 'Student A', className: '24CTT1' },
+      { studentCode: '222222', fullName: 'Student B', className: '24CTT1' },
+    ]);
+    const applicant = user({ studentCode: null });
+
+    expect((await service.getEligibility(applicant, 'application-a')).status).toBe(
+      'NEEDS_VERIFICATION',
+    );
+    await service.verifyEligibility(cityManager(), 'application-a', {
+      decision: 'APPROVED',
+      reason: 'Checked the official signed decision.',
+    });
+    expect((await service.getEligibility(applicant, 'application-a')).status).toBe('ELIGIBLE');
+
+    let persistedUser = {
+      ...applicant,
+      phone: null,
+      isActive: true,
+      lastLoginAt: null,
+      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-09-01T00:00:00.000Z'),
+    };
+    const usersRepository = {
+      updateById: vi.fn(async (_id: string, input: { fullName?: string }) => {
+        persistedUser = { ...persistedUser, ...input };
+        identity = { ...identity, fullName: persistedUser.fullName };
+        return persistedUser;
+      }),
+    };
+    const usersService = new UsersService(usersRepository as never);
+    const updated = await usersService.updateMe(applicant.id, { fullName: 'Student B' });
+    const reloadedApplicant = user({
+      studentCode: null,
+      fullName: updated.fullName,
+    });
+
+    expect(usersRepository.updateById).toHaveBeenCalledWith(applicant.id, {
+      fullName: 'Student B',
+    });
+    expect((await service.getEligibility(reloadedApplicant, 'application-a')).status).toBe(
+      'NEEDS_VERIFICATION',
+    );
+  });
+
+  it('keeps verification valid after an unrelated profile field changes', async () => {
+    await service.verifyEligibility(cityManager(), 'application-a', {
+      decision: 'APPROVED',
+      reason: 'Checked the official signed decision.',
+    });
+    const applicant = user({ studentCode: null });
+    const usersRepository = {
+      updateById: vi.fn(async (_id: string, input: { phone?: string | null }) => ({
+        ...applicant,
+        phone: input.phone ?? null,
+        isActive: true,
+        lastLoginAt: null,
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-09-01T00:00:00.000Z'),
+      })),
+    };
+    const usersService = new UsersService(usersRepository as never);
+
+    await usersService.updateMe(applicant.id, { phone: '+84901234567' });
+
+    expect((await service.getEligibility(applicant, 'application-a')).status).toBe('ELIGIBLE');
+  });
+
+  it('allows a manager to replace a stale decision for the new identity basis', async () => {
+    let identity = {
+      workspaceId: schoolWorkspaceId,
+      studentCode: null,
+      fullName: 'Student A',
+      className: '24CTT1',
+    };
+    repository.findStudentIdentity.mockImplementation(async () => identity);
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([
+      { studentCode: '111111', fullName: 'Student A', className: '24CTT1' },
+      { studentCode: '222222', fullName: 'Student B', className: '24CTT1' },
+    ]);
+    const applicant = user({ studentCode: null });
+    await service.verifyEligibility(cityManager(), 'application-a', {
+      decision: 'APPROVED',
+      reason: 'Checked the first identity.',
+    });
+
+    const usersService = new UsersService({
+      updateById: vi.fn(async (_id: string, input: { fullName?: string }) => {
+        identity = { ...identity, fullName: input.fullName ?? identity.fullName };
+        return {
+          ...applicant,
+          fullName: identity.fullName,
+          phone: null,
+          isActive: true,
+          lastLoginAt: null,
+          createdAt: new Date('2026-01-01T00:00:00.000Z'),
+          updatedAt: new Date('2026-09-02T00:00:00.000Z'),
+        };
+      }),
+    } as never);
+    await usersService.updateMe(applicant.id, { fullName: 'Student B' });
+    const reloadedApplicant = user({ studentCode: null, fullName: 'Student B' });
+
+    expect((await service.getEligibility(reloadedApplicant, 'application-a')).status).toBe(
+      'NEEDS_VERIFICATION',
+    );
+    await service.verifyEligibility(cityManager(), 'application-a', {
+      decision: 'APPROVED',
+      reason: 'Checked the updated identity.',
+    });
+
+    expect((await service.getEligibility(reloadedApplicant, 'application-a')).status).toBe(
+      'ELIGIBLE',
+    );
+    expect(repository.saveVerification).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets a definitive automatic ELIGIBLE result win over a stored manual decision', async () => {
+    repository.state.manualVerification = {
+      decision: 'REJECTED',
+      verificationBasisHash: 'old-basis',
+    };
+
+    const result = await service.getEligibility(user(), 'application-a');
+
+    expect(result.status).toBe('ELIGIBLE');
+    expect(result.reasons).toEqual([]);
+    expect(repository.findManualVerification).not.toHaveBeenCalled();
   });
 
   it.each(['APPROVED', 'REJECTED'] as const)(
