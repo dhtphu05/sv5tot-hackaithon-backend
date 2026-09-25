@@ -49,6 +49,36 @@ describe('CitySubmissionEligibilityRepository', () => {
     });
   });
 
+  it('loads only manager-safe application, student, workspace, and prior decision fields', async () => {
+    const db = {
+      application: { findUnique: vi.fn().mockResolvedValue(null) },
+      workspace: { findUnique: vi.fn() },
+      awardRecipient: { findMany: vi.fn() },
+    };
+    const repository = new CitySubmissionEligibilityRepository(db as never);
+
+    await repository.findApplicationForManagerVerification('application-a');
+
+    expect(db.application.findUnique).toHaveBeenCalledWith({
+      where: { id: 'application-a' },
+      select: {
+        id: true,
+        studentId: true,
+        workspaceId: true,
+        schoolYear: true,
+        applicationType: true,
+        targetLevel: true,
+        status: true,
+        submittedAt: true,
+        student: { select: { workspaceId: true, fullName: true, studentCode: true, className: true } },
+        workspace: { select: { code: true, name: true, type: true, isActive: true } },
+        eligibilityVerification: {
+          select: { decision: true, verificationBasisHash: true, decidedAt: true },
+        },
+      },
+    });
+  });
+
   it('does not fetch school-level awards or depend on matchedUserId', async () => {
     const db = {
       application: { findUnique: vi.fn() },

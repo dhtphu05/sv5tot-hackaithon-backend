@@ -2,6 +2,7 @@ import { ApplicationStatus, FinalStatus, Level } from '@prisma/client';
 import { z } from 'zod';
 
 export const listManagerApplicationsQuerySchema = z.object({
+  eligibilityVerification: z.enum(['pending']).optional(),
   status: z.nativeEnum(ApplicationStatus).optional(),
   targetLevel: z.nativeEnum(Level).optional(),
   faculty: z.string().trim().min(1).optional(),

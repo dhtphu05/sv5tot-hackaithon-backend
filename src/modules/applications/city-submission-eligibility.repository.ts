@@ -56,6 +56,36 @@ export class CitySubmissionEligibilityRepository {
     });
   }
 
+  findApplicationForManagerVerification(id: string) {
+    return this.db.application.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        studentId: true,
+        workspaceId: true,
+        schoolYear: true,
+        applicationType: true,
+        targetLevel: true,
+        status: true,
+        submittedAt: true,
+        student: {
+          select: { workspaceId: true, fullName: true, studentCode: true, className: true },
+        },
+        workspace: {
+          select: {
+            code: true,
+            name: true,
+            type: true,
+            isActive: true,
+          },
+        },
+        eligibilityVerification: {
+          select: { decision: true, verificationBasisHash: true, decidedAt: true },
+        },
+      },
+    });
+  }
+
   findStudentIdentity(id: string, client: EligibilityReadClient = this.db) {
     return client.user.findUnique({
       where: { id },

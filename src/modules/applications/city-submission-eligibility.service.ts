@@ -34,6 +34,20 @@ type VerificationApplication = {
   submittedAt: Date | null;
   workspace: { type: WorkspaceType; isActive: boolean };
 };
+type ManagerEligibilityApplication = Pick<
+  Application,
+  'id' | 'studentId' | 'workspaceId' | 'schoolYear' | 'applicationType' | 'targetLevel' | 'status' | 'submittedAt'
+> & {
+  student: EligibilityIdentity & { workspaceId: string | null };
+  workspace: { code: string; name: string; type: WorkspaceType; isActive: boolean };
+};
+type ManagerVerificationApplication = ManagerEligibilityApplication & {
+  eligibilityVerification: {
+    decision: ApplicationEligibilityVerificationDecision;
+    verificationBasisHash: string | null;
+    decidedAt: Date;
+  } | null;
+};
 
 type WorkspaceContext = {
   id: string;
@@ -45,6 +59,7 @@ type WorkspaceContext = {
 type EligibilityCalculation = {
   result: CitySubmissionEligibility;
   verificationBasisHash: string | null;
+  candidates: VerificationBasisRecipient[];
 };
 
 type VerificationBasisRecipient = {
@@ -73,6 +88,12 @@ export type EligibilityVerificationInput = {
   reason: string;
 };
 
+export type ManagerEligibilityStatus = {
+  autoStatus: CitySubmissionEligibility['status'];
+  effectiveStatus: CitySubmissionEligibility['status'];
+  reasons: CitySubmissionEligibility['reasons'];
+};
+
 export class CitySubmissionEligibilityService {
   constructor(
     private readonly repository = new CitySubmissionEligibilityRepository(),
@@ -97,6 +118,71 @@ export class CitySubmissionEligibilityService {
     );
 
     return this.applyCurrentManualVerification(automatic);
+  }
+
+  async getManagerVerificationStatus(
+    user: AuthenticatedUser,
+    application: ManagerEligibilityApplication,
+  ): Promise<ManagerEligibilityStatus> {
+    this.assertCityManager(user);
+    this.assertManagerApplicationScope(user, application);
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      application.student,
+      application.workspaceId,
+    );
+    const effective = await this.applyCurrentManualVerification(automatic);
+    return {
+      autoStatus: automatic.result.status,
+      effectiveStatus: effective.status,
+      reasons: effective.reasons,
+    };
+  }
+
+  async getManagerVerificationDetail(user: AuthenticatedUser, applicationId: string) {
+    this.assertCityManager(user);
+    const application = (await this.repository.findApplicationForManagerVerification(
+      applicationId,
+    )) as ManagerVerificationApplication | null;
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    this.assertManagerApplicationScope(user, application);
+
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      application.student,
+      application.workspaceId,
+    );
+    const effective = this.applyManualVerification(automatic, application.eligibilityVerification);
+    const candidates = automatic.result.status === 'NEEDS_VERIFICATION'
+      ? automatic.candidates.map((candidate) => ({
+          ...candidate,
+          institution: { code: application.workspace.code, name: application.workspace.name },
+        }))
+      : [];
+
+    return {
+      applicationId: application.id,
+      schoolYear: application.schoolYear,
+      route: automatic.result.route,
+      autoStatus: automatic.result.status,
+      effectiveStatus: effective.status,
+      reasons: effective.reasons,
+      student: {
+        fullName: application.student.fullName,
+        studentCode: application.student.studentCode,
+        className: application.student.className,
+      },
+      school: { code: application.workspace.code, name: application.workspace.name },
+      existingDecision: application.eligibilityVerification
+        ? {
+            decision: application.eligibilityVerification.decision,
+            decidedAt: application.eligibilityVerification.decidedAt.toISOString(),
+          }
+        : null,
+      candidates,
+    };
   }
 
   async getEligibilityForSubmission(
@@ -138,6 +224,17 @@ export class CitySubmissionEligibilityService {
     const verification = tx
       ? await this.repository.findManualVerification(automatic.result.applicationId, tx)
       : await this.repository.findManualVerification(automatic.result.applicationId);
+    return this.applyManualVerification(automatic, verification);
+  }
+
+  private applyManualVerification(
+    automatic: EligibilityCalculation,
+    verification: {
+      decision: ApplicationEligibilityVerificationDecision;
+      verificationBasisHash: string | null;
+    } | null,
+  ): CitySubmissionEligibility {
+    if (automatic.result.status !== 'NEEDS_VERIFICATION') return automatic.result;
     if (
       !verification ||
       !automatic.verificationBasisHash ||
@@ -157,6 +254,42 @@ export class CitySubmissionEligibilityService {
           : 'MANUAL_VERIFICATION_REJECTED',
       ],
     };
+  }
+
+  private assertCityManager(user: AuthenticatedUser): void {
+    if (user.role !== Role.city_manager) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only a City Manager can read eligibility verification');
+    }
+  }
+
+  private assertManagerApplicationScope(
+    user: AuthenticatedUser,
+    application: ManagerEligibilityApplication,
+  ): void {
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: application.workspaceId,
+        workspaceType: application.workspace.type,
+        workspaceIsActive: application.workspace.isActive,
+      },
+      'Application not found',
+    );
+    const allowedStatuses: ApplicationStatus[] = [
+      ApplicationStatus.draft,
+      ApplicationStatus.prechecked,
+      ApplicationStatus.ready_to_submit,
+      ApplicationStatus.supplement_required,
+    ];
+    if (
+      application.student.workspaceId !== application.workspaceId ||
+      application.applicationType !== ApplicationType.individual ||
+      application.targetLevel !== Level.city ||
+      application.submittedAt !== null ||
+      !allowedStatuses.includes(application.status)
+    ) {
+      throw new AppError(404, ErrorCodes.NOT_FOUND, 'City application not found');
+    }
   }
 
   async verifyEligibility(
@@ -266,7 +399,7 @@ export class CitySubmissionEligibilityService {
     }
 
     if (workspace.parentWorkspaceId === null) {
-      return { result: directCityResult(application), verificationBasisHash: null };
+      return { result: directCityResult(application), verificationBasisHash: null, candidates: [] };
     }
 
     if (
@@ -338,6 +471,7 @@ export class CitySubmissionEligibilityService {
       return {
         result: udnResult(application, 'ELIGIBLE', []),
         verificationBasisHash,
+        candidates: [],
       };
     }
 
@@ -357,6 +491,7 @@ export class CitySubmissionEligibilityService {
           'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH',
         ]),
         verificationBasisHash,
+        candidates: identityMatches,
       };
     }
 
@@ -366,6 +501,7 @@ export class CitySubmissionEligibilityService {
           'IDENTITY_MATCH_REQUIRES_VERIFICATION',
         ]),
         verificationBasisHash,
+        candidates: identityMatches,
       };
     }
 
@@ -373,6 +509,7 @@ export class CitySubmissionEligibilityService {
       return {
         result: udnResult(application, 'NOT_ELIGIBLE', ['MISSING_IDENTITY_CONTEXT']),
         verificationBasisHash,
+        candidates: [],
       };
     }
 
@@ -381,6 +518,7 @@ export class CitySubmissionEligibilityService {
     return {
       result: udnResult(application, 'NOT_ELIGIBLE', reasons),
       verificationBasisHash,
+      candidates: [],
     };
   }
 }

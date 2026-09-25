@@ -24,6 +24,7 @@ import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { toJsonValue } from '../rules/criteria.loader';
 import { buildReviewProgress } from '../review/review-progress.service';
+import { CitySubmissionEligibilityService } from '../applications/city-submission-eligibility.service';
 import type {
   AggregateApplicationInput,
   AssignReviewTaskInput,
@@ -79,9 +80,16 @@ const applicationDetailInclude = {
 type ApplicationDetail = Prisma.ApplicationGetPayload<{ include: typeof applicationDetailInclude }>;
 
 export class ManagerService {
-  constructor(private readonly emailOutboxService = new EmailOutboxService()) {}
+  constructor(
+    private readonly emailOutboxService = new EmailOutboxService(),
+    private readonly eligibilityService = new CitySubmissionEligibilityService(),
+  ) {}
 
   async listApplications(user: AuthenticatedUser, query: ListManagerApplicationsQuery) {
+    if (query.eligibilityVerification === 'pending') {
+      return this.listPendingEligibilityVerifications(user, query);
+    }
+
     const where: Prisma.ApplicationWhereInput = {
       ...reviewWorkspaceFilterFor(user),
       ...(query.status ? { status: query.status } : {}),
@@ -111,6 +119,151 @@ export class ManagerService {
 
     return {
       items: applications.map(toApplicationSummaryItem),
+      pagination: {
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalPages: Math.ceil(total / query.limit),
+      },
+    };
+  }
+
+  async getEligibilityVerificationDetail(user: AuthenticatedUser, applicationId: string) {
+    return this.eligibilityService.getManagerVerificationDetail(user, applicationId);
+  }
+
+  private async listPendingEligibilityVerifications(
+    user: AuthenticatedUser,
+    query: ListManagerApplicationsQuery,
+  ) {
+    if (user.role !== Role.city_manager) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only a City Manager can list eligibility verification cases');
+    }
+    if (query.targetLevel && query.targetLevel !== Level.city) {
+      return {
+        items: [],
+        pagination: { page: query.page, limit: query.limit, total: 0, totalPages: 0 },
+      };
+    }
+
+    const preSubmitStatuses: ApplicationStatus[] = [
+      ApplicationStatus.draft,
+      ApplicationStatus.prechecked,
+      ApplicationStatus.ready_to_submit,
+      ApplicationStatus.supplement_required,
+    ];
+    if (query.status && !preSubmitStatuses.includes(query.status)) {
+      return {
+        items: [],
+        pagination: { page: query.page, limit: query.limit, total: 0, totalPages: 0 },
+      };
+    }
+
+    const where: Prisma.ApplicationWhereInput = {
+      ...reviewWorkspaceFilterFor(user),
+      applicationType: 'individual',
+      targetLevel: Level.city,
+      submittedAt: null,
+      status: query.status ?? { in: preSubmitStatuses },
+      ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
+      ...(query.faculty ? { student: { faculty: query.faculty } } : {}),
+      ...(query.q
+        ? {
+            OR: [
+              { student: { fullName: { contains: query.q, mode: 'insensitive' } } },
+              { student: { studentCode: { contains: query.q, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+    const batchSize = 20;
+    const pageStart = (query.page - 1) * query.limit;
+    const pageEnd = pageStart + query.limit;
+    const skippableErrorCodes = new Set<string>([
+      ErrorCodes.APPLICATION_NOT_FOUND,
+      ErrorCodes.NOT_FOUND,
+      ErrorCodes.INVALID_APPLICATION_CONTEXT,
+      ErrorCodes.UNSUPPORTED_WORKSPACE_HIERARCHY,
+    ]);
+    const items: Array<{
+      id: string;
+      schoolYear: string;
+      student: { fullName: string; studentCode: string | null; className: string | null };
+      school: { code: string; name: string };
+      autoStatus: 'NEEDS_VERIFICATION';
+      effectiveStatus: 'NEEDS_VERIFICATION';
+      reasons: string[];
+    }> = [];
+    let candidateCursor: string | undefined;
+    let total = 0;
+
+    while (true) {
+      const applications = await prisma.application.findMany({
+        where: candidateCursor ? { ...where, id: { gt: candidateCursor } } : where,
+        select: {
+          id: true,
+          studentId: true,
+          workspaceId: true,
+          schoolYear: true,
+          applicationType: true,
+          targetLevel: true,
+          status: true,
+          submittedAt: true,
+          student: {
+            select: { workspaceId: true, fullName: true, studentCode: true, className: true },
+          },
+          workspace: { select: { code: true, name: true, type: true, isActive: true } },
+        },
+        orderBy: [{ id: 'asc' }],
+        take: batchSize,
+      });
+      if (applications.length === 0) break;
+
+      const pendingBatch = await Promise.all(
+        applications.map(async (application) => {
+          try {
+            const eligibility = await this.eligibilityService.getManagerVerificationStatus(
+              user,
+              application,
+            );
+            if (
+              eligibility.autoStatus !== 'NEEDS_VERIFICATION' ||
+              eligibility.effectiveStatus !== 'NEEDS_VERIFICATION'
+            ) {
+              return null;
+            }
+            return {
+              id: application.id,
+              schoolYear: application.schoolYear,
+              student: {
+                fullName: application.student.fullName,
+                studentCode: application.student.studentCode,
+                className: application.student.className,
+              },
+              school: { code: application.workspace.code, name: application.workspace.name },
+              autoStatus: 'NEEDS_VERIFICATION' as const,
+              effectiveStatus: 'NEEDS_VERIFICATION' as const,
+              reasons: eligibility.reasons,
+            };
+          } catch (error) {
+            if (error instanceof AppError && skippableErrorCodes.has(error.code)) return null;
+            throw error;
+          }
+        }),
+      );
+
+      for (const item of pendingBatch) {
+        if (!item) continue;
+        if (total >= pageStart && total < pageEnd) items.push(item);
+        total += 1;
+      }
+
+      candidateCursor = applications[applications.length - 1].id;
+      if (applications.length < batchSize) break;
+    }
+
+    return {
+      items,
       pagination: {
         page: query.page,
         limit: query.limit,
