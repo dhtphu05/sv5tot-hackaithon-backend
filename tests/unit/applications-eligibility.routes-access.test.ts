@@ -44,14 +44,24 @@ describe('GET /api/applications/:id/eligibility access', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('allows a student to request application eligibility', async () => {
-    mocks.getEligibility.mockResolvedValue({ applicationId: 'application-a', eligible: true });
+    mocks.getEligibility.mockResolvedValue({
+      applicationId: 'application-a',
+      status: 'ELIGIBLE',
+      route: 'DIRECT_CITY',
+      reasons: [],
+    });
 
     const response = await request(buildApp())
       .get('/api/applications/application-a/eligibility')
       .set('x-test-role', Role.student)
       .expect(200);
 
-    expect(response.body.data).toEqual({ applicationId: 'application-a', eligible: true });
+    expect(response.body.data).toEqual({
+      applicationId: 'application-a',
+      status: 'ELIGIBLE',
+      route: 'DIRECT_CITY',
+      reasons: [],
+    });
     expect(mocks.getEligibility).toHaveBeenCalledOnce();
   });
 

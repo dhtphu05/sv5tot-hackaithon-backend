@@ -14,7 +14,7 @@ function user(overrides: Partial<AuthenticatedUser> = {}): AuthenticatedUser {
     role: Role.student,
     fullName: 'Student A',
     studentCode: '000123',
-    className: null,
+    className: '24CTT1',
     faculty: null,
     avatarUrl: null,
     workspace: {
@@ -43,7 +43,9 @@ function createRepository() {
       parentWorkspaceId: universityWorkspaceId,
       parentWorkspace: { id: universityWorkspaceId, type: WorkspaceType.UNIVERSITY_SYSTEM },
     }),
-    hasConfirmedAward: vi.fn().mockResolvedValue(true),
+    findConfirmedUniversityRecipients: vi.fn().mockResolvedValue([
+      { studentCode: '000123', fullName: 'Student A', className: '24CTT1' },
+    ]),
   };
 }
 
@@ -56,52 +58,43 @@ describe('CitySubmissionEligibilityService', () => {
     service = new CitySubmissionEligibilityService(repository as never);
   });
 
-  it('requires confirmed school and UDN awards for a UDN student', async () => {
+  it('accepts a confirmed UDN award without requiring a separate school award', async () => {
     const result = await service.getEligibility(user(), 'application-a');
 
     expect(result).toEqual({
       applicationId: 'application-a',
       schoolYear: '2025-2026',
       route: 'UDN_PREREQUISITE',
-      eligible: true,
-      schoolAward: { required: true, satisfied: true },
-      universityAward: { required: true, satisfied: true },
-      blockingReasons: [],
+      status: 'ELIGIBLE',
+      reasons: [],
     });
-    expect(repository.hasConfirmedAward).toHaveBeenNthCalledWith(1, {
-      awardLevel: 'SCHOOL',
-      issuerWorkspaceId: schoolWorkspaceId,
-      institutionWorkspaceId: schoolWorkspaceId,
-      studentCode: '000123',
-      schoolYear: '2025-2026',
-    });
-    expect(repository.hasConfirmedAward).toHaveBeenNthCalledWith(2, {
-      awardLevel: 'UNIVERSITY_SYSTEM',
+    expect(repository.findConfirmedUniversityRecipients).toHaveBeenCalledOnce();
+    expect(repository.findConfirmedUniversityRecipients).toHaveBeenCalledWith({
       issuerWorkspaceId: universityWorkspaceId,
       institutionWorkspaceId: schoolWorkspaceId,
-      studentCode: '000123',
       schoolYear: '2025-2026',
     });
   });
 
-  it.each([
-    [false, true, ['MISSING_SCHOOL_AWARD']],
-    [true, false, ['MISSING_UNIVERSITY_SYSTEM_AWARD']],
-    [false, false, ['MISSING_SCHOOL_AWARD', 'MISSING_UNIVERSITY_SYSTEM_AWARD']],
-  ])('reports UDN blockers when award existence is %s / %s', async (school, university, blockers) => {
-    repository.hasConfirmedAward.mockImplementation(async ({ awardLevel }) =>
-      awardLevel === 'SCHOOL' ? school : university,
-    );
+  it('returns NOT_ELIGIBLE when only a school-level award exists', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([]);
 
     const result = await service.getEligibility(user(), 'application-a');
 
-    expect(result.eligible).toBe(false);
-    expect(result.blockingReasons).toEqual(blockers);
-    expect(result.schoolAward.satisfied).toBe(school);
-    expect(result.universityAward.satisfied).toBe(university);
+    expect(result.status).toBe('NOT_ELIGIBLE');
+    expect(result.reasons).toEqual(['MISSING_UNIVERSITY_SYSTEM_AWARD']);
   });
 
-  it('returns DIRECT_CITY without looking up awards when the school has no parent', async () => {
+  it('returns NOT_ELIGIBLE when there are no qualifying awards', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([]);
+
+    const result = await service.getEligibility(user(), 'application-a');
+
+    expect(result.status).toBe('NOT_ELIGIBLE');
+    expect(result.reasons).toEqual(['MISSING_UNIVERSITY_SYSTEM_AWARD']);
+  });
+
+  it('returns DIRECT_CITY as eligible without looking up awards', async () => {
     repository.findWorkspaceContext.mockResolvedValue({
       id: schoolWorkspaceId,
       type: WorkspaceType.SCHOOL,
@@ -115,34 +108,83 @@ describe('CitySubmissionEligibilityService', () => {
       applicationId: 'application-a',
       schoolYear: '2025-2026',
       route: 'DIRECT_CITY',
-      eligible: true,
-      schoolAward: { required: false, satisfied: true },
-      universityAward: { required: false, satisfied: true },
-      blockingReasons: [],
+      status: 'ELIGIBLE',
+      reasons: [],
     });
-    expect(repository.hasConfirmedAward).not.toHaveBeenCalled();
+    expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
   });
 
-  it('does not query awards when a UDN student has no canonical student code', async () => {
-    const result = await service.getEligibility(user({ studentCode: null }), 'application-a');
+  it('treats multiple exact-code UDN recipients as eligible', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([
+      { studentCode: '000123', fullName: 'Student A', className: '24CTT1' },
+      { studentCode: '000123', fullName: 'Student A', className: '24CTT1' },
+    ]);
 
-    expect(result.eligible).toBe(false);
-    expect(result.blockingReasons).toEqual(['MISSING_STUDENT_CODE']);
-    expect(repository.hasConfirmedAward).not.toHaveBeenCalled();
+    const result = await service.getEligibility(user(), 'application-a');
+
+    expect(result.status).toBe('ELIGIBLE');
+    expect(result.reasons).toEqual([]);
   });
 
-  it('does not require a student code for the DIRECT_CITY prerequisite route', async () => {
-    repository.findWorkspaceContext.mockResolvedValue({
-      id: schoolWorkspaceId,
-      type: WorkspaceType.SCHOOL,
-      parentWorkspaceId: null,
-      parentWorkspace: null,
-    });
+  it('normalizes student codes without dropping leading zeros', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([
+      { studentCode: ' 000123 ', fullName: 'Student A', className: '24CTT1' },
+    ]);
 
+    const result = await service.getEligibility(user({ studentCode: ' 000123 ' }), 'application-a');
+
+    expect(result.status).toBe('ELIGIBLE');
+  });
+
+  it('requires manual verification when name and class signal a match but student code is missing', async () => {
     const result = await service.getEligibility(user({ studentCode: null }), 'application-a');
 
-    expect(result.eligible).toBe(true);
-    expect(result.blockingReasons).toEqual([]);
+    expect(result.status).toBe('NEEDS_VERIFICATION');
+    expect(result.reasons).toEqual(['IDENTITY_MATCH_REQUIRES_VERIFICATION']);
+  });
+
+  it('does not use name and class to override a differing usable student code', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([
+      { studentCode: '999999', fullName: 'Student A', className: '24CTT1' },
+    ]);
+
+    const result = await service.getEligibility(user(), 'application-a');
+
+    expect(result.status).toBe('NEEDS_VERIFICATION');
+    expect(result.reasons).toEqual(['IDENTITY_MATCH_REQUIRES_VERIFICATION']);
+  });
+
+  it('does not treat a same-name recipient in a different class as an identity signal', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([
+      { studentCode: '999999', fullName: 'Student A', className: '24CTT2' },
+    ]);
+
+    const result = await service.getEligibility(user(), 'application-a');
+
+    expect(result.status).toBe('NOT_ELIGIBLE');
+    expect(result.reasons).toEqual(['MISSING_UNIVERSITY_SYSTEM_AWARD']);
+  });
+
+  it('requires manual verification when name and class match multiple recipients', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([
+      { studentCode: '999999', fullName: 'Student A', className: '24CTT1' },
+      { studentCode: '888888', fullName: 'Student A', className: '24CTT1' },
+    ]);
+
+    const result = await service.getEligibility(user(), 'application-a');
+
+    expect(result.status).toBe('NEEDS_VERIFICATION');
+    expect(result.reasons).toEqual(['AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH']);
+  });
+
+  it('reports missing identity context when code and name/class cannot identify a recipient', async () => {
+    const result = await service.getEligibility(
+      user({ studentCode: null, fullName: ' ', className: null }),
+      'application-a',
+    );
+
+    expect(result.status).toBe('NOT_ELIGIBLE');
+    expect(result.reasons).toEqual(['MISSING_IDENTITY_CONTEXT']);
   });
 
   it('authorizes the application owner before looking up workspace or awards', async () => {
@@ -154,11 +196,12 @@ describe('CitySubmissionEligibilityService', () => {
       targetLevel: 'city',
     });
 
-    await expect(
-      service.getEligibility(user(), 'application-b'),
-    ).rejects.toMatchObject({ statusCode: 403, code: 'APPLICATION_OWNER_REQUIRED' });
+    await expect(service.getEligibility(user(), 'application-b')).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'APPLICATION_OWNER_REQUIRED',
+    });
     expect(repository.findWorkspaceContext).not.toHaveBeenCalled();
-    expect(repository.hasConfirmedAward).not.toHaveBeenCalled();
+    expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
   });
 
   it('hides applications from another workspace before eligibility lookups', async () => {
@@ -175,7 +218,7 @@ describe('CitySubmissionEligibilityService', () => {
       code: 'NOT_FOUND',
     });
     expect(repository.findWorkspaceContext).not.toHaveBeenCalled();
-    expect(repository.hasConfirmedAward).not.toHaveBeenCalled();
+    expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
   });
 
   it('rejects a student account outside a SCHOOL workspace', async () => {
@@ -190,7 +233,7 @@ describe('CitySubmissionEligibilityService', () => {
       statusCode: 409,
       code: 'INVALID_APPLICATION_CONTEXT',
     });
-    expect(repository.hasConfirmedAward).not.toHaveBeenCalled();
+    expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
   });
 
   it('rejects an unsupported immediate parent instead of treating it as DIRECT_CITY', async () => {
@@ -205,6 +248,6 @@ describe('CitySubmissionEligibilityService', () => {
       statusCode: 409,
       code: 'UNSUPPORTED_WORKSPACE_HIERARCHY',
     });
-    expect(repository.hasConfirmedAward).not.toHaveBeenCalled();
+    expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
   });
 });

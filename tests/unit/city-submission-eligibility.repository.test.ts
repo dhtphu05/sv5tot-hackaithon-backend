@@ -3,26 +3,23 @@ import { describe, expect, it, vi } from 'vitest';
 import { CitySubmissionEligibilityRepository } from '../../src/modules/applications/city-submission-eligibility.repository';
 
 describe('CitySubmissionEligibilityRepository', () => {
-  it('filters canonical recipient matching by issuer, level, confirmed status, school year, institution, and student code', async () => {
+  it('loads canonical recipients only from confirmed UDN decisions for the application year and school', async () => {
     const db = {
       application: { findUnique: vi.fn() },
       workspace: { findUnique: vi.fn() },
-      awardRecipient: { findFirst: vi.fn().mockResolvedValue({ id: 'recipient-1' }) },
+      awardRecipient: { findMany: vi.fn().mockResolvedValue([]) },
     };
     const repository = new CitySubmissionEligibilityRepository(db as never);
 
-    const found = await repository.hasConfirmedAward({
-      awardLevel: AwardLevel.UNIVERSITY_SYSTEM,
+    const recipients = await repository.findConfirmedUniversityRecipients({
       issuerWorkspaceId: 'udn',
       institutionWorkspaceId: 'school-a',
-      studentCode: '000123',
       schoolYear: '2025-2026',
     });
 
-    expect(found).toBe(true);
-    expect(db.awardRecipient.findFirst).toHaveBeenCalledWith({
+    expect(recipients).toEqual([]);
+    expect(db.awardRecipient.findMany).toHaveBeenCalledWith({
       where: {
-        studentCode: '000123',
         institutionWorkspaceId: 'school-a',
         awardDecision: {
           is: {
@@ -33,37 +30,34 @@ describe('CitySubmissionEligibilityRepository', () => {
           },
         },
       },
-      select: { id: true },
+      select: { studentCode: true, fullName: true, className: true },
     });
   });
 
-  it('does not make matchedUserId part of canonical identity matching', async () => {
+  it('does not fetch school-level awards or depend on matchedUserId', async () => {
     const db = {
       application: { findUnique: vi.fn() },
       workspace: { findUnique: vi.fn() },
-      awardRecipient: { findFirst: vi.fn().mockResolvedValue(null) },
+      awardRecipient: { findMany: vi.fn().mockResolvedValue([]) },
     };
     const repository = new CitySubmissionEligibilityRepository(db as never);
 
-    await repository.hasConfirmedAward({
-      awardLevel: AwardLevel.SCHOOL,
-      issuerWorkspaceId: 'school-a',
+    await repository.findConfirmedUniversityRecipients({
+      issuerWorkspaceId: 'udn',
       institutionWorkspaceId: 'school-a',
-      studentCode: '000123',
       schoolYear: '2025-2026',
     });
 
-    const query = db.awardRecipient.findFirst.mock.calls[0][0];
-    expect(query.where).not.toHaveProperty('matchedUserId');
-    expect(query.where.institutionWorkspaceId).toBe('school-a');
-    expect(query.where.studentCode).toBe('000123');
+    const query = db.awardRecipient.findMany.mock.calls[0][0];
+    expect(query.where.awardDecision.is.awardLevel).toBe(AwardLevel.UNIVERSITY_SYSTEM);
+    expect(query.select).not.toHaveProperty('matchedUserId');
   });
 
   it('loads only the current workspace and its immediate parent classification', async () => {
     const db = {
       application: { findUnique: vi.fn() },
       workspace: { findUnique: vi.fn().mockResolvedValue(null) },
-      awardRecipient: { findFirst: vi.fn() },
+      awardRecipient: { findMany: vi.fn() },
     };
     const repository = new CitySubmissionEligibilityRepository(db as never);
 
