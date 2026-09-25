@@ -2,8 +2,18 @@
 import type { Request, Response } from 'express';
 import { sendSuccess } from '../../shared/responses/api-response';
 import { ApplicationsService } from './applications.service';
+import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
 
 const applicationsService = new ApplicationsService();
+const citySubmissionEligibilityService = new CitySubmissionEligibilityService();
+
+export async function getApplicationEligibility(req: Request, res: Response): Promise<void> {
+  const data = await citySubmissionEligibilityService.getEligibility(
+    req.user!,
+    String(req.params.id),
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
 
 export async function getCurrentApplication(req: Request, res: Response): Promise<void> {
   const data = await applicationsService.getCurrent(req.user!, req.query as never);

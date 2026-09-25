@@ -6,6 +6,7 @@ import { validate } from '../../middlewares/validate.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
 import {
   autosaveApplicationDraft,
+  getApplicationEligibility,
   getApplicationTimeline,
   getCurrentApplication,
   reopenApplicationSupplement,
@@ -117,6 +118,12 @@ applicationsRouter.get(
   requireRole(Role.student, Role.admin),
   validate({ query: timelineQuerySchema }),
   asyncHandler(getApplicationTimeline),
+);
+applicationsRouter.get(
+  '/:id/eligibility',
+  requireAuth,
+  requireRole(Role.student),
+  asyncHandler(getApplicationEligibility),
 );
 applicationsRouter.get(
   '/:id/criteria-completion',

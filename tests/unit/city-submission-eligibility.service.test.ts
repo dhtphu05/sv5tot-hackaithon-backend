@@ -146,6 +146,14 @@ describe('CitySubmissionEligibilityService', () => {
   });
 
   it('authorizes the application owner before looking up workspace or awards', async () => {
+    repository.findApplication.mockResolvedValue({
+      id: 'application-b',
+      studentId: 'student-b',
+      workspaceId: schoolWorkspaceId,
+      schoolYear: '2025-2026',
+      targetLevel: 'city',
+    });
+
     await expect(
       service.getEligibility(user(), 'application-b'),
     ).rejects.toMatchObject({ statusCode: 403, code: 'APPLICATION_OWNER_REQUIRED' });
