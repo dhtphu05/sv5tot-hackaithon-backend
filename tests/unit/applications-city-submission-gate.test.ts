@@ -10,7 +10,11 @@ const mocks = vi.hoisted(() => ({
   },
   notifications: { create: vi.fn() },
   emailOutbox: { enqueue: vi.fn() },
-  precheck: { run: vi.fn() },
+  precheck: {
+    run: vi.fn(),
+    prepareForSubmission: vi.fn(),
+    persistPreparedInTransaction: vi.fn(),
+  },
 }));
 
 vi.mock('../../src/infrastructure/database/prisma', () => ({ prisma: mocks.prisma }));
@@ -34,6 +38,20 @@ const student = {
     type: 'SCHOOL',
     name: 'School A',
     shortName: 'A',
+  },
+} as unknown as AuthenticatedUser;
+
+const cityManager = {
+  ...student,
+  id: 'city-manager',
+  workspaceId: 'city-workspace',
+  role: Role.city_manager,
+  workspace: {
+    id: 'city-workspace',
+    code: 'DANANG_CITY',
+    type: 'CITY',
+    name: 'Da Nang',
+    shortName: 'Da Nang',
   },
 } as unknown as AuthenticatedUser;
 
@@ -63,7 +81,25 @@ function eligibilityService(input: {
   parentWorkspaceId: string | null;
   recipients: Array<{ studentCode: string; fullName: string; className: string }>;
 }) {
+  const state: {
+    identity: {
+      workspaceId: string;
+      studentCode: string | null;
+      fullName: string;
+      className: string | null;
+    };
+    manualVerification: { decision: string; verificationBasisHash: string | null } | null;
+  } = {
+    identity: {
+      workspaceId: 'school-a',
+      studentCode: '000123',
+      fullName: 'Student A',
+      className: '24CTT1',
+    },
+    manualVerification: null,
+  };
   const repository = {
+    state,
     findApplication: vi.fn().mockResolvedValue({
       id: 'application-a',
       studentId: 'student-a',
@@ -79,12 +115,47 @@ function eligibilityService(input: {
         : null,
     }),
     findConfirmedUniversityRecipients: vi.fn().mockResolvedValue(input.recipients),
-    findManualVerification: vi.fn().mockResolvedValue(null),
+    findManualVerification: vi.fn().mockImplementation(async () => state.manualVerification),
+    findApplicationForVerification: vi.fn().mockResolvedValue({
+      id: 'application-a',
+      studentId: 'student-a',
+      workspaceId: 'school-a',
+      schoolYear: '2025-2026',
+      applicationType: 'individual',
+      targetLevel: 'city',
+      status: 'ready_to_submit',
+      submittedAt: null,
+      workspace: { type: 'SCHOOL', isActive: true },
+    }),
+    findStudentIdentity: vi.fn().mockImplementation(async () => state.identity),
+    saveVerification: vi.fn().mockImplementation(async (value) => {
+      state.manualVerification = {
+        decision: value.decision,
+        verificationBasisHash: value.verificationBasisHash,
+      };
+      return value;
+    }),
   };
   return {
     service: new CitySubmissionEligibilityService(repository as never),
     repository,
   };
+}
+
+async function approveManualEligibility(
+  eligibility: CitySubmissionEligibilityService,
+  repository: ReturnType<typeof eligibilityService>['repository'],
+) {
+  repository.state.identity = {
+    workspaceId: 'school-a',
+    studentCode: null,
+    fullName: 'Student A',
+    className: '24CTT1',
+  };
+  await eligibility.verifyEligibility(cityManager, 'application-a', {
+    decision: 'APPROVED',
+    reason: 'Verified against the official signed decision.',
+  });
 }
 
 function buildService(eligibility: CitySubmissionEligibilityService) {
@@ -106,6 +177,7 @@ function configureSuccessfulTransaction(updateCount = 1) {
     assignedOfficer: { id: 'officer-a', fullName: 'Officer A' },
   };
   const tx = {
+    $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-a', studentId: 'student-a' }]),
     application: {
       findUnique: vi.fn().mockResolvedValue({ workspaceId: 'school-a' }),
       updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
@@ -188,7 +260,7 @@ describe('ApplicationsService City submission eligibility gate', () => {
       parentWorkspaceId: 'udn',
       recipients: [{ studentCode: '999999', fullName: 'Student A', className: '24CTT1' }],
     });
-    repository.findManualVerification.mockResolvedValue({ decision: 'APPROVED' });
+    await approveManualEligibility(eligibility, repository);
     configureSuccessfulTransaction();
     mocks.prisma.application.findUnique.mockResolvedValue(
       application({
@@ -212,7 +284,16 @@ describe('ApplicationsService City submission eligibility gate', () => {
       parentWorkspaceId: 'udn',
       recipients: [{ studentCode: '999999', fullName: 'Student A', className: '24CTT1' }],
     });
-    repository.findManualVerification.mockResolvedValue({ decision: 'REJECTED' });
+    repository.state.identity = {
+      workspaceId: 'school-a',
+      studentCode: null,
+      fullName: 'Student A',
+      className: '24CTT1',
+    };
+    await eligibility.verifyEligibility(cityManager, 'application-a', {
+      decision: 'REJECTED',
+      reason: 'The identity could not be verified.',
+    });
 
     await expect(
       buildService(eligibility).submit({ ...student, studentCode: null }, 'application-a', {
@@ -372,7 +453,7 @@ describe('ApplicationsService City submission eligibility gate', () => {
       parentWorkspaceId: 'udn',
       recipients: [{ studentCode: '999999', fullName: 'Student A', className: '24CTT1' }],
     });
-    repository.findManualVerification.mockResolvedValue({ decision: 'APPROVED' });
+    await approveManualEligibility(eligibility, repository);
     const tx = configureSuccessfulTransaction(0);
     mocks.prisma.application.findUnique.mockResolvedValue(application());
 
@@ -388,6 +469,112 @@ describe('ApplicationsService City submission eligibility gate', () => {
       where: expect.objectContaining({ updatedAt: application().updatedAt }),
       data: expect.objectContaining({ status: 'under_review' }),
     });
+    expect(tx.applicationDraftSnapshot.create).not.toHaveBeenCalled();
+    expect(tx.reviewTask.findMany).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(mocks.notifications.create).not.toHaveBeenCalled();
+    expect(mocks.emailOutbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('rechecks identity under the submit transaction before committing review', async () => {
+    const { service: eligibility, repository } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [
+        { studentCode: '111111', fullName: 'Student A', className: '24CTT1' },
+        { studentCode: '222222', fullName: 'Student B', className: '24CTT1' },
+      ],
+    });
+    await approveManualEligibility(eligibility, repository);
+    const tx = configureSuccessfulTransaction();
+    mocks.prisma.application.findUnique.mockResolvedValue(
+      application({
+        reviewTasks: [
+          { id: 'review-task-a', criterion: 'ethics', status: 'waiting', assignedOfficer: null },
+        ],
+      }),
+    );
+    mocks.prisma.$transaction.mockImplementation(async (callback) => {
+      repository.state.identity = { ...repository.state.identity, fullName: 'Student B' };
+      return callback(tx);
+    });
+
+    await expect(
+      buildService(eligibility).submit(
+        { ...student, studentCode: null },
+        'application-a',
+        { allowSubmitWithWarnings: true },
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CITY_SUBMISSION_NEEDS_VERIFICATION',
+    });
+
+    expect(tx.$queryRaw).toHaveBeenCalled();
+    expect(tx.application.updateMany).not.toHaveBeenCalled();
+    expect(tx.applicationDraftSnapshot.create).not.toHaveBeenCalled();
+    expect(tx.reviewTask.findMany).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(mocks.notifications.create).not.toHaveBeenCalled();
+    expect(mocks.emailOutbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('rolls back submit-triggered precheck writes when eligibility changes before the protected commit', async () => {
+    const { service: eligibility, repository } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [{ studentCode: '111111', fullName: 'Student A', className: '24CTT1' }],
+    });
+    await approveManualEligibility(eligibility, repository);
+    const actor = { ...student, studentCode: null };
+    const precheckWrites: string[] = [];
+    const preparedPrecheck = {
+      application: application(),
+      level: Level.city,
+      criteria: { criteriaVersionId: null, versionName: 'fallback-city', schoolYear: '2025-2026', unitScope: 'default', level: Level.city, isFallback: true, warnings: [], rules: [] },
+      completion: [],
+      result: {
+        applicationId: 'application-a',
+        level: Level.city,
+        readinessScore: 100,
+        readyToSubmit: true,
+        criteriaResults: [],
+        missingItems: [],
+        warnings: [],
+        nextBestAction: '',
+        nextAction: null,
+        humanConfirmationRequired: true,
+      },
+    };
+    mocks.prisma.application.findUnique.mockResolvedValue(application());
+    mocks.prisma.precheckResult.findFirst.mockResolvedValue({
+      createdAt: new Date('2026-08-01T00:00:00.000Z'),
+      resultJson: null,
+      missingItemsJson: null,
+    });
+    mocks.precheck.run.mockImplementation(async () => {
+      actor.fullName = 'No Matching Recipient';
+      precheckWrites.push('persisted');
+      return {};
+    });
+    mocks.precheck.prepareForSubmission.mockImplementation(async () => {
+      repository.state.identity = {
+        ...repository.state.identity,
+        fullName: 'No Matching Recipient',
+      };
+      return preparedPrecheck;
+    });
+    const tx = configureSuccessfulTransaction();
+
+    await expect(
+      buildService(eligibility).submit(actor, 'application-a', { allowSubmitWithWarnings: true }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CITY_SUBMISSION_NOT_ELIGIBLE',
+    });
+
+    expect(precheckWrites).toEqual([]);
+    expect(mocks.precheck.run).not.toHaveBeenCalled();
+    expect(mocks.precheck.persistPreparedInTransaction).not.toHaveBeenCalled();
+    expect(tx.application.updateMany).not.toHaveBeenCalled();
     expect(tx.applicationDraftSnapshot.create).not.toHaveBeenCalled();
     expect(tx.reviewTask.findMany).not.toHaveBeenCalled();
     expect(tx.auditLog.create).not.toHaveBeenCalled();
