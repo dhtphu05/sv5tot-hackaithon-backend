@@ -1,4 +1,5 @@
-import { AwardLevel, WorkspaceType, type Application } from '@prisma/client';
+import { WorkspaceType, type Application } from '@prisma/client';
+import { normalizeText } from '../decision-imports/decision-ocr-table-normalizer';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -19,11 +20,12 @@ export type CitySubmissionEligibility = {
   applicationId: string;
   schoolYear: string;
   route: 'UDN_PREREQUISITE' | 'DIRECT_CITY';
-  eligible: boolean;
-  schoolAward: { required: boolean; satisfied: boolean };
-  universityAward: { required: boolean; satisfied: boolean };
-  blockingReasons: Array<
-    'MISSING_STUDENT_CODE' | 'MISSING_SCHOOL_AWARD' | 'MISSING_UNIVERSITY_SYSTEM_AWARD'
+  status: 'ELIGIBLE' | 'NOT_ELIGIBLE' | 'NEEDS_VERIFICATION';
+  reasons: Array<
+    | 'MISSING_UNIVERSITY_SYSTEM_AWARD'
+    | 'MISSING_IDENTITY_CONTEXT'
+    | 'IDENTITY_MATCH_REQUIRES_VERIFICATION'
+    | 'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH'
   >;
 };
 
@@ -78,49 +80,49 @@ export class CitySubmissionEligibilityService {
     school: WorkspaceContext,
     universityWorkspaceId: string,
   ): Promise<CitySubmissionEligibility> {
-    if (user.studentCode === null || user.studentCode.length === 0) {
-      return {
-        applicationId: application.id,
-        schoolYear: application.schoolYear,
-        route: 'UDN_PREREQUISITE',
-        eligible: false,
-        schoolAward: { required: true, satisfied: false },
-        universityAward: { required: true, satisfied: false },
-        blockingReasons: ['MISSING_STUDENT_CODE'],
-      };
+    const recipients = await this.repository.findConfirmedUniversityRecipients({
+      issuerWorkspaceId: universityWorkspaceId,
+      institutionWorkspaceId: school.id,
+      schoolYear: application.schoolYear,
+    });
+
+    const studentCode = normalizeStudentCode(user.studentCode);
+    if (
+      studentCode &&
+      recipients.some((recipient) => normalizeStudentCode(recipient.studentCode) === studentCode)
+    ) {
+      return udnResult(application, 'ELIGIBLE', []);
     }
 
-    const sharedLookup = {
-      institutionWorkspaceId: school.id,
-      studentCode: user.studentCode,
-      schoolYear: application.schoolYear,
-    };
-    const [hasSchoolAward, hasUniversityAward] = await Promise.all([
-      this.repository.hasConfirmedAward({
-        ...sharedLookup,
-        awardLevel: AwardLevel.SCHOOL,
-        issuerWorkspaceId: school.id,
-      }),
-      this.repository.hasConfirmedAward({
-        ...sharedLookup,
-        awardLevel: AwardLevel.UNIVERSITY_SYSTEM,
-        issuerWorkspaceId: universityWorkspaceId,
-      }),
-    ]);
+    const fullName = normalizeText(user.fullName);
+    const className = normalizeText(user.className ?? '');
+    const identityMatches = fullName && className
+      ? recipients.filter(
+          (recipient) =>
+            normalizeText(recipient.fullName) === fullName &&
+            normalizeText(recipient.className ?? '') === className,
+        )
+      : [];
 
-    const blockingReasons: CitySubmissionEligibility['blockingReasons'] = [];
-    if (!hasSchoolAward) blockingReasons.push('MISSING_SCHOOL_AWARD');
-    if (!hasUniversityAward) blockingReasons.push('MISSING_UNIVERSITY_SYSTEM_AWARD');
+    if (identityMatches.length > 1) {
+      return udnResult(application, 'NEEDS_VERIFICATION', [
+        'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH',
+      ]);
+    }
 
-    return {
-      applicationId: application.id,
-      schoolYear: application.schoolYear,
-      route: 'UDN_PREREQUISITE',
-      eligible: blockingReasons.length === 0,
-      schoolAward: { required: true, satisfied: hasSchoolAward },
-      universityAward: { required: true, satisfied: hasUniversityAward },
-      blockingReasons,
-    };
+    if (identityMatches.length === 1) {
+      return udnResult(application, 'NEEDS_VERIFICATION', [
+        'IDENTITY_MATCH_REQUIRES_VERIFICATION',
+      ]);
+    }
+
+    if (!studentCode && (!fullName || !className)) {
+      return udnResult(application, 'NOT_ELIGIBLE', ['MISSING_IDENTITY_CONTEXT']);
+    }
+
+    const reasons: CitySubmissionEligibility['reasons'] = ['MISSING_UNIVERSITY_SYSTEM_AWARD'];
+    if (!fullName || !className) reasons.push('MISSING_IDENTITY_CONTEXT');
+    return udnResult(application, 'NOT_ELIGIBLE', reasons);
   }
 }
 
@@ -129,9 +131,26 @@ function directCityResult(application: EligibilityApplication): CitySubmissionEl
     applicationId: application.id,
     schoolYear: application.schoolYear,
     route: 'DIRECT_CITY',
-    eligible: true,
-    schoolAward: { required: false, satisfied: true },
-    universityAward: { required: false, satisfied: true },
-    blockingReasons: [],
+    status: 'ELIGIBLE',
+    reasons: [],
   };
+}
+
+function udnResult(
+  application: EligibilityApplication,
+  status: CitySubmissionEligibility['status'],
+  reasons: CitySubmissionEligibility['reasons'],
+): CitySubmissionEligibility {
+  return {
+    applicationId: application.id,
+    schoolYear: application.schoolYear,
+    route: 'UDN_PREREQUISITE',
+    status,
+    reasons,
+  };
+}
+
+function normalizeStudentCode(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase() ?? '';
+  return normalized || null;
 }

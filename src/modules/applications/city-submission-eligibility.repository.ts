@@ -1,11 +1,9 @@
-import { AwardDecisionStatus, type AwardLevel, type PrismaClient } from '@prisma/client';
+import { AwardDecisionStatus, AwardLevel, type PrismaClient } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 
-export type ConfirmedAwardLookup = {
-  awardLevel: AwardLevel;
+export type ConfirmedUniversityRecipientLookup = {
   issuerWorkspaceId: string;
   institutionWorkspaceId: string;
-  studentCode: string;
   schoolYear: string;
 };
 
@@ -31,23 +29,20 @@ export class CitySubmissionEligibilityRepository {
     });
   }
 
-  async hasConfirmedAward(input: ConfirmedAwardLookup): Promise<boolean> {
-    const recipient = await this.db.awardRecipient.findFirst({
+  findConfirmedUniversityRecipients(input: ConfirmedUniversityRecipientLookup) {
+    return this.db.awardRecipient.findMany({
       where: {
-        studentCode: input.studentCode,
         institutionWorkspaceId: input.institutionWorkspaceId,
         awardDecision: {
           is: {
             issuerWorkspaceId: input.issuerWorkspaceId,
-            awardLevel: input.awardLevel,
+            awardLevel: AwardLevel.UNIVERSITY_SYSTEM,
             schoolYear: input.schoolYear,
             status: AwardDecisionStatus.CONFIRMED,
           },
         },
       },
-      select: { id: true },
+      select: { studentCode: true, fullName: true, className: true },
     });
-
-    return recipient !== null;
   }
 }
