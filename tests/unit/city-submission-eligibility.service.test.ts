@@ -415,6 +415,7 @@ describe('CitySubmissionEligibilityService', () => {
         applicationId: 'application-a',
         decision,
         reason: 'Checked the official signed decision.',
+        verificationBasisHash: expect.stringMatching(/^[a-f0-9]{64}$/),
         actorId: 'city-manager',
         actorRole: Role.city_manager,
       });

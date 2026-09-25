@@ -21,6 +21,7 @@ export type SaveEligibilityVerificationInput = {
   applicationId: string;
   decision: ApplicationEligibilityVerificationDecision;
   reason: string;
+  verificationBasisHash: string;
   actorId: string;
   actorRole: Role;
 };
@@ -62,7 +63,7 @@ export class CitySubmissionEligibilityRepository {
   findManualVerification(applicationId: string) {
     return this.db.applicationEligibilityVerification.findUnique({
       where: { applicationId },
-      select: { decision: true },
+      select: { decision: true, verificationBasisHash: true },
     });
   }
 
@@ -104,12 +105,14 @@ export class CitySubmissionEligibilityRepository {
           applicationId: input.applicationId,
           decision: input.decision,
           reason: input.reason,
+          verificationBasisHash: input.verificationBasisHash,
           decidedById: input.actorId,
           decidedAt,
         },
         update: {
           decision: input.decision,
           reason: input.reason,
+          verificationBasisHash: input.verificationBasisHash,
           decidedById: input.actorId,
           decidedAt,
         },

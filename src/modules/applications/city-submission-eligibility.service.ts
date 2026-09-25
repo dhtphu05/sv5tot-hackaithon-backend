@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   ApplicationEligibilityVerificationDecision,
   ApplicationStatus,
@@ -38,6 +39,17 @@ type WorkspaceContext = {
   type: WorkspaceType;
   parentWorkspaceId: string | null;
   parentWorkspace: { id: string; type: WorkspaceType } | null;
+};
+
+type EligibilityCalculation = {
+  result: CitySubmissionEligibility;
+  verificationBasisHash: string | null;
+};
+
+type VerificationBasisRecipient = {
+  studentCode: string;
+  fullName: string;
+  className: string | null;
 };
 
 export type CitySubmissionEligibility = {
@@ -83,13 +95,19 @@ export class CitySubmissionEligibilityService {
       requireUserWorkspace(user),
     );
 
-    if (automatic.status !== 'NEEDS_VERIFICATION') return automatic;
+    if (automatic.result.status !== 'NEEDS_VERIFICATION') return automatic.result;
 
     const verification = await this.repository.findManualVerification(application.id);
-    if (!verification) return automatic;
+    if (
+      !verification ||
+      !automatic.verificationBasisHash ||
+      verification.verificationBasisHash !== automatic.verificationBasisHash
+    ) {
+      return automatic.result;
+    }
 
     return {
-      ...automatic,
+      ...automatic.result,
       status: verification.decision === ApplicationEligibilityVerificationDecision.APPROVED
         ? 'ELIGIBLE'
         : 'NOT_ELIGIBLE',
@@ -162,12 +180,20 @@ export class CitySubmissionEligibilityService {
       identity,
       application.workspaceId,
     );
-    if (automatic.status !== 'NEEDS_VERIFICATION') {
+    if (automatic.result.status !== 'NEEDS_VERIFICATION') {
       throw new AppError(
         409,
         ErrorCodes.ELIGIBILITY_VERIFICATION_NOT_REQUIRED,
         'Manual verification is available only when automatic eligibility needs verification',
-        { status: automatic.status },
+        { status: automatic.result.status },
+      );
+    }
+
+    if (!automatic.verificationBasisHash) {
+      throw new AppError(
+        409,
+        ErrorCodes.ELIGIBILITY_VERIFICATION_NOT_REQUIRED,
+        'Manual verification requires a current eligibility basis',
       );
     }
 
@@ -175,6 +201,7 @@ export class CitySubmissionEligibilityService {
       applicationId: application.id,
       decision: input.decision,
       reason: input.reason.trim(),
+      verificationBasisHash: automatic.verificationBasisHash,
       actorId: user.id,
       actorRole: user.role,
     };
@@ -185,7 +212,7 @@ export class CitySubmissionEligibilityService {
     application: EligibilityApplication,
     identity: EligibilityIdentity,
     workspaceId: string,
-  ): Promise<CitySubmissionEligibility> {
+  ): Promise<EligibilityCalculation> {
     const workspace = await this.repository.findWorkspaceContext(workspaceId);
     if (!workspace || workspace.type !== WorkspaceType.SCHOOL) {
       throw new AppError(
@@ -196,7 +223,7 @@ export class CitySubmissionEligibilityService {
     }
 
     if (workspace.parentWorkspaceId === null) {
-      return directCityResult(application);
+      return { result: directCityResult(application), verificationBasisHash: null };
     }
 
     if (
@@ -218,11 +245,18 @@ export class CitySubmissionEligibilityService {
     application: EligibilityApplication,
     school: WorkspaceContext,
     universityWorkspaceId: string,
-  ): Promise<CitySubmissionEligibility> {
+  ): Promise<EligibilityCalculation> {
     const recipients = await this.repository.findConfirmedUniversityRecipients({
       issuerWorkspaceId: universityWorkspaceId,
       institutionWorkspaceId: school.id,
       schoolYear: application.schoolYear,
+    });
+    const verificationBasisHash = createVerificationBasisHash({
+      application,
+      school,
+      universityWorkspaceId,
+      identity,
+      recipients,
     });
 
     const studentCode = normalizeStudentCode(identity.studentCode);
@@ -230,7 +264,10 @@ export class CitySubmissionEligibilityService {
       studentCode &&
       recipients.some((recipient) => normalizeStudentCode(recipient.studentCode) === studentCode)
     ) {
-      return udnResult(application, 'ELIGIBLE', []);
+      return {
+        result: udnResult(application, 'ELIGIBLE', []),
+        verificationBasisHash,
+      };
     }
 
     const fullName = normalizeText(identity.fullName);
@@ -244,25 +281,77 @@ export class CitySubmissionEligibilityService {
       : [];
 
     if (identityMatches.length > 1) {
-      return udnResult(application, 'NEEDS_VERIFICATION', [
-        'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH',
-      ]);
+      return {
+        result: udnResult(application, 'NEEDS_VERIFICATION', [
+          'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH',
+        ]),
+        verificationBasisHash,
+      };
     }
 
     if (identityMatches.length === 1) {
-      return udnResult(application, 'NEEDS_VERIFICATION', [
-        'IDENTITY_MATCH_REQUIRES_VERIFICATION',
-      ]);
+      return {
+        result: udnResult(application, 'NEEDS_VERIFICATION', [
+          'IDENTITY_MATCH_REQUIRES_VERIFICATION',
+        ]),
+        verificationBasisHash,
+      };
     }
 
     if (!studentCode && (!fullName || !className)) {
-      return udnResult(application, 'NOT_ELIGIBLE', ['MISSING_IDENTITY_CONTEXT']);
+      return {
+        result: udnResult(application, 'NOT_ELIGIBLE', ['MISSING_IDENTITY_CONTEXT']),
+        verificationBasisHash,
+      };
     }
 
     const reasons: CitySubmissionEligibility['reasons'] = ['MISSING_UNIVERSITY_SYSTEM_AWARD'];
     if (!fullName || !className) reasons.push('MISSING_IDENTITY_CONTEXT');
-    return udnResult(application, 'NOT_ELIGIBLE', reasons);
+    return {
+      result: udnResult(application, 'NOT_ELIGIBLE', reasons),
+      verificationBasisHash,
+    };
   }
+}
+
+function createVerificationBasisHash(input: {
+  application: EligibilityApplication;
+  school: WorkspaceContext;
+  universityWorkspaceId: string;
+  identity: EligibilityIdentity;
+  recipients: VerificationBasisRecipient[];
+}): string {
+  const recipients = input.recipients
+    .map((recipient) => ({
+      studentCode: normalizeStudentCode(recipient.studentCode),
+      fullName: normalizeText(recipient.fullName),
+      className: normalizeText(recipient.className ?? ''),
+    }))
+    .sort((left, right) => {
+      const leftKey = JSON.stringify(left);
+      const rightKey = JSON.stringify(right);
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
+  const basis = {
+    applicationId: input.application.id,
+    schoolYear: input.application.schoolYear,
+    workspaceId: input.application.workspaceId,
+    route: 'UDN_PREREQUISITE',
+    schoolType: input.school.type,
+    parentWorkspaceId: input.school.parentWorkspaceId,
+    parentWorkspaceType: input.school.parentWorkspace?.type ?? null,
+    universityWorkspaceId: input.universityWorkspaceId,
+    studentId: input.application.studentId,
+    identity: {
+      workspaceId: input.application.workspaceId,
+      studentCode: normalizeStudentCode(input.identity.studentCode),
+      fullName: normalizeText(input.identity.fullName),
+      className: normalizeText(input.identity.className ?? ''),
+    },
+    recipients,
+  };
+
+  return createHash('sha256').update(JSON.stringify(basis)).digest('hex');
 }
 
 function directCityResult(application: EligibilityApplication): CitySubmissionEligibility {

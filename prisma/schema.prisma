@@ -478,6 +478,7 @@ model ApplicationEligibilityVerification {
   applicationId String                                    @unique @db.Uuid
   decision      ApplicationEligibilityVerificationDecision
   reason        String
+  verificationBasisHash String?                           @db.VarChar(64)
   decidedById   String                                    @db.Uuid
   decidedAt     DateTime                                  @default(now())
   createdAt     DateTime                                  @default(now())
