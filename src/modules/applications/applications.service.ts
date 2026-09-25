@@ -469,7 +469,7 @@ export class ApplicationsService {
             FROM "User"
             WHERE "id" = ${application.studentId}::uuid
               AND "workspaceId" = ${application.workspaceId}::uuid
-            FOR UPDATE
+            FOR NO KEY UPDATE
           `;
           if (lockedStudent.length !== 1) {
             throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');

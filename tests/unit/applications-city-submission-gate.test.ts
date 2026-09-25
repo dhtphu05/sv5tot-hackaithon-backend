@@ -115,6 +115,7 @@ function eligibilityService(input: {
         : null,
     }),
     lockWorkspaceForEligibility: vi.fn().mockResolvedValue([{ id: 'school-a' }]),
+    lockSchoolWorkspaceForEligibility: vi.fn().mockResolvedValue([{ id: 'school-a' }]),
     lockUniversityAwardScope: vi.fn().mockResolvedValue(true),
     findConfirmedUniversityRecipients: vi.fn().mockResolvedValue(input.recipients),
     findManualVerification: vi.fn().mockImplementation(async () => state.manualVerification),
@@ -623,6 +624,9 @@ describe('ApplicationsService City submission eligibility gate', () => {
 
     expect(tx.$queryRaw).toHaveBeenCalled();
     expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
+    expect((tx.$queryRaw.mock.calls[1][0] as TemplateStringsArray).join('')).toContain(
+      'FOR NO KEY UPDATE',
+    );
     expect(repository.findStudentIdentity).toHaveBeenLastCalledWith('student-a', tx);
     expect(tx.application.updateMany).not.toHaveBeenCalled();
     expect(tx.application.update).not.toHaveBeenCalled();
@@ -659,7 +663,8 @@ describe('ApplicationsService City submission eligibility gate', () => {
         humanConfirmationRequired: true,
       },
     };
-    mocks.prisma.application.findUnique.mockResolvedValue(application());
+    const original = application();
+    mocks.prisma.application.findUnique.mockResolvedValue(original);
     mocks.prisma.precheckResult.findFirst.mockResolvedValue({
       createdAt: new Date('2026-08-01T00:00:00.000Z'),
       resultJson: null,
@@ -668,6 +673,11 @@ describe('ApplicationsService City submission eligibility gate', () => {
     mocks.precheck.run.mockImplementation(async () => {
       actor.fullName = 'No Matching Recipient';
       precheckWrites.push('persisted');
+      Object.assign(original, {
+        status: ApplicationStatus.under_review,
+        readinessScore: 74,
+        submittedAt: new Date('2026-09-25T00:00:00.000Z'),
+      });
       return {};
     });
     mocks.precheck.prepareForSubmission.mockImplementation(async () => {
@@ -687,6 +697,10 @@ describe('ApplicationsService City submission eligibility gate', () => {
     });
 
     expect(precheckWrites).toEqual([]);
+    expect(original.status).toBe(ApplicationStatus.ready_to_submit);
+    expect(original.readinessScore).toBe(100);
+    expect(original.submittedAt).toBeNull();
+    expect(original.currentDraftVersion).toBe(1);
     expect(mocks.precheck.run).not.toHaveBeenCalled();
     expect(mocks.precheck.persistPreparedInTransaction).not.toHaveBeenCalled();
     expect(tx.application.update).not.toHaveBeenCalled();

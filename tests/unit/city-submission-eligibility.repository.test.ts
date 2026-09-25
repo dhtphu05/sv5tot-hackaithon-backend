@@ -3,6 +3,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { CitySubmissionEligibilityRepository } from '../../src/modules/applications/city-submission-eligibility.repository';
 
 describe('CitySubmissionEligibilityRepository', () => {
+  it('locks the application school without conflicting with recipient foreign-key checks', async () => {
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'school-a' }]),
+    };
+    const repository = new CitySubmissionEligibilityRepository({} as never);
+
+    await expect(repository.lockSchoolWorkspaceForEligibility('school-a', tx as never)).resolves.toEqual([
+      { id: 'school-a' },
+    ]);
+
+    expect((tx.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('')).toContain(
+      'FOR NO KEY UPDATE',
+    );
+  });
+
   it('loads canonical recipients only from confirmed UDN decisions for the application year and school', async () => {
     const db = {
       application: { findUnique: vi.fn() },

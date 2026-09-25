@@ -164,6 +164,15 @@ export class CitySubmissionEligibilityRepository {
     `;
   }
 
+  lockSchoolWorkspaceForEligibility(id: string, tx: Prisma.TransactionClient) {
+    return tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "Workspace"
+      WHERE "id" = ${id}::uuid
+      FOR NO KEY UPDATE
+    `;
+  }
+
   async lockUniversityAwardScope(
     input: ConfirmedUniversityRecipientLookup,
     tx: Prisma.TransactionClient,

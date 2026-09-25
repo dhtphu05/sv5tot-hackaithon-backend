@@ -115,7 +115,7 @@ export class CitySubmissionEligibilityService {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
 
-    const schoolLock = await this.repository.lockWorkspaceForEligibility(application.workspaceId, tx);
+    const schoolLock = await this.repository.lockSchoolWorkspaceForEligibility(application.workspaceId, tx);
     if (schoolLock.length === 0) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
