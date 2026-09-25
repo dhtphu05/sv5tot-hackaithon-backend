@@ -46,7 +46,45 @@ function createRepository() {
     findConfirmedUniversityRecipients: vi.fn().mockResolvedValue([
       { studentCode: '000123', fullName: 'Student A', className: '24CTT1' },
     ]),
+    findManualVerification: vi.fn().mockResolvedValue(null),
+    findApplicationForVerification: vi.fn().mockResolvedValue({
+      id: 'application-a',
+      studentId: 'student-a',
+      workspaceId: schoolWorkspaceId,
+      schoolYear: '2025-2026',
+      applicationType: 'individual',
+      targetLevel: 'city',
+      status: 'ready_to_submit',
+      submittedAt: null,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+    }),
+    findStudentIdentity: vi.fn().mockResolvedValue({
+      workspaceId: schoolWorkspaceId,
+      studentCode: null,
+      fullName: 'Student A',
+      className: '24CTT1',
+    }),
+    saveVerification: vi.fn().mockImplementation(async (input) => ({
+      ...input,
+      decidedAt: new Date('2026-09-01T00:00:00.000Z'),
+    })),
   };
+}
+
+function cityManager(): AuthenticatedUser {
+  const cityId = 'city-workspace';
+  return user({
+    id: 'city-manager',
+    role: Role.city_manager,
+    workspaceId: cityId,
+    workspace: {
+      id: cityId,
+      code: 'DANANG_CITY',
+      type: WorkspaceType.CITY,
+      name: 'Da Nang',
+      shortName: 'Da Nang',
+    },
+  });
 }
 
 describe('CitySubmissionEligibilityService', () => {
@@ -175,6 +213,139 @@ describe('CitySubmissionEligibilityService', () => {
 
     expect(result.status).toBe('NEEDS_VERIFICATION');
     expect(result.reasons).toEqual(['AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH']);
+  });
+
+  it('uses an approved manual verification only when automatic eligibility needs verification', async () => {
+    repository.findManualVerification.mockResolvedValue({
+      decision: 'APPROVED',
+      reason: 'Matched against the signed decision',
+    });
+
+    const result = await service.getEligibility(user({ studentCode: null }), 'application-a');
+
+    expect(result.status).toBe('ELIGIBLE');
+    expect(result.reasons).toEqual(['MANUAL_VERIFICATION_APPROVED']);
+    expect(result).not.toHaveProperty('reason');
+  });
+
+  it('uses a rejected manual verification as NOT_ELIGIBLE only for an automatic verification signal', async () => {
+    repository.findManualVerification.mockResolvedValue({
+      decision: 'REJECTED',
+      reason: 'Identity could not be confirmed',
+    });
+
+    const result = await service.getEligibility(user({ studentCode: null }), 'application-a');
+
+    expect(result.status).toBe('NOT_ELIGIBLE');
+    expect(result.reasons).toEqual(['MANUAL_VERIFICATION_REJECTED']);
+    expect(result).not.toHaveProperty('reason');
+  });
+
+  it('does not allow manual approval to override automatic NOT_ELIGIBLE', async () => {
+    repository.findConfirmedUniversityRecipients.mockResolvedValue([]);
+    repository.findManualVerification.mockResolvedValue({
+      decision: 'APPROVED',
+      reason: 'Should not override a definitive result',
+    });
+
+    const result = await service.getEligibility(user(), 'application-a');
+
+    expect(result.status).toBe('NOT_ELIGIBLE');
+    expect(result.reasons).toEqual(['MISSING_UNIVERSITY_SYSTEM_AWARD']);
+  });
+
+  it.each(['APPROVED', 'REJECTED'] as const)(
+    'lets a City Manager record %s only for a City individual application requiring verification',
+    async (decision) => {
+      const result = await service.verifyEligibility(cityManager(), 'application-a', {
+        decision,
+        reason: 'Checked the official signed decision.',
+      });
+
+      expect(result.decision).toBe(decision);
+      expect(repository.findApplicationForVerification).toHaveBeenCalledWith('application-a');
+      expect(repository.findStudentIdentity).toHaveBeenCalledWith('student-a');
+      expect(repository.saveVerification).toHaveBeenCalledWith({
+        applicationId: 'application-a',
+        decision,
+        reason: 'Checked the official signed decision.',
+        actorId: 'city-manager',
+        actorRole: Role.city_manager,
+      });
+    },
+  );
+
+  it.each([
+    [
+      'ELIGIBLE',
+      [{ studentCode: '000123', fullName: 'Student A', className: '24CTT1' }],
+      { workspaceId: schoolWorkspaceId, studentCode: '000123', fullName: 'Student A', className: '24CTT1' },
+    ],
+    [
+      'NOT_ELIGIBLE',
+      [],
+      { workspaceId: schoolWorkspaceId, studentCode: null, fullName: 'Student A', className: '24CTT1' },
+    ],
+  ] as const)(
+    'rejects manual verification when automatic status is %s',
+    async (_status, recipients, identity) => {
+      repository.findConfirmedUniversityRecipients.mockResolvedValue([...recipients]);
+      repository.findStudentIdentity.mockResolvedValue(identity);
+
+      await expect(
+        service.verifyEligibility(cityManager(), 'application-a', {
+          decision: 'APPROVED',
+          reason: 'Checked the official signed decision.',
+        }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'ELIGIBILITY_VERIFICATION_NOT_REQUIRED',
+      });
+      expect(repository.saveVerification).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not permit a City Manager to verify an already submitted application', async () => {
+    repository.findApplicationForVerification.mockResolvedValue({
+      id: 'application-a',
+      studentId: 'student-a',
+      workspaceId: 'school-b',
+      schoolYear: '2025-2026',
+      applicationType: 'individual',
+      targetLevel: 'city',
+      status: 'under_review',
+      submittedAt: new Date('2026-09-01T00:00:00.000Z'),
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+    });
+
+    await expect(
+      service.verifyEligibility(cityManager(), 'application-a', {
+        decision: 'APPROVED',
+        reason: 'Checked the official signed decision.',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(repository.saveVerification).not.toHaveBeenCalled();
+  });
+
+  it('permits pre-submit verification when a never-submitted application was marked supplement_required', async () => {
+    repository.findApplicationForVerification.mockResolvedValue({
+      id: 'application-a',
+      studentId: 'student-a',
+      workspaceId: schoolWorkspaceId,
+      schoolYear: '2025-2026',
+      applicationType: 'individual',
+      targetLevel: 'city',
+      status: 'supplement_required',
+      submittedAt: null,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+    });
+
+    await service.verifyEligibility(cityManager(), 'application-a', {
+      decision: 'APPROVED',
+      reason: 'Checked the official signed decision.',
+    });
+
+    expect(repository.saveVerification).toHaveBeenCalledOnce();
   });
 
   it('reports missing identity context when code and name/class cannot identify a recipient', async () => {
