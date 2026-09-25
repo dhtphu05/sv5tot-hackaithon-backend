@@ -1,4 +1,5 @@
 import { Role, type User, type Workspace } from '@prisma/client';
+import { WorkspaceType } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import { AuthService } from '../../src/modules/auth/auth.service';
 import { registerSchema } from '../../src/modules/auth/auth.validation';
@@ -8,6 +9,8 @@ import { WorkspacesService } from '../../src/modules/workspaces/workspaces.servi
 const baseWorkspace: Workspace = {
   id: '11111111-1111-4111-8111-111111111111',
   code: 'DHBK-DHDN',
+  type: WorkspaceType.SCHOOL,
+  parentWorkspaceId: null,
   name: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
   shortName: 'DHBK',
   isActive: true,

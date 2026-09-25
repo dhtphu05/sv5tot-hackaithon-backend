@@ -112,7 +112,7 @@ export async function listManagerCollectives(req: Request, res: Response): Promi
 }
 
 export async function getCollectiveAggregation(req: Request, res: Response): Promise<void> {
-  const data = await service.aggregation(String(req.params.id));
+  const data = await service.aggregation(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });
 }
 

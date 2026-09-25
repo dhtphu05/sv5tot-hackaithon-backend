@@ -9,6 +9,7 @@ export class FilesRepository {
     return this.db.file.findUnique({
       where: { id },
       include: {
+        workspace: { select: { type: true, isActive: true } },
         evidenceFiles: {
           include: {
             evidence: {
@@ -16,10 +17,20 @@ export class FilesRepository {
                 application: {
                   include: {
                     student: true,
-                    reviewTasks: true,
+                    reviewTasks: {
+                      include: { evidences: { select: { evidenceId: true } } },
+                    },
+                    workspace: { select: { type: true, isActive: true } },
                   },
                 },
-                collectiveProfile: true,
+                collectiveProfile: {
+                  include: {
+                    reviewTasks: {
+                      include: { evidences: { select: { evidenceId: true } } },
+                    },
+                    workspace: { select: { type: true, isActive: true } },
+                  },
+                },
               },
             },
           },
@@ -27,12 +38,18 @@ export class FilesRepository {
         eventFiles: {
           include: {
             event: {
-              select: { workspaceId: true },
+              select: { workspaceId: true, workspace: { select: { type: true, isActive: true } } },
             },
           },
         },
         decisionImports: {
           select: { workspaceId: true },
+        },
+        awardDecisionsAsDecisionFile: {
+          select: { issuerWorkspaceId: true },
+        },
+        awardDecisionsAsRosterFile: {
+          select: { issuerWorkspaceId: true },
         },
         sampleCertificateEvents: {
           select: { workspaceId: true },

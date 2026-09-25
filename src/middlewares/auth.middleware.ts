@@ -26,6 +26,7 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
           select: {
             id: true,
             code: true,
+            type: true,
             name: true,
             shortName: true,
             isActive: true,
@@ -76,6 +77,7 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
         ? {
             id: user.workspace.id,
             code: user.workspace.code,
+            type: user.workspace.type,
             name: user.workspace.name,
             shortName: user.workspace.shortName,
           }

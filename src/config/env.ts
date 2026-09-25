@@ -127,6 +127,7 @@ const rawEnvSchema = z.object({
   SMARTBOT_USE_DYNAMIC_PROMPT: booleanFromEnv,
   SMARTBOT_WEBHOOK_TOKEN: z.string().optional().default(''),
   SMARTBOT_LOG_RAW_RESPONSE: booleanFromEnv,
+  ENABLE_DEMO_REVIEW_BYPASS: booleanFromEnv,
   GEMINI_ENABLED: booleanFromEnv,
   GEMINI_API_KEY: z.string().optional().default(''),
   GEMINI_MODEL: z.string().min(1).default('gemini-2.5-flash'),
@@ -173,6 +174,41 @@ const rawEnvSchema = z.object({
     path: ['MAIL_PROVIDER'],
   })
   .refine((data) => {
+    if (data.NODE_ENV !== 'test' && data.EVIDENCE_ANALYSIS_PROVIDER !== 'openai') {
+      return false;
+    }
+    return true;
+  }, {
+    message: 'EVIDENCE_ANALYSIS_PROVIDER must be openai outside test',
+    path: ['EVIDENCE_ANALYSIS_PROVIDER'],
+  })
+  .refine((data) => {
+    if (
+      data.NODE_ENV !== 'test' &&
+      data.ASSISTANT_NARRATIVE_PROVIDER &&
+      data.ASSISTANT_NARRATIVE_PROVIDER !== 'openai'
+    ) {
+      return false;
+    }
+    return true;
+  }, {
+    message: 'ASSISTANT_NARRATIVE_PROVIDER must be openai outside test',
+    path: ['ASSISTANT_NARRATIVE_PROVIDER'],
+  })
+  .refine((data) => {
+    if (
+      data.NODE_ENV !== 'test' &&
+      data.STUDENT_ASSISTANT_PROVIDER &&
+      data.STUDENT_ASSISTANT_PROVIDER !== 'openai'
+    ) {
+      return false;
+    }
+    return true;
+  }, {
+    message: 'STUDENT_ASSISTANT_PROVIDER must be openai outside test',
+    path: ['STUDENT_ASSISTANT_PROVIDER'],
+  })
+  .refine((data) => {
     if (data.EVIDENCE_ANALYSIS_PROVIDER !== 'openai') {
       return true;
     }
@@ -198,6 +234,20 @@ const rawEnvSchema = z.object({
   }, {
     message: 'OPENAI_API_KEY and OPENAI_STUDENT_ASSISTANT_MODEL are required when STUDENT_ASSISTANT_PROVIDER=openai',
     path: ['STUDENT_ASSISTANT_PROVIDER'],
+  })
+  .refine((data) => {
+    if (data.NODE_ENV === 'test') {
+      return true;
+    }
+    return (
+      !!data.OPENAI_API_KEY &&
+      !!data.OPENAI_EVIDENCE_MODEL &&
+      !!data.OPENAI_ASSISTANT_MODEL &&
+      !!data.OPENAI_STUDENT_ASSISTANT_MODEL
+    );
+  }, {
+    message: 'OpenAI evidence, dashboard assistant, and student assistant models are required outside test',
+    path: ['OPENAI_API_KEY'],
   });
 
 const envInput = {
@@ -289,7 +339,8 @@ export const env = {
     process.env.SMARTREADER_SMOKE_AUDIT_ENABLED === undefined
       ? false
       : rawEnv.SMARTREADER_SMOKE_AUDIT_ENABLED,
-  EVIDENCE_ANALYSIS_PROVIDER: rawEnv.EVIDENCE_ANALYSIS_PROVIDER,
+  EVIDENCE_ANALYSIS_PROVIDER:
+    rawEnv.NODE_ENV === 'test' ? rawEnv.EVIDENCE_ANALYSIS_PROVIDER : 'openai',
   OPENAI_API_KEY: rawEnv.OPENAI_API_KEY,
   OPENAI_EVIDENCE_MODEL: rawEnv.OPENAI_EVIDENCE_MODEL,
   OPENAI_EVIDENCE_TIMEOUT_MS: rawEnv.OPENAI_EVIDENCE_TIMEOUT_MS,
@@ -298,23 +349,13 @@ export const env = {
     process.env.OPENAI_STORE_RESPONSES === undefined ? false : rawEnv.OPENAI_STORE_RESPONSES,
   OPENAI_EVIDENCE_PROMPT_VERSION: rawEnv.OPENAI_EVIDENCE_PROMPT_VERSION,
   ASSISTANT_NARRATIVE_PROVIDER:
-    rawEnv.ASSISTANT_NARRATIVE_PROVIDER ??
-    (rawEnv.NODE_ENV === 'test'
-      ? 'mock'
-      : rawEnv.OPENAI_API_KEY && rawEnv.OPENAI_ASSISTANT_MODEL
-        ? 'openai'
-        : 'disabled'),
+    rawEnv.NODE_ENV === 'test' ? (rawEnv.ASSISTANT_NARRATIVE_PROVIDER ?? 'mock') : 'openai',
   OPENAI_ASSISTANT_MODEL: rawEnv.OPENAI_ASSISTANT_MODEL,
   OPENAI_ASSISTANT_TIMEOUT_MS: rawEnv.OPENAI_ASSISTANT_TIMEOUT_MS,
   OPENAI_ASSISTANT_MAX_RETRIES: rawEnv.OPENAI_ASSISTANT_MAX_RETRIES,
   OPENAI_ASSISTANT_PROMPT_VERSION: rawEnv.OPENAI_ASSISTANT_PROMPT_VERSION,
   STUDENT_ASSISTANT_PROVIDER:
-    rawEnv.STUDENT_ASSISTANT_PROVIDER ??
-    (rawEnv.NODE_ENV === 'test'
-      ? 'mock'
-      : rawEnv.OPENAI_API_KEY && rawEnv.OPENAI_STUDENT_ASSISTANT_MODEL
-        ? 'openai'
-        : 'disabled'),
+    rawEnv.NODE_ENV === 'test' ? (rawEnv.STUDENT_ASSISTANT_PROVIDER ?? 'mock') : 'openai',
   OPENAI_STUDENT_ASSISTANT_MODEL: rawEnv.OPENAI_STUDENT_ASSISTANT_MODEL,
   OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION: rawEnv.OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION,
   ASSISTANT_NARRATIVE_CACHE_TTL_MS: rawEnv.ASSISTANT_NARRATIVE_CACHE_TTL_MS,
@@ -336,5 +377,6 @@ export const env = {
       : rawEnv.SMARTBOT_USE_DYNAMIC_PROMPT,
   SMARTBOT_LOG_RAW_RESPONSE:
     process.env.SMARTBOT_LOG_RAW_RESPONSE === undefined ? false : rawEnv.SMARTBOT_LOG_RAW_RESPONSE,
+  ENABLE_DEMO_REVIEW_BYPASS: rawEnv.ENABLE_DEMO_REVIEW_BYPASS,
 };
 export type Env = typeof env;

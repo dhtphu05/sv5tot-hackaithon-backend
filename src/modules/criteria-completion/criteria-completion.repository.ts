@@ -3,6 +3,7 @@ import { prisma } from '../../infrastructure/database/prisma';
 
 export const criteriaCompletionApplicationInclude = {
   student: true,
+  workspace: { select: { type: true, isActive: true } },
   metrics: true,
   evidences: {
     include: {

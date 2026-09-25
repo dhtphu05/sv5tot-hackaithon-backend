@@ -34,13 +34,23 @@ describe('createEvidenceAnalysisProvider', () => {
     expect(provider.provider).toBe('mock');
   });
 
-  it('selects SmartReader only when explicitly configured', () => {
-    const provider = createEvidenceAnalysisProvider({
-      provider: 'smartreader',
-      openaiApiKey: '',
-      openaiModel: '',
-    });
+  it('rejects SmartReader for manual evidence analysis runtime', () => {
+    expect(() =>
+      createEvidenceAnalysisProvider({
+        provider: 'smartreader',
+        openaiApiKey: '',
+        openaiModel: '',
+      }),
+    ).toThrowError(AppError);
 
-    expect(provider.provider).toBe('smartreader');
+    try {
+      createEvidenceAnalysisProvider({
+        provider: 'smartreader',
+        openaiApiKey: '',
+        openaiModel: '',
+      });
+    } catch (error) {
+      expect(error).toMatchObject({ code: ErrorCodes.AI_PROVIDER_NOT_ALLOWED });
+    }
   });
 });

@@ -1,10 +1,14 @@
 // Owns reviewed evidence knowledge, reusable criteria references, and search.
-import { Role, type Criterion } from '@prisma/client';
+import { ReviewTaskStatus, Role, WorkspaceType, type Criterion } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
+import {
+  assertReviewWorkspaceAccess,
+  isCityReviewRole,
+} from '../../shared/utils/review-workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { KnowledgeBaseRepository } from './knowledge-base.repository';
 import type {
@@ -38,8 +42,11 @@ export class KnowledgeBaseService {
 
   async searchApprovedEvidenceNames(user: AuthenticatedUser, query: ApprovedEvidenceNamesQuery) {
     const allowedCriteria =
-      user.role === Role.officer ? await this.getOfficerActiveCriteria(user.id) : undefined;
+      user.role === Role.officer || user.role === Role.city_officer
+        ? await this.getOfficerActiveCriteria(user.id)
+        : undefined;
     const { items, total } = await this.repository.searchApprovedEvidenceNames(
+      user,
       query,
       allowedCriteria,
     );
@@ -79,9 +86,21 @@ export class KnowledgeBaseService {
     const evidence = await prisma.evidence.findUnique({
       where: { id: input.evidenceId },
       include: {
-        event: true,
-        application: { select: { workspaceId: true } },
-        collectiveProfile: { select: { workspaceId: true } },
+        event: {
+          include: { workspace: { select: { type: true, isActive: true } } },
+        },
+        application: {
+          select: {
+            workspaceId: true,
+            workspace: { select: { type: true, isActive: true } },
+          },
+        },
+        collectiveProfile: {
+          select: {
+            workspaceId: true,
+            workspace: { select: { type: true, isActive: true } },
+          },
+        },
       },
     });
     if (!evidence) {
@@ -100,12 +119,51 @@ export class KnowledgeBaseService {
       : '';
     const finalReason = tagsString + (input.summary || input.reason || '');
     const cleanReason = input.anonymize ? anonymizeText(finalReason) : finalReason;
-    const workspaceId =
-      evidence.application?.workspaceId ??
-      evidence.collectiveProfile?.workspaceId ??
-      evidence.event?.workspaceId ??
-      workspaceIdForWrite(user);
-    assertSameWorkspace(user, { workspaceId }, 'Evidence not found');
+    const sourceWorkspace =
+      evidence.application ?? evidence.collectiveProfile ?? evidence.event ?? null;
+    const sourceWorkspaceId = sourceWorkspace?.workspaceId ?? workspaceIdForWrite(user);
+    if (sourceWorkspace) {
+      assertKnowledgeBaseWorkspaceAccess(
+        user,
+        {
+          workspaceId: sourceWorkspaceId,
+          workspace: {
+            type: sourceWorkspace.workspace?.type,
+            isActive: sourceWorkspace.workspace?.isActive,
+          },
+        },
+        'Evidence not found',
+      );
+    } else {
+      assertSameWorkspace(user, { workspaceId: sourceWorkspaceId }, 'Evidence not found');
+    }
+    if (user.role === Role.city_officer) {
+      const activeCriteria = await this.getOfficerActiveCriteria(user.id);
+      const taskOwnerScope = evidence.applicationId
+        ? { applicationId: evidence.applicationId }
+        : evidence.collectiveProfileId
+          ? { collectiveProfileId: evidence.collectiveProfileId }
+          : null;
+      const reviewedTask = activeCriteria.includes(evidence.criterion)
+        && taskOwnerScope
+        ? await prisma.reviewTask.findFirst({
+            where: {
+              ...taskOwnerScope,
+              criterion: evidence.criterion,
+              assignedOfficerId: user.id,
+              status: { in: [ReviewTaskStatus.accepted, ReviewTaskStatus.rejected] },
+              evidences: { some: { evidenceId: evidence.id } },
+            },
+            select: { id: true },
+          })
+        : null;
+      if (!reviewedTask) {
+        throw new AppError(403, ErrorCodes.FORBIDDEN, 'Evidence is outside the officer review scope');
+      }
+    }
+    const workspaceId = isCityReviewRole(user.role)
+      ? workspaceIdForWrite(user)
+      : sourceWorkspaceId;
 
     const item = await prisma.$transaction(async (tx) => {
       const metadata = {
@@ -150,7 +208,10 @@ export class KnowledgeBaseService {
   }
 
   async getItem(user: AuthenticatedUser, itemId: string) {
-    const item = await prisma.knowledgeBaseItem.findUnique({ where: { id: itemId } });
+    const item = await prisma.knowledgeBaseItem.findUnique({
+      where: { id: itemId },
+      include: { workspace: { select: { type: true, isActive: true } } },
+    });
     if (!item) {
       throw new AppError(
         404,
@@ -158,13 +219,17 @@ export class KnowledgeBaseService {
         'Knowledge base item not found',
       );
     }
-    assertSameWorkspace(user, item, 'Knowledge base item not found');
+    assertKnowledgeBaseWorkspaceAccess(user, item, 'Knowledge base item not found');
     const isStudent = user.role === 'student' || user.role === 'class_representative';
-    return isStudent ? this.anonymizeItem(item) : item;
+    const { workspace: _workspace, ...itemDto } = item;
+    return isStudent ? this.anonymizeItem(itemDto) : itemDto;
   }
 
   async updateItem(user: AuthenticatedUser, itemId: string, input: UpdateKnowledgeBaseItemInput) {
-    const existing = await prisma.knowledgeBaseItem.findUnique({ where: { id: itemId } });
+    const existing = await prisma.knowledgeBaseItem.findUnique({
+      where: { id: itemId },
+      include: { workspace: { select: { type: true, isActive: true } } },
+    });
     if (!existing) {
       throw new AppError(
         404,
@@ -172,7 +237,14 @@ export class KnowledgeBaseService {
         'Knowledge base item not found',
       );
     }
-    assertSameWorkspace(user, existing, 'Knowledge base item not found');
+    assertKnowledgeBaseWorkspaceAccess(user, existing, 'Knowledge base item not found');
+    if (isCityReviewRole(user.role) && existing.workspaceId !== user.workspaceId) {
+      throw new AppError(
+        404,
+        ErrorCodes.KNOWLEDGE_BASE_ITEM_NOT_FOUND,
+        'Knowledge base item not found',
+      );
+    }
 
     let dbDecision = input.decision;
     if (dbDecision === 'resolution_needed') {
@@ -208,7 +280,10 @@ export class KnowledgeBaseService {
   }
 
   async useItem(user: AuthenticatedUser, itemId: string) {
-    const existing = await prisma.knowledgeBaseItem.findUnique({ where: { id: itemId } });
+    const existing = await prisma.knowledgeBaseItem.findUnique({
+      where: { id: itemId },
+      include: { workspace: { select: { type: true, isActive: true } } },
+    });
     if (!existing) {
       throw new AppError(
         404,
@@ -216,7 +291,7 @@ export class KnowledgeBaseService {
         'Knowledge base item not found',
       );
     }
-    assertSameWorkspace(user, existing, 'Knowledge base item not found');
+    assertKnowledgeBaseWorkspaceAccess(user, existing, 'Knowledge base item not found');
 
     const updated = await prisma.knowledgeBaseItem.update({
       where: { id: itemId },
@@ -252,6 +327,34 @@ export class KnowledgeBaseService {
 
     return Array.from(new Set(specializations.map((item) => item.criterion)));
   }
+}
+
+function assertKnowledgeBaseWorkspaceAccess(
+  user: AuthenticatedUser,
+  resource: {
+    workspaceId: string | null;
+    workspace?: { type?: WorkspaceType | null; isActive?: boolean | null } | null;
+  },
+  notFoundMessage: string,
+) {
+  if (
+    isCityReviewRole(user.role) &&
+    user.workspace?.type === WorkspaceType.CITY &&
+    user.workspace.id === user.workspaceId &&
+    resource.workspaceId === user.workspaceId
+  ) {
+    return;
+  }
+
+  assertReviewWorkspaceAccess(
+    user,
+    {
+      workspaceId: resource.workspaceId,
+      workspaceType: resource.workspace?.type,
+      workspaceIsActive: resource.workspace?.isActive,
+    },
+    notFoundMessage,
+  );
 }
 
 function anonymizeText(text: string): string {

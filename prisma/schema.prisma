@@ -14,6 +14,33 @@ enum Role {
   manager
   committee
   admin
+  data_uploader
+  city_officer
+  city_manager
+  city_committee
+}
+
+enum WorkspaceType {
+  CITY
+  UNIVERSITY_SYSTEM
+  SCHOOL
+}
+
+enum AwardLevel {
+  SCHOOL
+  UNIVERSITY_SYSTEM
+}
+
+enum AwardDecisionStatus {
+  DRAFT
+  CONFIRMED
+  ARCHIVED
+}
+
+enum AwardRecipientMatchStatus {
+  MATCHED
+  UNMATCHED
+  CONFLICT
 }
 
 enum Criterion {
@@ -114,6 +141,7 @@ enum JobStatus {
 enum JobType {
   evidence_ocr
   event_roster_indexing
+  award_roster_ingestion
   evidence_card_generation
   smartreader_extract
   decision_metadata
@@ -282,20 +310,27 @@ enum CollectiveStatus {
 model Workspace {
   id                         String                           @id @default(uuid()) @db.Uuid
   code                       String                           @unique
+  type                       WorkspaceType                    @default(SCHOOL)
+  parentWorkspaceId          String?                          @db.Uuid
   name                       String
   shortName                  String?
   isActive                   Boolean                          @default(true)
   registrationEnabled        Boolean                          @default(false)
   createdAt                  DateTime                         @default(now())
   updatedAt                  DateTime                         @updatedAt
+  parentWorkspace            Workspace?                       @relation("WorkspaceHierarchy", fields: [parentWorkspaceId], references: [id], onDelete: SetNull)
+  childWorkspaces             Workspace[]                      @relation("WorkspaceHierarchy")
   users                      User[]
   applications               Application[]
   requirementResponses       ApplicationRequirementResponse[]
   files                      File[]
   eventRegistries            EventRegistry[]
   decisionImports            DecisionImport[]
+  awardDecisions              AwardDecision[]
+  awardRecipientsForInstitution AwardRecipient[] @relation("AwardRecipientInstitution")
   knowledgeBaseItems         KnowledgeBaseItem[]
   criteriaVersions           CriteriaVersion[]
+  criteriaConfigs            CriteriaConfig[]
   reviewTasks                ReviewTask[]
   resolutionCases            ResolutionCase[]
   eventRegistryAliases       EventRegistryAlias[]
@@ -312,6 +347,8 @@ model Workspace {
   supplementRequests         SupplementRequest[]
 
   @@index([isActive, registrationEnabled])
+  @@index([type, isActive])
+  @@index([parentWorkspaceId])
 }
 
 model User {
@@ -338,6 +375,9 @@ model User {
   ownedFiles               File[]                           @relation("OwnedFiles")
   createdDecisionImports   DecisionImport[]                 @relation("DecisionImportCreatedBy")
   confirmedDecisionImports DecisionImport[]                 @relation("DecisionImportConfirmedBy")
+  createdAwardDecisions     AwardDecision[]                 @relation("AwardDecisionCreatedBy")
+  confirmedAwardDecisions   AwardDecision[]                 @relation("AwardDecisionConfirmedBy")
+  matchedAwardRecipients    AwardRecipient[]                @relation("AwardRecipientMatchedUser")
   auditLogs                AuditLog[]
   notifications            Notification[]
   requirementResponses     ApplicationRequirementResponse[]
@@ -480,6 +520,8 @@ model File {
   evidenceFiles                   EvidenceFile[]
   eventFiles                      EventFile[]
   decisionImports                 DecisionImport[]            @relation("DecisionImportSourceFile")
+  awardDecisionsAsDecisionFile    AwardDecision[]             @relation("AwardDecisionDecisionFile")
+  awardDecisionsAsRosterFile      AwardDecision[]             @relation("AwardDecisionRosterFile")
   sampleCertificateEvents         EventRegistry[]             @relation("EventSampleCertificate")
   sampleCertificateKnowledgeItems KnowledgeBaseItem[]         @relation("KnowledgeSampleCertificate")
   approvedEvidencePrecedents      ApprovedEvidencePrecedent[]
@@ -570,6 +612,10 @@ model EvidenceCard {
   extractedFieldsJson        Json?
   normalizedFieldsJson       Json?                       @map("normalized_fields_json")
   warningsJson               Json?
+  documentType               String?                     @map("document_type")
+  suggestedCriteriaJson      Json?                       @map("suggested_criteria_json")
+  evidencePrecheckJson       Json?                       @map("evidence_precheck_json")
+  evidencePrecheckedAt       DateTime?                   @map("evidence_prechecked_at")
   matchedEventId             String?                     @db.Uuid
   matchedParticipantId       String?                     @map("matched_participant_id") @db.Uuid
   matchedKnowledgeItemIds    Json?
@@ -577,6 +623,10 @@ model EvidenceCard {
   provider                   String?
   providerModel              String?                     @map("provider_model")
   promptVersion              String?                     @map("prompt_version")
+  sourceEvidenceFileId       String?                     @map("source_evidence_file_id") @db.Uuid
+  sourceFileId               String?                     @map("source_file_id") @db.Uuid
+  analysisRevision           Int                         @default(0) @map("analysis_revision")
+  analysedAt                 DateTime?                   @map("analysed_at")
   fieldConfidenceJson        Json?                       @map("field_confidence_json")
   requiresHumanConfirmation  Boolean                     @default(false) @map("requires_human_confirmation")
   confirmationStatus         String                      @default("pending") @map("confirmation_status")
@@ -595,6 +645,8 @@ model EvidenceCard {
   approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 
   @@index([confirmationStatus])
+  @@index([sourceEvidenceFileId])
+  @@index([sourceFileId])
 }
 
 model EventRegistry {
@@ -718,6 +770,7 @@ model DecisionImport {
   tables             DecisionTable[]
   previewRows        DecisionRosterPreviewRow[]
   events             EventRegistry[]
+  awardDecisions    AwardDecision[]
 
   @@index([workspaceId, status])
   @@index([status])
@@ -725,6 +778,60 @@ model DecisionImport {
   @@index([createdBy])
   @@index([metadataJobId])
   @@index([rosterJobId])
+}
+
+model AwardDecision {
+  id                  String              @id @default(uuid()) @db.Uuid
+  issuerWorkspaceId   String              @db.Uuid
+  awardLevel          AwardLevel
+  schoolYear          String
+  decisionNumber      String?
+  decisionDate        DateTime?
+  decisionFileId      String?             @db.Uuid
+  rosterFileId        String?             @db.Uuid
+  sourceImportId      String?             @db.Uuid
+  status              AwardDecisionStatus @default(DRAFT)
+  createdById         String              @db.Uuid
+  confirmedById       String?             @db.Uuid
+  confirmedAt         DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  issuerWorkspace     Workspace           @relation(fields: [issuerWorkspaceId], references: [id], onDelete: Restrict)
+  decisionFile        File?               @relation("AwardDecisionDecisionFile", fields: [decisionFileId], references: [id], onDelete: Restrict)
+  rosterFile          File?               @relation("AwardDecisionRosterFile", fields: [rosterFileId], references: [id], onDelete: Restrict)
+  sourceImport        DecisionImport?     @relation(fields: [sourceImportId], references: [id], onDelete: SetNull)
+  creator             User                @relation("AwardDecisionCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  confirmer           User?               @relation("AwardDecisionConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+  recipients          AwardRecipient[]
+
+  @@index([issuerWorkspaceId, schoolYear])
+  @@index([awardLevel])
+  @@index([status])
+  @@index([decisionFileId])
+  @@index([rosterFileId])
+  @@index([sourceImportId])
+  @@index([createdById])
+}
+
+model AwardRecipient {
+  id                       String                     @id @default(uuid()) @db.Uuid
+  awardDecisionId          String                     @db.Uuid
+  studentCode              String
+  fullName                 String
+  institutionWorkspaceId   String?                    @db.Uuid
+  className                String?
+  matchedUserId            String?                    @db.Uuid
+  matchStatus              AwardRecipientMatchStatus  @default(UNMATCHED)
+  sourceRow                Int?
+  createdAt                DateTime                   @default(now())
+  awardDecision            AwardDecision              @relation(fields: [awardDecisionId], references: [id], onDelete: Cascade)
+  institutionWorkspace     Workspace?                 @relation("AwardRecipientInstitution", fields: [institutionWorkspaceId], references: [id], onDelete: SetNull)
+  matchedUser              User?                      @relation("AwardRecipientMatchedUser", fields: [matchedUserId], references: [id], onDelete: SetNull)
+
+  @@index([awardDecisionId])
+  @@index([studentCode])
+  @@index([matchedUserId])
+  @@index([institutionWorkspaceId])
 }
 
 model DecisionDocument {
@@ -919,6 +1026,57 @@ model CriteriaVersion {
   @@unique([workspaceId, schoolYear, level, versionName])
   @@index([workspaceId, level, isActive])
   @@index([level, isActive])
+}
+
+model CriteriaConfig {
+  id                   String                   @id @default(uuid()) @db.Uuid
+  scope                Level
+  workspaceId          String?                  @db.Uuid
+  code                 String                   @unique
+  title                String
+  description          String?
+  sourceDocumentName   String
+  sourceDocumentNumber String?
+  sourceIssuedAt       DateTime?
+  sourcePeriodLabel    String?
+  sourceOrganization   String
+  sourceFileName       String?
+  sourceNote           String?
+  isActive             Boolean                  @default(true)
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  workspace            Workspace?               @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  rules                NormalizedCriteriaRule[]
+
+  @@index([scope, workspaceId, isActive])
+  @@index([isActive])
+}
+
+model NormalizedCriteriaRule {
+  id                       String         @id @default(uuid()) @db.Uuid
+  criteriaConfigId         String         @db.Uuid
+  criterion                Criterion
+  ruleKey                  String
+  title                    String
+  requirementJson          Json
+  mandatory                Boolean        @default(true)
+  priorityRule             Boolean        @default(false)
+  studentFriendlyText      String
+  officerFriendlyText      String?
+  acceptedEvidenceHintsJson Json?
+  missingActionHintsJson   Json?
+  sourcePage               Int?
+  sourceSection            String?
+  sourceQuote              String?
+  sortOrder                Int            @default(0)
+  isActive                 Boolean        @default(true)
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+  criteriaConfig           CriteriaConfig @relation(fields: [criteriaConfigId], references: [id], onDelete: Cascade)
+
+  @@unique([criteriaConfigId, ruleKey])
+  @@index([criteriaConfigId, criterion, isActive])
+  @@index([criteriaConfigId, mandatory, priorityRule, isActive])
 }
 
 model CriteriaRule {

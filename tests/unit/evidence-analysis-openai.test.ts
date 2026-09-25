@@ -6,6 +6,17 @@ import { ErrorCodes } from '../../src/shared/errors/error-codes';
 
 const validOutput = {
   documentType: 'certificate',
+  documentFacts: {
+    documentTitle: 'Giấy chứng nhận tình nguyện',
+    identity: { studentName: 'Nguyen Van A', studentCode: '102220001', schoolName: null },
+    activity: { eventName: 'Mua he xanh', programName: null, location: null, activityDate: '2026-07-01' },
+    organization: { issuerName: 'Hoi Sinh vien', issuerLevel: 'school' },
+    conductEntries: [],
+    fitness: { title: null, resultLevel: null, sportName: null },
+    language: { certificateType: null, score: null, frameworkLevel: null },
+    award: { title: null, rank: null, level: null },
+    academic: { gpa: null, gpaScale: null, hasFGrade: null },
+  },
   fields: {
     student_name: { value: 'Nguyen Van A', confidence: 0.91, source: 'openai' },
     student_code: { value: '102220001', confidence: 0.9, source: 'openai' },
@@ -24,6 +35,25 @@ const validOutput = {
     conduct_score: { value: null, confidence: 0, source: 'openai' },
   },
   suggestedCriteria: [{ criterion: 'volunteer', confidence: 0.78, reason: 'Volunteer certificate' }],
+  documentPrecheck: {
+    identifiedAs: {
+      documentLabel: 'Giấy chứng nhận tình nguyện',
+      shortDescription: 'Tài liệu xác nhận hoạt động tình nguyện của sinh viên.',
+    },
+    completeness: {
+      score: 0.86,
+      availableFields: ['student_name', 'student_code', 'event_name', 'organizer', 'issue_date'],
+      missingImportantFields: [],
+    },
+    quality: { level: 'clear', issues: [] },
+    relevance: [
+      {
+        criterion: 'volunteer',
+        level: 'strong',
+        explanation: 'Nội dung thể hiện số ngày tham gia hoạt động tình nguyện.',
+      },
+    ],
+  },
   warnings: [],
   summary: 'Certificate for Mua he xanh.',
   overallConfidence: 0.86,
@@ -117,6 +147,122 @@ describe('OpenAiEvidenceAnalysisAdapter', () => {
       }),
       expect.anything(),
     );
+  });
+
+  it('builds an OpenAI strict schema without optional warning fields', async () => {
+    const create = vi.fn().mockResolvedValue({ output_text: JSON.stringify(validOutput) });
+    const adapter = adapterWithCreate(create);
+
+    await adapter.analyze({
+      evidenceId: 'evidence-1',
+      evidenceFileId: 'evidence-file-1',
+      fileId: 'file-1',
+      filename: 'certificate.pdf',
+      mimeType: 'application/pdf',
+      fileBuffer: Buffer.from('pdf-bytes'),
+      evidenceName: 'Mua he xanh',
+      selectedCriterion: Criterion.volunteer,
+    });
+
+    const params = create.mock.calls[0]?.[0] as {
+      text?: { format?: { schema?: { properties?: Record<string, unknown> } } };
+    };
+    const warningsSchema = (params.text?.format?.schema?.properties?.warnings as {
+      items?: { required?: string[]; properties?: Record<string, unknown> };
+    }).items;
+    const fieldsSchema = params.text?.format?.schema?.properties?.fields as {
+      properties?: Record<string, { properties?: Record<string, unknown> }>;
+    };
+    expect(fieldsSchema.properties?.student_name.properties?.confidence).toEqual(
+      expect.objectContaining({ type: ['number', 'null'] }),
+    );
+    expect(warningsSchema?.required).toEqual(['code', 'severity', 'field', 'message']);
+    expect(warningsSchema?.properties?.field).toEqual(
+      expect.objectContaining({ type: ['string', 'null'] }),
+    );
+  });
+
+  it('accepts conduct-result output with document-specific facts', async () => {
+    const output = {
+      ...validOutput,
+      documentType: 'conduct_result',
+      documentFacts: {
+        ...validOutput.documentFacts,
+        documentTitle: 'Kết quả rèn luyện',
+        conductEntries: [
+          { semester: '1', schoolYear: '2024-2025', score: 91, classification: 'Xuất sắc' },
+        ],
+      },
+      fields: {
+        ...validOutput.fields,
+        event_name: { value: null, confidence: 0, source: 'openai' },
+        volunteer_days: { value: null, confidence: 0, source: 'openai' },
+        conduct_score: { value: 91, confidence: 0.9, source: 'openai' },
+      },
+      suggestedCriteria: [{ criterion: 'ethics', confidence: 0.9, reason: 'Conduct score sheet' }],
+      warnings: [{ code: 'needs_student_review', severity: 'info', field: null, message: 'Review before confirming.' }],
+    };
+    const create = vi.fn().mockResolvedValue({ output_text: JSON.stringify(output) }) as (params: unknown, options: unknown) => Promise<unknown>;
+    const adapter = adapterWithCreate(create);
+
+    const result = await adapter.analyze({
+      evidenceId: 'evidence-1',
+      evidenceFileId: 'evidence-file-1',
+      fileId: 'file-1',
+      filename: 'conduct.png',
+      mimeType: 'image/png',
+      fileBuffer: Buffer.from('image-bytes'),
+      evidenceName: 'Ket qua ren luyen',
+      selectedCriterion: Criterion.ethics,
+    });
+
+    expect(result.documentType).toBe('conduct_result');
+    expect(result.documentFacts.conductEntries[0]?.score).toBe(91);
+    expect(result.warnings[0]).not.toHaveProperty('field');
+  });
+
+  it('accepts nullable field confidence and document identity/activity facts', async () => {
+    const output = {
+      ...validOutput,
+      documentType: 'student_healthy_certificate',
+      documentFacts: {
+        ...validOutput.documentFacts,
+        documentTitle: 'Chứng nhận Sinh viên khỏe',
+        identity: { studentName: 'Nguyen Van A', studentCode: null, schoolName: 'Trường Đại học Bách khoa' },
+        activity: {
+          eventName: 'Sinh viên khỏe',
+          programName: 'Unitour',
+          location: 'Đà Nẵng',
+          activityDate: '2026-06-15',
+        },
+        organization: { issuerName: 'Hội Sinh viên', issuerLevel: null },
+        fitness: { title: 'Sinh viên khỏe', resultLevel: 'Đạt', sportName: null },
+      },
+      fields: {
+        ...validOutput.fields,
+        student_code: { value: null, confidence: null, source: 'openai' },
+        organizer_level: { value: null, confidence: null, source: 'openai' },
+        certificate_type: { value: null, confidence: null, source: 'openai' },
+      },
+      suggestedCriteria: [{ criterion: 'physical', confidence: 0.86, reason: 'Student Healthy certificate' }],
+    };
+    const create = vi.fn().mockResolvedValue({ output_text: JSON.stringify(output) }) as (params: unknown, options: unknown) => Promise<unknown>;
+    const adapter = adapterWithCreate(create);
+
+    const result = await adapter.analyze({
+      evidenceId: 'evidence-1',
+      evidenceFileId: 'evidence-file-1',
+      fileId: 'file-1',
+      filename: 'healthy.png',
+      mimeType: 'image/png',
+      fileBuffer: Buffer.from('image-bytes'),
+      evidenceName: 'Chung nhan Sinh vien khoe',
+      selectedCriterion: Criterion.physical,
+    });
+
+    expect(result.documentType).toBe('student_healthy_certificate');
+    expect(result.fields.student_code.confidence).toBeNull();
+    expect(result.documentFacts.activity.programName).toBe('Unitour');
   });
 
   it('rejects invalid structured output before persistence', async () => {

@@ -2,7 +2,7 @@
 import { KnowledgeDecision, type Criterion, type Prisma, type PrismaClient } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
+import { reviewKnowledgeWorkspaceFilterFor } from '../../shared/utils/review-workspace-scope';
 import type {
   ApprovedEvidenceNamesQuery,
   KnowledgeBaseSearchQuery,
@@ -18,16 +18,20 @@ export class KnowledgeBaseRepository {
     }
 
     const where: Prisma.KnowledgeBaseItemWhereInput = {
-      ...workspaceFilterFor(user),
+      ...reviewKnowledgeWorkspaceFilterFor(user),
       ...(query.criterion ? { criterion: query.criterion } : {}),
       ...(query.level ? { level: query.level } : {}),
       ...(dbDecision ? { decision: dbDecision as any } : {}),
       ...(query.q
         ? {
-            OR: [
-              { evidenceName: { contains: query.q, mode: 'insensitive' } },
-              { eventName: { contains: query.q, mode: 'insensitive' } },
-              { reason: { contains: query.q, mode: 'insensitive' } },
+            AND: [
+              {
+                OR: [
+                  { evidenceName: { contains: query.q, mode: 'insensitive' } },
+                  { eventName: { contains: query.q, mode: 'insensitive' } },
+                  { reason: { contains: query.q, mode: 'insensitive' } },
+                ],
+              },
             ],
           }
         : {}),
@@ -58,6 +62,7 @@ export class KnowledgeBaseRepository {
   }
 
   async searchApprovedEvidenceNames(
+    user: AuthenticatedUser,
     query: ApprovedEvidenceNamesQuery,
     allowedCriteria?: Criterion[],
   ) {
@@ -69,6 +74,9 @@ export class KnowledgeBaseRepository {
     }
 
     const where: Prisma.KnowledgeBaseItemWhereInput = {
+      AND: [
+        reviewKnowledgeWorkspaceFilterFor(user),
+        {
       decision: KnowledgeDecision.accepted,
       ...(query.criterion
         ? { criterion: query.criterion }
@@ -82,7 +90,9 @@ export class KnowledgeBaseRepository {
               { eventName: { contains: query.q, mode: 'insensitive' } },
             ],
           }
-        : {}),
+          : {}),
+        },
+      ],
     };
     const skip = (query.page - 1) * query.limit;
 

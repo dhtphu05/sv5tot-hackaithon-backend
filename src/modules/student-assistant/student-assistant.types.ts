@@ -1,14 +1,17 @@
-import type { Criterion } from '@prisma/client';
+import type { Criterion, Level } from '@prisma/client';
 
 export type StudentAssistantContextType =
-  'dashboard' | 'evidence_card' | 'precheck' | 'event_registry' | 'supplement';
+  'dashboard' | 'evidence_card' | 'precheck' | 'event_registry' | 'supplement' | 'criteria';
 
 export type StudentAssistantFactType =
   | 'workflow_state'
   | 'evidence_field'
+  | 'evidence_precheck'
   | 'evidence_warning'
   | 'precheck_result'
   | 'criteria_rule'
+  | 'criteria_source'
+  | 'criteria_gap'
   | 'next_action'
   | 'event_registry'
   | 'participant_status'
@@ -34,9 +37,17 @@ export type StudentAssistantFact = {
 export type StudentAssistantAction = {
   id: string;
   type:
+    | 'open_application'
     | 'open_evidence'
     | 'confirm_evidence'
     | 'correct_evidence'
+    | 'replace_evidence_file'
+    | 'retry_evidence_analysis'
+    | 'open_precheck'
+    | 'open_criterion'
+    | 'view_source_criteria'
+    | 'open_supplement'
+    | 'start_application'
     | 'replace_file'
     | 'retry_analysis'
     | 'add_evidence'
@@ -46,7 +57,6 @@ export type StudentAssistantAction = {
     | 'run_precheck'
     | 'rerun_precheck'
     | 'resolve_precheck_issue'
-    | 'open_supplement'
     | 'resubmit_supplement'
     | 'submit_application'
     | 'contact_officer';
@@ -95,11 +105,18 @@ export type StudentAssistantAnswerIntent =
   | 'explain_supplement'
   | 'explain_deadline'
   | 'explain_progress'
+  | 'explain_level'
+  | 'explain_criterion'
+  | 'explain_gap'
+  | 'compare_levels'
+  | 'explain_evidence_relevance'
+  | 'explain_source'
   | 'needs_officer_clarification'
   | 'out_of_scope';
 
 export type StudentAssistantAnswer = {
   answer: string;
+  finalText?: string;
   intent: StudentAssistantAnswerIntent;
   sourceRefs: Array<{
     factId: string;
@@ -107,6 +124,8 @@ export type StudentAssistantAnswer = {
     destination?: StudentAssistantDestination;
   }>;
   suggestedActionId?: string;
+  navigation?: StudentAssistantAction | null;
+  fallback?: boolean;
   requiresOfficerClarification: boolean;
 };
 
@@ -124,11 +143,15 @@ export type StudentAssistantContextQuery = {
   eventId?: string;
   reviewTaskId?: string;
   schoolYear?: string;
+  scope?: Level;
 };
 
 export type StudentAssistantStreamInput = StudentAssistantContextQuery & {
   contextVersion: string;
   message: string;
+  clientConversationId?: string;
+  clientTurnId?: string;
+  clientAttemptId?: string;
   recentMessages?: StudentAssistantRecentMessage[];
 };
 
@@ -138,11 +161,13 @@ export type StudentAssistantStreamCallbacks = {
     contextType: StudentAssistantContextType;
     contextId: string;
     contextVersion: string;
+    sequence?: number;
   }) => void | Promise<void>;
-  onStatus: (data: { stage: 'preparing_answer' }) => void | Promise<void>;
-  onDelta: (data: { text: string }) => void | Promise<void>;
-  onSources: (data: { sourceRefs: StudentAssistantAnswer['sourceRefs'] }) => void | Promise<void>;
-  onAction: (data: { suggestedActionId: string | null }) => void | Promise<void>;
-  onComplete: (data: StudentAssistantAnswer & { contextVersion: string }) => void | Promise<void>;
-  onError: (data: { code: string; recoverable: boolean }) => void | Promise<void>;
+  onStatus: (data: { stage: 'preparing_context' | 'refreshing_evidence' | 'preparing_answer'; message?: string; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onDelta: (data: { text: string; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onSources: (data: { sourceRefs: StudentAssistantAnswer['sourceRefs']; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onAction: (data: { suggestedActionId: string | null; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onNavigation: (data: { selectedActionId: string | null; action: StudentAssistantAction | null; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onComplete: (data: StudentAssistantAnswer & { contextVersion: string; finalText: string; fallback?: boolean; requestId?: string; sequence?: number }) => void | Promise<void>;
+  onError: (data: { code: string; recoverable: boolean; message?: string; requestId?: string; sequence?: number }) => void | Promise<void>;
 };

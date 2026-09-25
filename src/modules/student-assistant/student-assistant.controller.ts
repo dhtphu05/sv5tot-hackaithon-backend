@@ -35,6 +35,7 @@ export async function streamStudentAssistantAnswer(req: Request, res: Response):
         onDelta: (data) => writeSse(res, 'delta', data),
         onSources: (data) => writeSse(res, 'sources', data),
         onAction: (data) => writeSse(res, 'action', data),
+        onNavigation: (data) => writeSse(res, 'navigation', data),
         onComplete: (data) => writeSse(res, 'complete', data),
         onError: (data) => writeSse(res, 'error', data),
       },

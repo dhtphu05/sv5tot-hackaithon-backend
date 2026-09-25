@@ -22,6 +22,7 @@
     "smoke:openai": "tsx scripts/openai-smoke.ts",
     "smoke:smartbot": "tsx scripts/smoke-smartbot.ts",
     "smoke:cloud-run": "tsx scripts/smoke-cloud-run-readiness.ts",
+    "evidence:reanalyze-legacy": "tsx scripts/reanalyze-legacy-evidence.ts",
     "worker:tick": "tsx scripts/worker-tick.ts",
     "test": "vitest run"
   },
