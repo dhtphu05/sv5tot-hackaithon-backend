@@ -2,6 +2,7 @@ import {
   ApplicationEligibilityVerificationDecision,
   AwardDecisionStatus,
   AwardLevel,
+  type Prisma,
   type PrismaClient,
   type Role,
 } from '@prisma/client';
@@ -26,11 +27,13 @@ export type SaveEligibilityVerificationInput = {
   actorRole: Role;
 };
 
+type EligibilityReadClient = PrismaClient | Prisma.TransactionClient;
+
 export class CitySubmissionEligibilityRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
 
-  findApplication(id: string) {
-    return this.db.application.findUnique({
+  findApplication(id: string, client: EligibilityReadClient = this.db) {
+    return client.application.findUnique({
       where: { id },
       select: { id: true, studentId: true, workspaceId: true, schoolYear: true },
     });
@@ -53,15 +56,15 @@ export class CitySubmissionEligibilityRepository {
     });
   }
 
-  findStudentIdentity(id: string) {
-    return this.db.user.findUnique({
+  findStudentIdentity(id: string, client: EligibilityReadClient = this.db) {
+    return client.user.findUnique({
       where: { id },
       select: { workspaceId: true, studentCode: true, fullName: true, className: true },
     });
   }
 
-  findManualVerification(applicationId: string) {
-    return this.db.applicationEligibilityVerification.findUnique({
+  findManualVerification(applicationId: string, client: EligibilityReadClient = this.db) {
+    return client.applicationEligibilityVerification.findUnique({
       where: { applicationId },
       select: { decision: true, verificationBasisHash: true },
     });
@@ -140,8 +143,8 @@ export class CitySubmissionEligibilityRepository {
     });
   }
 
-  findWorkspaceContext(id: string) {
-    return this.db.workspace.findUnique({
+  findWorkspaceContext(id: string, client: EligibilityReadClient = this.db) {
+    return client.workspace.findUnique({
       where: { id },
       select: {
         id: true,
@@ -152,8 +155,42 @@ export class CitySubmissionEligibilityRepository {
     });
   }
 
-  findConfirmedUniversityRecipients(input: ConfirmedUniversityRecipientLookup) {
-    return this.db.awardRecipient.findMany({
+  lockWorkspaceForEligibility(id: string, tx: Prisma.TransactionClient) {
+    return tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "Workspace"
+      WHERE "id" = ${id}::uuid
+      FOR UPDATE
+    `;
+  }
+
+  async lockUniversityAwardScope(
+    input: ConfirmedUniversityRecipientLookup,
+    tx: Prisma.TransactionClient,
+  ) {
+    const workspace = await this.lockWorkspaceForEligibility(input.issuerWorkspaceId, tx);
+    if (workspace.length === 0) return false;
+
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "AwardDecision"
+      WHERE "issuerWorkspaceId" = ${input.issuerWorkspaceId}::uuid
+        AND "awardLevel" = ${AwardLevel.UNIVERSITY_SYSTEM}::"AwardLevel"
+        AND (
+          "schoolYear" = ${input.schoolYear}
+          OR "status" = ${AwardDecisionStatus.DRAFT}::"AwardDecisionStatus"
+        )
+      ORDER BY "id"
+      FOR UPDATE
+    `;
+    return true;
+  }
+
+  findConfirmedUniversityRecipients(
+    input: ConfirmedUniversityRecipientLookup,
+    client: EligibilityReadClient = this.db,
+  ) {
+    return client.awardRecipient.findMany({
       where: {
         institutionWorkspaceId: input.institutionWorkspaceId,
         awardDecision: {

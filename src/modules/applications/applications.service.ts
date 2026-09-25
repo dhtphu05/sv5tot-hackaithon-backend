@@ -22,7 +22,7 @@ import { normalizeSchoolYear } from '../../shared/utils/school-year';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import { assertReviewWorkspaceAccess } from '../../shared/utils/review-workspace-scope';
 import { NotificationsService } from '../notifications/notifications.service';
-import { PrecheckService } from '../precheck/precheck.service';
+import { PrecheckService, type PreparedPrecheckRun } from '../precheck/precheck.service';
 import { ReviewAssignmentService } from '../review/review-assignment.service';
 import {
   assertApplicationEditable,
@@ -45,6 +45,21 @@ import type {
 } from './applications.validation';
 
 export { hasActiveEvidenceProcessing } from './application-freshness';
+
+function requiresInitialCityEligibility(
+  user: AuthenticatedUser,
+  application: Pick<
+    Application,
+    'applicationType' | 'targetLevel' | 'status' | 'submittedAt'
+  >,
+): boolean {
+  return (
+    user.role === Role.student &&
+    application.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city &&
+    (application.status !== ApplicationStatus.supplement_required || application.submittedAt === null)
+  );
+}
 
 type SubmitApplicationContext = Prisma.ApplicationGetPayload<{
   include: {
@@ -319,12 +334,8 @@ export class ApplicationsService {
       );
     }
 
-    if (
-      user.role === Role.student &&
-      application.applicationType === ApplicationType.individual &&
-      application.targetLevel === Level.city &&
-      (application.status !== ApplicationStatus.supplement_required || application.submittedAt === null)
-    ) {
+    const isInitialCitySubmission = requiresInitialCityEligibility(user, application);
+    if (isInitialCitySubmission) {
       await this.assertCitySubmissionEligible(user, application.id);
     }
 
@@ -347,17 +358,33 @@ export class ApplicationsService {
       where: { applicationId: application.id },
       orderBy: { createdAt: 'desc' },
     });
+    let preparedPrecheck: PreparedPrecheckRun | null = null;
     if (isApplicationPrecheckStale(application, latestPrecheck?.createdAt)) {
-      await this.precheckService.run(user, application.id, { level: application.targetLevel });
-      latestPrecheck = await prisma.precheckResult.findFirst({
-        where: { applicationId: application.id },
-        orderBy: { createdAt: 'desc' },
-      });
+      if (isInitialCitySubmission) {
+        preparedPrecheck = await this.precheckService.prepareForSubmission(user, application.id, {
+          level: application.targetLevel,
+        });
+      } else {
+        await this.precheckService.run(user, application.id, { level: application.targetLevel });
+        latestPrecheck = await prisma.precheckResult.findFirst({
+          where: { applicationId: application.id },
+          orderBy: { createdAt: 'desc' },
+        });
+      }
     }
-    const missingItems = latestPrecheck?.missingItemsJson ?? null;
-    const submitWarnings = buildSubmitWarningsFromPrecheck(latestPrecheck?.resultJson, missingItems);
+    const precheckResultJson = preparedPrecheck
+      ? (preparedPrecheck.result as unknown as Prisma.JsonValue)
+      : latestPrecheck?.resultJson;
+    const missingItems = preparedPrecheck
+      ? (preparedPrecheck.result.missingItems as unknown as Prisma.JsonValue)
+      : (latestPrecheck?.missingItemsJson ?? null);
+    const submitWarnings = buildSubmitWarningsFromPrecheck(precheckResultJson, missingItems);
 
-    if (submitWarnings.length > 0 && !input.allowSubmitWithWarnings) {
+    if (
+      submitWarnings.length > 0 &&
+      !input.allowSubmitWithWarnings &&
+      !isInitialCitySubmission
+    ) {
       throw new AppError(
         409,
         ErrorCodes.APPLICATION_NOT_READY,
@@ -388,6 +415,8 @@ export class ApplicationsService {
       submissionState.targetLevel !== application.targetLevel ||
       submissionState.currentDraftVersion !== application.currentDraftVersion ||
       submissionState.submittedAt?.getTime() !== application.submittedAt?.getTime() ||
+      (isInitialCitySubmission &&
+        submissionState.updatedAt.getTime() !== application.updatedAt.getTime()) ||
       !editableApplicationStatuses.includes(submissionState.status as never)
     ) {
       throw new AppError(
@@ -395,16 +424,6 @@ export class ApplicationsService {
         ErrorCodes.APPLICATION_LOCKED,
         'Application changed while submission was being prepared. Refresh and try again.',
       );
-    }
-
-    if (
-      user.role === Role.student &&
-      submissionState.applicationType === ApplicationType.individual &&
-      submissionState.targetLevel === Level.city &&
-      (submissionState.status !== ApplicationStatus.supplement_required ||
-        submissionState.submittedAt === null)
-    ) {
-      await this.assertCitySubmissionEligible(user, application.id);
     }
 
     const existingTasks = application.reviewTasks;
@@ -417,17 +436,88 @@ export class ApplicationsService {
     const supplementCriteria = Array.from(new Set(supplementTasks.map((task) => task.criterion)));
     const result = await prisma.$transaction(
       async (tx) => {
+        let effectiveSubmissionState = submissionState;
+        let effectivePrecheckResultJson = precheckResultJson;
+        let persistedPrecheck: Awaited<ReturnType<PrecheckService['persistPreparedInTransaction']>> | null = null;
+
+        if (isInitialCitySubmission) {
+          const lockedApplication = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id"
+            FROM "Application"
+            WHERE "id" = ${application.id}::uuid
+              AND "studentId" = ${application.studentId}::uuid
+              AND "workspaceId" = ${application.workspaceId}::uuid
+              AND "schoolYear" = ${application.schoolYear}
+              AND "applicationType" = ${submissionState.applicationType}::"ApplicationType"
+              AND "targetLevel" = ${submissionState.targetLevel}::"Level"
+              AND "status" = ${submissionState.status}::"ApplicationStatus"
+              AND "submittedAt" IS NOT DISTINCT FROM ${submissionState.submittedAt}
+              AND "currentDraftVersion" = ${submissionState.currentDraftVersion}
+              AND "updatedAt" = ${submissionState.updatedAt}
+            FOR UPDATE
+          `;
+          if (lockedApplication.length !== 1) {
+            throw new AppError(
+              409,
+              ErrorCodes.APPLICATION_LOCKED,
+              'Application changed while submission was being prepared. Refresh and try again.',
+            );
+          }
+
+          const lockedStudent = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id"
+            FROM "User"
+            WHERE "id" = ${application.studentId}::uuid
+              AND "workspaceId" = ${application.workspaceId}::uuid
+            FOR UPDATE
+          `;
+          if (lockedStudent.length !== 1) {
+            throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+          }
+
+          const eligibility = await this.citySubmissionEligibilityService.getEligibilityForSubmission(
+            tx,
+            user,
+            application.id,
+          );
+          this.assertCityEligibilityResultEligible(eligibility);
+
+          if (preparedPrecheck) {
+            persistedPrecheck = await this.precheckService.persistPreparedInTransaction(
+              tx,
+              user,
+              preparedPrecheck,
+            );
+            effectiveSubmissionState = {
+              ...effectiveSubmissionState,
+              status: persistedPrecheck.application.status,
+              updatedAt: persistedPrecheck.application.updatedAt,
+            };
+            effectivePrecheckResultJson = persistedPrecheck.precheckResult.resultJson;
+          }
+
+          if (submitWarnings.length > 0 && !input.allowSubmitWithWarnings) {
+            return {
+              reviewTasks: [],
+              blockedByWarnings: true,
+              readinessScore:
+                persistedPrecheck?.application.readinessScore ?? application.readinessScore,
+              latestPrecheck: persistedPrecheck?.precheckResult ?? latestPrecheck,
+            };
+          }
+        }
+
         const submittedAt = new Date();
         const newVersion = application.currentDraftVersion + 1;
 
         const updateResult = await tx.application.updateMany({
           where: {
             id: application.id,
-            status: submissionState.status,
-            targetLevel: submissionState.targetLevel,
-            currentDraftVersion: submissionState.currentDraftVersion,
-            submittedAt: submissionState.submittedAt,
-            updatedAt: submissionState.updatedAt,
+            status: effectiveSubmissionState.status,
+            targetLevel: effectiveSubmissionState.targetLevel,
+            currentDraftVersion: effectiveSubmissionState.currentDraftVersion,
+            submittedAt: effectiveSubmissionState.submittedAt,
+            updatedAt: effectiveSubmissionState.updatedAt,
           },
           data: {
             status: ApplicationStatus.under_review,
@@ -506,7 +596,7 @@ export class ApplicationsService {
                 include: { assignedOfficer: true },
                 orderBy: { criterion: 'asc' },
               })
-            : await this.createReviewTasksForSubmit(tx, application, latestPrecheck?.resultJson);
+            : await this.createReviewTasksForSubmit(tx, application, effectivePrecheckResultJson);
 
         await createApplicationAudit(tx, {
           actorId: user.id,
@@ -517,7 +607,7 @@ export class ApplicationsService {
           targetType: 'application',
           targetId: application.id,
           applicationId: application.id,
-          beforeStateJson: { status: submissionState.status },
+          beforeStateJson: { status: effectiveSubmissionState.status },
           afterStateJson: {
             status: ApplicationStatus.under_review,
             submittedAt: submittedAt.toISOString(),
@@ -535,7 +625,7 @@ export class ApplicationsService {
           targetType: 'application',
           targetId: application.id,
           applicationId: application.id,
-          beforeStateJson: { status: submissionState.status },
+          beforeStateJson: { status: effectiveSubmissionState.status },
           afterStateJson: { status: ApplicationStatus.under_review },
         });
 
@@ -581,10 +671,36 @@ export class ApplicationsService {
         tx,
       );
 
-      return reviewTasks;
+      return {
+        reviewTasks,
+        blockedByWarnings: false,
+        readinessScore:
+          persistedPrecheck?.application.readinessScore ?? application.readinessScore,
+        latestPrecheck: persistedPrecheck?.precheckResult ?? latestPrecheck,
+      };
       },
-      { maxWait: 10_000, timeout: 30_000 },
+      {
+        maxWait: 10_000,
+        timeout: 30_000,
+        ...(isInitialCitySubmission
+          ? { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }
+          : {}),
+      },
     );
+
+    if (result.blockedByWarnings) {
+      throw new AppError(
+        409,
+        ErrorCodes.APPLICATION_NOT_READY,
+        'Application has precheck warnings. Pass allowSubmitWithWarnings=true to submit anyway.',
+        {
+          readinessScore: result.readinessScore,
+          latestPrecheck: result.latestPrecheck,
+          missingItems,
+          warnings: submitWarnings,
+        },
+      );
+    }
 
     return {
       application: {
@@ -592,7 +708,7 @@ export class ApplicationsService {
         status: ApplicationStatus.under_review,
         submittedAt: application.submittedAt ?? new Date(),
       },
-      reviewTasks: result.map(toSubmitTaskDto),
+      reviewTasks: result.reviewTasks.map(toSubmitTaskDto),
       warnings: submitWarnings,
       message: 'Hồ sơ đã được nộp và chuyển sang trạng thái đang xét duyệt.',
     };
@@ -797,6 +913,12 @@ export class ApplicationsService {
       user,
       applicationId,
     );
+    this.assertCityEligibilityResultEligible(eligibility);
+  }
+
+  private assertCityEligibilityResultEligible(
+    eligibility: Awaited<ReturnType<CitySubmissionEligibilityService['getEligibility']>>,
+  ) {
     if (eligibility.status === 'NOT_ELIGIBLE') {
       throw new AppError(
         409,

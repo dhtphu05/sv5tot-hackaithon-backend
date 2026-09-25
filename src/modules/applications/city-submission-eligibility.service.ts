@@ -6,6 +6,7 @@ import {
   Level,
   Role,
   WorkspaceType,
+  type Prisma,
   type Application,
 } from '@prisma/client';
 import { normalizeText } from '../decision-imports/decision-ocr-table-normalizer';
@@ -95,9 +96,48 @@ export class CitySubmissionEligibilityService {
       requireUserWorkspace(user),
     );
 
+    return this.applyCurrentManualVerification(automatic);
+  }
+
+  async getEligibilityForSubmission(
+    tx: Prisma.TransactionClient,
+    user: AuthenticatedUser,
+    applicationId: string,
+  ): Promise<CitySubmissionEligibility> {
+    const application = await this.repository.findApplication(applicationId, tx);
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    assertApplicationOwner(application, user);
+    const identity = await this.repository.findStudentIdentity(application.studentId, tx);
+    if (!identity || identity.workspaceId !== application.workspaceId) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    const schoolLock = await this.repository.lockWorkspaceForEligibility(application.workspaceId, tx);
+    if (schoolLock.length === 0) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      identity,
+      application.workspaceId,
+      tx,
+    );
+    return this.applyCurrentManualVerification(automatic, tx);
+  }
+
+  private async applyCurrentManualVerification(
+    automatic: EligibilityCalculation,
+    tx?: Prisma.TransactionClient,
+  ): Promise<CitySubmissionEligibility> {
     if (automatic.result.status !== 'NEEDS_VERIFICATION') return automatic.result;
 
-    const verification = await this.repository.findManualVerification(application.id);
+    const verification = tx
+      ? await this.repository.findManualVerification(automatic.result.applicationId, tx)
+      : await this.repository.findManualVerification(automatic.result.applicationId);
     if (
       !verification ||
       !automatic.verificationBasisHash ||
@@ -212,8 +252,11 @@ export class CitySubmissionEligibilityService {
     application: EligibilityApplication,
     identity: EligibilityIdentity,
     workspaceId: string,
+    tx?: Prisma.TransactionClient,
   ): Promise<EligibilityCalculation> {
-    const workspace = await this.repository.findWorkspaceContext(workspaceId);
+    const workspace = tx
+      ? await this.repository.findWorkspaceContext(workspaceId, tx)
+      : await this.repository.findWorkspaceContext(workspaceId);
     if (!workspace || workspace.type !== WorkspaceType.SCHOOL) {
       throw new AppError(
         409,
@@ -237,7 +280,13 @@ export class CitySubmissionEligibilityService {
       );
     }
 
-    return this.getUdnEligibility(identity, application, workspace, workspace.parentWorkspace.id);
+    return this.getUdnEligibility(
+      identity,
+      application,
+      workspace,
+      workspace.parentWorkspace.id,
+      tx,
+    );
   }
 
   private async getUdnEligibility(
@@ -245,12 +294,34 @@ export class CitySubmissionEligibilityService {
     application: EligibilityApplication,
     school: WorkspaceContext,
     universityWorkspaceId: string,
+    tx?: Prisma.TransactionClient,
   ): Promise<EligibilityCalculation> {
-    const recipients = await this.repository.findConfirmedUniversityRecipients({
+    if (tx) {
+      const lockAcquired = await this.repository.lockUniversityAwardScope(
+        {
+          issuerWorkspaceId: universityWorkspaceId,
+          institutionWorkspaceId: school.id,
+          schoolYear: application.schoolYear,
+        },
+        tx,
+      );
+      if (!lockAcquired) {
+        throw new AppError(
+          409,
+          ErrorCodes.INVALID_APPLICATION_CONTEXT,
+          'University workspace is missing from the application hierarchy',
+        );
+      }
+    }
+
+    const lookup = {
       issuerWorkspaceId: universityWorkspaceId,
       institutionWorkspaceId: school.id,
       schoolYear: application.schoolYear,
-    });
+    };
+    const recipients = tx
+      ? await this.repository.findConfirmedUniversityRecipients(lookup, tx)
+      : await this.repository.findConfirmedUniversityRecipients(lookup);
     const verificationBasisHash = createVerificationBasisHash({
       application,
       school,

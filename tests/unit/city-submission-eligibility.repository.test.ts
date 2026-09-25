@@ -73,4 +73,43 @@ describe('CitySubmissionEligibilityRepository', () => {
       },
     });
   });
+
+  it('locks only the relevant issuer workspace and UDN decisions before the recipient read', async () => {
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'udn' }]),
+    };
+    const repository = new CitySubmissionEligibilityRepository({} as never);
+
+    await expect(
+      repository.lockUniversityAwardScope(
+        {
+          issuerWorkspaceId: 'udn',
+          institutionWorkspaceId: 'school-a',
+          schoolYear: '2025-2026',
+        },
+        tx as never,
+      ),
+    ).resolves.toBe(true);
+
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
+    expect((tx.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('')).toContain(
+      'FROM "Workspace"',
+    );
+    expect((tx.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('')).toContain(
+      'FOR UPDATE',
+    );
+    expect((tx.$queryRaw.mock.calls[1][0] as TemplateStringsArray).join('')).toContain(
+      'FROM "AwardDecision"',
+    );
+    expect((tx.$queryRaw.mock.calls[1][0] as TemplateStringsArray).join('')).toContain(
+      '"schoolYear"',
+    );
+    expect((tx.$queryRaw.mock.calls[1][0] as TemplateStringsArray).join('')).toContain(
+      '"status"',
+    );
+    expect(tx.$queryRaw.mock.calls[1]).toContain(AwardDecisionStatus.DRAFT);
+    expect((tx.$queryRaw.mock.calls[1][0] as TemplateStringsArray).join('')).toContain(
+      'FOR UPDATE',
+    );
+  });
 });

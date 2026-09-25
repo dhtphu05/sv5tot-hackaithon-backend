@@ -114,6 +114,8 @@ function eligibilityService(input: {
         ? { id: input.parentWorkspaceId, type: 'UNIVERSITY_SYSTEM' }
         : null,
     }),
+    lockWorkspaceForEligibility: vi.fn().mockResolvedValue([{ id: 'school-a' }]),
+    lockUniversityAwardScope: vi.fn().mockResolvedValue(true),
     findConfirmedUniversityRecipients: vi.fn().mockResolvedValue(input.recipients),
     findManualVerification: vi.fn().mockImplementation(async () => state.manualVerification),
     findApplicationForVerification: vi.fn().mockResolvedValue({
@@ -180,6 +182,7 @@ function configureSuccessfulTransaction(updateCount = 1) {
     $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-a', studentId: 'student-a' }]),
     application: {
       findUnique: vi.fn().mockResolvedValue({ workspaceId: 'school-a' }),
+      update: vi.fn().mockResolvedValue({}),
       updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
     },
     applicationDraftSnapshot: { create: vi.fn().mockResolvedValue({}) },
@@ -279,6 +282,34 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(mocks.notifications.create).toHaveBeenCalledOnce();
   });
 
+  it('does not submit using a manual approval after the eligibility basis changes', async () => {
+    const { service: eligibility, repository } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [{ studentCode: '999999', fullName: 'Student A', className: '24CTT1' }],
+    });
+    await approveManualEligibility(eligibility, repository);
+    repository.state.identity = {
+      workspaceId: 'school-a',
+      studentCode: '111111',
+      fullName: 'Student A',
+      className: '24CTT1',
+    };
+
+    await expect(
+      buildService(eligibility).submit({ ...student, studentCode: '111111' }, 'application-a', {
+        allowSubmitWithWarnings: true,
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CITY_SUBMISSION_NEEDS_VERIFICATION',
+    });
+
+    expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+    expect(mocks.precheck.run).not.toHaveBeenCalled();
+    expect(mocks.precheck.persistPreparedInTransaction).not.toHaveBeenCalled();
+    expect(mocks.notifications.create).not.toHaveBeenCalled();
+  });
+
   it('blocks a City Manager rejection with the definitive not-eligible submit code', async () => {
     const { service: eligibility, repository } = eligibilityService({
       parentWorkspaceId: 'udn',
@@ -376,9 +407,10 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(mocks.notifications.create).not.toHaveBeenCalled();
   });
 
-  it('uses the application version updated by its own stale precheck refresh', async () => {
+  it('uses the application version updated by its own stale precheck refresh outside City submission', async () => {
     const { service: eligibility } = eligibilityService({ parentWorkspaceId: null, recipients: [] });
     const beforePrecheck = application({
+      targetLevel: Level.school,
       status: ApplicationStatus.draft,
       updatedAt: new Date('2026-09-01T00:00:00.000Z'),
       reviewTasks: [
@@ -386,6 +418,7 @@ describe('ApplicationsService City submission eligibility gate', () => {
       ],
     });
     const afterPrecheck = application({
+      targetLevel: Level.school,
       status: ApplicationStatus.ready_to_submit,
       updatedAt: new Date('2026-09-03T00:00:00.000Z'),
       reviewTasks: [
@@ -445,6 +478,85 @@ describe('ApplicationsService City submission eligibility gate', () => {
       schoolYear: '2025-2026',
     });
     expect(tx.application.updateMany).toHaveBeenCalledOnce();
+    expect(mocks.notifications.create).toHaveBeenCalledOnce();
+  });
+
+  it('persists a refreshed eligible precheck inside the protected submit transaction', async () => {
+    const { service: eligibility } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [{ studentCode: '000123', fullName: 'Student A', className: '24CTT1' }],
+    });
+    const prepared = {
+      application: application(),
+      level: Level.city,
+      criteria: {
+        criteriaVersionId: null,
+        versionName: 'fallback-city',
+        schoolYear: '2025-2026',
+        unitScope: 'default',
+        level: Level.city,
+        isFallback: true,
+        warnings: [],
+        rules: [],
+      },
+      completion: [],
+      result: {
+        applicationId: 'application-a',
+        level: Level.city,
+        readinessScore: 100,
+        readyToSubmit: true,
+        criteriaResults: [],
+        missingItems: [],
+        warnings: [],
+        nextBestAction: '',
+        nextAction: null,
+        humanConfirmationRequired: true,
+      },
+    };
+    const tx = configureSuccessfulTransaction();
+    mocks.prisma.application.findUnique.mockResolvedValue(
+      application({
+        reviewTasks: [
+          { id: 'review-task-a', criterion: 'ethics', status: 'waiting', assignedOfficer: null },
+        ],
+      }),
+    );
+    mocks.prisma.precheckResult.findFirst.mockResolvedValue({
+      createdAt: new Date('2026-08-01T00:00:00.000Z'),
+      resultJson: null,
+      missingItemsJson: null,
+    });
+    mocks.precheck.prepareForSubmission.mockResolvedValue(prepared);
+    mocks.precheck.persistPreparedInTransaction.mockResolvedValue({
+      application: {
+        status: ApplicationStatus.ready_to_submit,
+        readinessScore: 100,
+        updatedAt: new Date('2026-09-03T00:00:00.000Z'),
+      },
+      precheckResult: {
+        createdAt: new Date('2026-09-03T00:00:00.000Z'),
+        resultJson: prepared.result,
+      },
+    });
+
+    const result = await buildService(eligibility).submit(student, 'application-a', {
+      allowSubmitWithWarnings: true,
+    });
+
+    expect(result.application.status).toBe('under_review');
+    expect(mocks.precheck.run).not.toHaveBeenCalled();
+    expect(mocks.precheck.persistPreparedInTransaction).toHaveBeenCalledWith(
+      tx,
+      student,
+      prepared,
+    );
+    expect(tx.application.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        status: ApplicationStatus.ready_to_submit,
+        updatedAt: new Date('2026-09-03T00:00:00.000Z'),
+      }),
+      data: expect.objectContaining({ status: 'under_review' }),
+    });
     expect(mocks.notifications.create).toHaveBeenCalledOnce();
   });
 
@@ -510,7 +622,10 @@ describe('ApplicationsService City submission eligibility gate', () => {
     });
 
     expect(tx.$queryRaw).toHaveBeenCalled();
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(repository.findStudentIdentity).toHaveBeenLastCalledWith('student-a', tx);
     expect(tx.application.updateMany).not.toHaveBeenCalled();
+    expect(tx.application.update).not.toHaveBeenCalled();
     expect(tx.applicationDraftSnapshot.create).not.toHaveBeenCalled();
     expect(tx.reviewTask.findMany).not.toHaveBeenCalled();
     expect(tx.auditLog.create).not.toHaveBeenCalled();
@@ -574,6 +689,7 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(precheckWrites).toEqual([]);
     expect(mocks.precheck.run).not.toHaveBeenCalled();
     expect(mocks.precheck.persistPreparedInTransaction).not.toHaveBeenCalled();
+    expect(tx.application.update).not.toHaveBeenCalled();
     expect(tx.application.updateMany).not.toHaveBeenCalled();
     expect(tx.applicationDraftSnapshot.create).not.toHaveBeenCalled();
     expect(tx.reviewTask.findMany).not.toHaveBeenCalled();
