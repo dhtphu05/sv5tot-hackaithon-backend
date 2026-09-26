@@ -88,6 +88,35 @@ describe('precheck completion integration', () => {
     });
   });
 
+  it('surfaces clear out-of-year City evidence dates as advice without removing the source evidence', () => {
+    const evidence = {
+      id: 'evidence-outside-year',
+      criterion: Criterion.volunteer,
+      evidenceCard: {
+        extractedFieldsJson: { activity_date: { value: '2024-03-10' } },
+        normalizedFieldsJson: null,
+        confirmedFieldsJson: null,
+      },
+    };
+    const result = buildPrecheckFromCompletion({
+      application: application({ schoolYear: '2025-2026', evidences: [evidence] }),
+      level: Level.city,
+      criteriaWarnings: [],
+      completion: [
+        completion({
+          criterion: Criterion.volunteer,
+          status: 'needs_verification',
+          evidenceCount: 1,
+        }),
+      ],
+    });
+
+    expect(result.warnings).toContain('OUTSIDE_SCHOOL_YEAR');
+    expect(result.criteriaResults[0].warnings).toContain('OUTSIDE_SCHOOL_YEAR');
+    expect(result.applicationId).toBe('app-1');
+    expect(evidence.id).toBe('evidence-outside-year');
+  });
+
   it('does not treat reviewer-owned ethics verification as student missing work across all criteria', () => {
     const result = buildPrecheckFromCompletion({
       application: application(),

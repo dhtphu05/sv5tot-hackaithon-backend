@@ -339,7 +339,8 @@ export class ApplicationsService {
       await this.assertCitySubmissionEligible(user, application.id);
     }
 
-    const processingEvidence = findProcessingEvidence(application);
+    // A saved source file remains valid evidence for City review while OCR is running.
+    const processingEvidence = isInitialCitySubmission ? undefined : findProcessingEvidence(application);
     if (processingEvidence) {
       throw new AppError(
         409,

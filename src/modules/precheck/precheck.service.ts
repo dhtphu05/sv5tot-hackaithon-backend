@@ -5,6 +5,7 @@ import {
   EvidenceStatus,
   EvidenceSourceType,
   IndexingStatus,
+  Level,
   type Prisma,
   Role,
   ReviewTaskStatus,
@@ -33,6 +34,7 @@ import {
 } from '../criteria-completion/criteria-requirement.parser';
 import { coreCriteria } from '../rules/criteria.constants';
 import { loadCriteriaRules, toJsonValue } from '../rules/criteria.loader';
+import { isEvidenceDateOutsideSchoolYear } from '../rules/school-year-evidence';
 import type { RuleContext } from '../rules/rules.types';
 import type {
   PrecheckCriterionResultDto,
@@ -257,12 +259,28 @@ export function buildPrecheckFromCompletion(input: {
 }): Omit<PrecheckResponseDto, 'createdAt'> {
   const failedEvidenceAction = buildFailedEvidenceAction(input.application);
   const supplementAction = buildSupplementAction(input.application);
-  const criteriaResults = input.completion.map(buildCriterionPrecheckResult);
+  const outsideSchoolYearCriteria =
+    input.level === Level.city
+      ? new Set(
+          input.application.evidences
+            .filter((evidence) =>
+              isEvidenceDateOutsideSchoolYear(evidence, input.application.schoolYear),
+            )
+            .map((evidence) => evidence.criterion),
+        )
+      : new Set<Criterion>();
+  const criteriaResults = input.completion.map((item) => {
+    const result = buildCriterionPrecheckResult(item);
+    return outsideSchoolYearCriteria.has(item.criterion)
+      ? { ...result, warnings: [...new Set([...result.warnings, 'OUTSIDE_SCHOOL_YEAR'])] }
+      : result;
+  });
   const missingItems = criteriaResults.flatMap((item) => item.missingRequirements);
   const warnings = [
     ...input.criteriaWarnings,
     ...criteriaResults.flatMap((item) => item.warnings),
     ...(failedEvidenceAction ? [failedEvidenceAction.shortReason] : []),
+    ...(outsideSchoolYearCriteria.size > 0 ? ['OUTSIDE_SCHOOL_YEAR'] : []),
   ];
   const completionAction = criteriaResults
     .flatMap((item) => (item.nextAction ? [item.nextAction] : []))

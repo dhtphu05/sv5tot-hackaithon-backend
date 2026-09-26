@@ -323,6 +323,7 @@ function buildEthicsRequirementGroups(
   const remaining = parsedGroups.filter(
     (group) => group.key !== foundation.key && group.key !== additional.key,
   );
+  const citySpecific = rules.some((rule) => rule.ruleKey === 'city_ethics_findings');
   const nonEthicsLegacy = remaining.filter(
     (group) =>
       !group.requirements.some((requirement) =>
@@ -330,7 +331,11 @@ function buildEthicsRequirementGroups(
       ),
   );
 
-  return [foundation, additional, ...nonEthicsLegacy.filter((group) => group.optional)];
+  return [
+    foundation,
+    additional,
+    ...(citySpecific ? remaining : nonEthicsLegacy.filter((group) => group.optional)),
+  ];
 }
 
 function applyEthicsOwnershipDefaults(group: RequirementGroupDto): RequirementGroupDto {
@@ -523,6 +528,7 @@ function buildAcademicRequirementGroups(
   const remaining = parsedGroups.filter(
     (group) => group.key !== foundation.key && group.key !== additional.key,
   );
+  const citySpecific = rules.some((rule) => rule.ruleKey === 'city_academic_findings');
   const nonAcademicLegacy = remaining.filter(
     (group) =>
       !group.requirements.some((requirement) =>
@@ -530,7 +536,11 @@ function buildAcademicRequirementGroups(
       ),
   );
 
-  return [normalizedFoundation, additional, ...nonAcademicLegacy.filter((group) => group.optional)];
+  return [
+    normalizedFoundation,
+    additional,
+    ...(citySpecific ? remaining : nonAcademicLegacy.filter((group) => group.optional)),
+  ];
 }
 
 function academicAchievementTitle(evidenceType: string): string {

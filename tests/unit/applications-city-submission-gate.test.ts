@@ -372,6 +372,99 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(mocks.notifications.create).toHaveBeenCalledOnce();
   });
 
+  it('allows a DIRECT_CITY first submission with pending OCR and advisory gaps, creating five undecided review tasks', async () => {
+    const { service: eligibility, repository } = eligibilityService({
+      parentWorkspaceId: null,
+      recipients: [],
+    });
+    const source = application({
+      readinessScore: 35,
+      evidences: [
+        {
+          id: 'evidence-ocr-pending',
+          criterion: 'academic',
+          status: 'pending_indexing',
+          indexingStatus: 'ocr_processing',
+          updatedAt: new Date('2026-09-02T00:00:00.000Z'),
+        },
+      ],
+    });
+    const createdTasks: Array<Record<string, unknown>> = [];
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-a' }]),
+      application: {
+        findUnique: vi.fn().mockResolvedValue({ workspaceId: 'school-a' }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      applicationDraftSnapshot: { create: vi.fn().mockResolvedValue({}) },
+      reviewTask: {
+        create: vi.fn().mockImplementation(async ({ data }) => {
+          const task = { ...data, id: `task-${createdTasks.length + 1}`, decision: null, assignedOfficer: { id: 'officer-a' } };
+          createdTasks.push(task);
+          return task;
+        }),
+      },
+      reviewTaskEvidence: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      auditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+    mocks.prisma.$transaction.mockImplementation(async (callback) => callback(tx));
+    mocks.notifications.create.mockResolvedValue({ id: 'notification-a' });
+    mocks.prisma.application.findUnique
+      .mockResolvedValueOnce(source)
+      .mockResolvedValueOnce({
+        applicationType: ApplicationType.individual,
+        targetLevel: Level.city,
+        status: ApplicationStatus.ready_to_submit,
+        submittedAt: null,
+        currentDraftVersion: 1,
+        updatedAt: source.updatedAt,
+      });
+    mocks.prisma.precheckResult.findFirst.mockResolvedValue({
+      createdAt: source.updatedAt,
+      resultJson: {
+        criteriaResults: [{ criterion: 'academic', status: 'failed' }],
+        warnings: ['LOW_GPA', 'MISSING_ACADEMIC_ACHIEVEMENT'],
+      },
+      missingItemsJson: ['academic achievement'],
+    });
+    const responseApplication = {
+      ...source,
+      status: ApplicationStatus.under_review,
+      reviewTasks: createdTasks,
+      draftSnapshots: [],
+      precheckResults: [],
+      cascadeReviews: [],
+    };
+    const applicationsRepository = {
+      findById: vi.fn().mockResolvedValue(responseApplication),
+    };
+    const service = new ApplicationsService(
+      applicationsRepository as never,
+      mocks.notifications as never,
+      { assignOfficerForCriterion: vi.fn().mockResolvedValue({ id: 'officer-a' }) } as never,
+      mocks.emailOutbox as never,
+      mocks.precheck as never,
+      eligibility,
+    );
+
+    const result = await service.submit(student, 'application-a', {
+      allowSubmitWithWarnings: true,
+      studentNote: 'Vẫn nộp hồ sơ.',
+    });
+
+    expect(result.application.status).toBe(ApplicationStatus.under_review);
+    expect(result.reviewTasks).toHaveLength(5);
+    expect(createdTasks.map((task) => task.criterion)).toEqual([
+      'ethics',
+      'academic',
+      'physical',
+      'volunteer',
+      'integration',
+    ]);
+    expect(createdTasks.every((task) => task.status === 'waiting' && task.decision === null)).toBe(true);
+    expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
+  });
+
   it('rejects if the target level changed from School to City while submit was preparing', async () => {
     const { service: eligibility, repository } = eligibilityService({
       parentWorkspaceId: 'udn',

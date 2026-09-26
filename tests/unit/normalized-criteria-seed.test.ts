@@ -30,6 +30,15 @@ describe('normalized criteria seed data', () => {
     }
   });
 
+  it('labels City criteria for the selected rehearsal year and covers all five official criteria', () => {
+    const city = config(Level.city);
+    expect(city.sourcePeriodLabel).toBe('Nguồn 2021–2022; áp dụng rehearsal năm học 2025–2026');
+    expect(city.description).toContain('2025–2026');
+    expect(new Set(city.rules.filter((rule) => rule.mandatory).map((rule) => rule.criterion))).toEqual(
+      new Set(officialCriteria),
+    );
+  });
+
   it('preserves key DUT school AND and ANY structures', () => {
     const school = config(Level.school);
     expect(findRule(school.rules, 'ethics.conduct_score_82_and_no_violation').requirement).toMatchObject({
