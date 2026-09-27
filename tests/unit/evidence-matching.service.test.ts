@@ -1,4 +1,4 @@
-import { Criterion, EventStatus, Level, Role } from '@prisma/client';
+import { Criterion, EventStatus, Level, Role, WorkspaceType } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import { EvidenceMatchingService } from '../../src/modules/evidence-matching/evidence-matching.service';
 import { AppError } from '../../src/shared/errors/app-error';
@@ -71,6 +71,103 @@ function participant(overrides: Record<string, unknown> = {}) {
 }
 
 describe('EvidenceMatchingService', () => {
+  it('includes active City events in the student official library', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const db = {
+      application: { findUnique: vi.fn().mockResolvedValue({ id: 'application-1', studentId: baseUser.id, workspaceId }) },
+      eventRegistry: { findMany, count: vi.fn().mockResolvedValue(0) },
+      evidence: { findMany: vi.fn().mockResolvedValue([]) },
+      $transaction: vi.fn().mockResolvedValue([[], 0]),
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    await service.library(baseUser, {
+      applicationId: 'application-1',
+      page: 1,
+      limit: 5,
+      projection: 'official',
+    } as never);
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { workspaceId },
+            { workspace: { is: { type: WorkspaceType.CITY, isActive: true } } },
+          ],
+          status: EventStatus.active,
+        }),
+      }),
+    );
+  });
+
+  it('includes active City events in student application suggestions', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const db = {
+      application: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'application-1',
+          studentId: baseUser.id,
+          workspaceId,
+        }),
+      },
+      eventRegistry: { findMany },
+      evidence: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    await service.suggestions(baseUser, {
+      applicationId: 'application-1',
+      query: 'Mua he xanh',
+      page: 1,
+      limit: 5,
+    } as never);
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { workspaceId },
+            { workspace: { is: { type: WorkspaceType.CITY, isActive: true } } },
+          ],
+          status: EventStatus.active,
+          rosterIndexed: true,
+        }),
+      }),
+    );
+  });
+
+  it('includes the active City Registry in student official matching searches', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const service = new EvidenceMatchingService(
+      {
+        eventRegistry: { findMany },
+        evidence: { findMany: vi.fn().mockResolvedValue([]) },
+      } as never,
+      { log: vi.fn() } as never,
+    );
+
+    await service.search(baseUser, {
+      q: 'Mua he xanh',
+      page: 1,
+      limit: 5,
+      track: false,
+    });
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { workspaceId },
+            { workspace: { is: { type: WorkspaceType.CITY, isActive: true } } },
+          ],
+          status: EventStatus.active,
+          rosterIndexed: true,
+        }),
+      }),
+    );
+  });
+
   it('uses req.user.studentCode and returns official_match_found when participant exists', async () => {
     const db = {
       eventRegistry: {
@@ -101,6 +198,33 @@ describe('EvidenceMatchingService', () => {
       importable: true,
       studentStatus: { code: 'official_match_found' },
     });
+  });
+
+  it('does not treat a same-name participant with another student code as an official match', async () => {
+    const db = {
+      eventRegistry: {
+        findMany: vi.fn().mockResolvedValue([
+          event({ participants: [participant({ studentCode: '102229999' })] }),
+        ]),
+      },
+      evidence: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+    const service = new EvidenceMatchingService(db as never, { log: vi.fn() } as never);
+
+    const result = await service.search(
+      { ...baseUser, fullName: 'Nguyen Van Sinh' },
+      {
+        q: 'Mua he xanh 2026',
+        studentName: 'Nguyen Van Sinh',
+        studentCode: baseUser.studentCode,
+        criterion: Criterion.volunteer,
+        page: 1,
+        limit: 5,
+        track: false,
+      },
+    );
+
+    expect(result.items[0]).toMatchObject({ importable: false, participant: null });
   });
 
   it('returns official_match_not_found when event exists without participant', async () => {
@@ -313,7 +437,10 @@ describe('EvidenceMatchingService', () => {
     expect(db.eventRegistry.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          workspaceId,
+          OR: [
+            { workspaceId },
+            { workspace: { is: { type: WorkspaceType.CITY, isActive: true } } },
+          ],
           status: EventStatus.active,
           rosterIndexed: true,
           criterion: Criterion.volunteer,
@@ -566,7 +693,10 @@ describe('EvidenceMatchingService', () => {
     expect(db.eventRegistry.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          workspaceId,
+          OR: [
+            { workspaceId },
+            { workspace: { is: { type: WorkspaceType.CITY, isActive: true } } },
+          ],
           status: EventStatus.active,
           rosterIndexed: true,
           criterion: Criterion.volunteer,

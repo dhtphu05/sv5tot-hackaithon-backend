@@ -69,6 +69,25 @@ describe('evidence student status DTO', () => {
     expect(status.code).toBe('unreadable_file');
   });
 
+  it('does not mark structured OpenAI extraction unreadable when raw OCR text is intentionally empty', () => {
+    const status = resolveStudentStatusForCard({
+      sourceType: EvidenceSourceType.manual_upload,
+      status: EvidenceStatus.indexed,
+      indexingStatus: IndexingStatus.indexed,
+      criterion: Criterion.physical,
+      ocrText: null,
+      fields: {
+        event_name: 'Sinh viên khỏe (Unitour)',
+        organizer: 'Trung tâm Hỗ trợ và Phát triển Sinh viên Việt Nam',
+        activity_date: '22/3/2025',
+        student_name: 'TÔN NỮ DIỆU HƯƠNG',
+      },
+      warnings: [],
+    });
+
+    expect(status.code).toBe('evidence_read');
+  });
+
   it('normalizes warning labels and readable summary keys', () => {
     expect(mapWarnings([{ code: 'not_matched_registry' }])[0]).toMatchObject({
       code: 'official_match_not_found',

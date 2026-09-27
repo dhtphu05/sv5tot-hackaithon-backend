@@ -7,6 +7,7 @@ import {
   RequirementResponseStatus,
   Role,
   VerificationStatus,
+  WorkspaceType,
   type Application,
   type User,
 } from '@prisma/client';
@@ -16,6 +17,7 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
+import { assertReviewWorkspaceAccess, isCityReviewRole } from '../../shared/utils/review-workspace-scope';
 import { assertSameWorkspace } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { coreCriteria } from '../rules/criteria.constants';
@@ -65,7 +67,7 @@ export class CriteriaCompletionService {
 
   async getCompletion(user: AuthenticatedUser, applicationId: string) {
     const application = await this.getApplication(applicationId);
-    assertPrecheckAccess(application, user, true);
+    assertCriteriaCompletionViewAccess(application, user);
 
     const criteria = await loadCriteriaRules({
       workspaceId: application.workspaceId,
@@ -348,8 +350,13 @@ export class CriteriaCompletionService {
     input: ConfirmNoViolationInput,
   ) {
     const application = await this.getApplication(applicationId);
-    assertPrecheckAccess(application, user, true);
-    if (user.role !== Role.officer && user.role !== Role.manager && user.role !== Role.admin) {
+    assertCriteriaCompletionStaffAccess(application, user);
+    if (
+      user.role !== Role.officer &&
+      user.role !== Role.manager &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.admin
+    ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only staff can confirm no_violation');
     }
     await this.assertRequirementKey(application, Criterion.ethics, 'no_violation');
@@ -524,8 +531,13 @@ export class CriteriaCompletionService {
     input: ConfirmNoFGradeInput,
   ) {
     const application = await this.getApplication(applicationId);
-    assertPrecheckAccess(application, user, true);
-    if (user.role !== Role.officer && user.role !== Role.manager && user.role !== Role.admin) {
+    assertCriteriaCompletionStaffAccess(application, user);
+    if (
+      user.role !== Role.officer &&
+      user.role !== Role.manager &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.admin
+    ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only staff can confirm no_f_grade');
     }
     await this.assertRequirementKey(application, Criterion.academic, 'no_f_grade');
@@ -1105,6 +1117,57 @@ function buildSummary(items: CriterionCompletionDto[]) {
     readyForPrecheck: items.filter((item) => item.status === 'ready_for_precheck').length,
     accepted: items.filter((item) => item.status === 'accepted').length,
   };
+}
+
+type CriteriaCompletionApplicationAccess = Pick<Application, 'workspaceId' | 'studentId'> & {
+  student: Pick<User, 'faculty'>;
+  workspace: { type: WorkspaceType; isActive: boolean };
+};
+
+export function assertCriteriaCompletionViewAccess(
+  application: CriteriaCompletionApplicationAccess,
+  user: AuthenticatedUser,
+): void {
+  if (isCityReviewRole(user.role)) {
+    if (user.role === Role.city_officer) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'City Officers must access review tasks');
+    }
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: application.workspaceId,
+        workspaceType: application.workspace.type,
+        workspaceIsActive: application.workspace.isActive,
+      },
+      'Application not found',
+    );
+    return;
+  }
+
+  assertPrecheckAccess(application, user, true);
+}
+
+export function assertCriteriaCompletionStaffAccess(
+  application: CriteriaCompletionApplicationAccess,
+  user: AuthenticatedUser,
+): void {
+  if (isCityReviewRole(user.role)) {
+    if (user.role !== Role.city_manager) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only managers can confirm criteria');
+    }
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: application.workspaceId,
+        workspaceType: application.workspace.type,
+        workspaceIsActive: application.workspace.isActive,
+      },
+      'Application not found',
+    );
+    return;
+  }
+
+  assertPrecheckAccess(application, user, true);
 }
 
 function isEditableStatus(status: ApplicationStatus): boolean {

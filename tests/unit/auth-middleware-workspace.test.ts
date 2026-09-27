@@ -27,6 +27,7 @@ import { requireAuth } from '../../src/middlewares/auth.middleware';
 const workspace = {
   id: '11111111-1111-4111-8111-111111111111',
   code: 'DHBK-DHDN',
+  type: 'SCHOOL',
   name: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
   shortName: 'DHBK',
   isActive: true,
@@ -121,6 +122,7 @@ describe('requireAuth workspace enforcement', () => {
       workspace: {
         id: workspace.id,
         code: workspace.code,
+        type: workspace.type,
         name: workspace.name,
         shortName: workspace.shortName,
       },

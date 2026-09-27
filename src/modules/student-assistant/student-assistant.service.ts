@@ -4,6 +4,9 @@ import {
   EvidenceSourceType,
   EvidenceStatus,
   IndexingStatus,
+  JobStatus,
+  JobType,
+  Level,
   NotificationType,
   Prisma,
   ReviewTaskStatus,
@@ -22,6 +25,10 @@ import { normalizeSchoolYear } from '../../shared/utils/school-year';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { StudentAssistantService as DashboardAssistantService } from '../applications/student-assistant/student-assistant.service';
 import { buildOpenAiSafetyIdentifier } from '../ai/openai-client';
+import { CriteriaService, criteriaStatusLabel, scopeLabel } from '../criteria/criteria.service';
+import { shouldReanalyseLegacyEvidence } from '../evidences/evidence-reanalysis';
+import { buildEvidenceAnalysisJobInput } from '../jobs/evidence-analysis-job-input';
+import { runIndexingJob } from '../jobs/jobs.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
   buildDeterministicAnswer,
@@ -29,8 +36,13 @@ import {
   mapStudentAssistantProviderError,
   type StudentAnswerProvider,
 } from './student-assistant-answer';
+import { StudentAssistantGenerationRegistry } from './student-assistant-generation-registry';
+import { createStudentAssistantStreamLifecycle } from './student-assistant-stream';
+import { friendlyStudentValue } from './student-assistant-text';
+import { selectStudentNavigationAction } from './student-assistant-tools';
 import type {
   StudentAssistantAction,
+  StudentAssistantAnswer,
   StudentAssistantContext,
   StudentAssistantContextQuery,
   StudentAssistantFact,
@@ -44,11 +56,28 @@ const activeProcessingStatuses = new Set<IndexingStatus>([
   IndexingStatus.extracting,
   IndexingStatus.checking_registry,
 ]);
+const assistantEvidenceInclude = Prisma.validator<Prisma.EvidenceInclude>()({
+  application: { include: { student: true } },
+  evidenceCard: true,
+  event: true,
+  evidenceFiles: { include: { file: true }, orderBy: { id: 'asc' } },
+});
+type AssistantEvidenceRecord = Prisma.EvidenceGetPayload<{
+  include: typeof assistantEvidenceInclude;
+}>;
+const generationRegistry = new StudentAssistantGenerationRegistry<{
+  answer: StudentAssistantAnswer & { contextVersion: string; finalText: string };
+  model: string;
+  totalTokens?: number;
+  errorCode?: string;
+}>();
+const evidenceReanalysisWaitMs = 8000;
 
 export class StudentCommunicationAssistantService {
   constructor(
     private readonly db: PrismaClient = prisma,
     private readonly dashboardService = new DashboardAssistantService(),
+    private readonly criteriaService = new CriteriaService(db),
     private readonly provider: StudentAnswerProvider = createStudentAssistantAnswerProvider(),
     private readonly notificationsService = new NotificationsService(),
   ) {}
@@ -66,11 +95,29 @@ export class StudentCommunicationAssistantService {
     callbacks: StudentAssistantStreamCallbacks,
   ) {
     assertStudentOnly(user);
-    const context = await this.buildContext(user, input);
+    const stream = createStudentAssistantStreamLifecycle({
+      requestId: input.requestId,
+      signal: input.signal,
+      callbacks: callbacks as never,
+    });
+    await stream.meta({
+      contextType: input.contextType,
+      contextId: input.contextId ?? input.evidenceId ?? input.applicationId ?? input.eventId ?? input.reviewTaskId ?? 'current',
+      contextVersion: input.contextVersion,
+    });
+    await stream.status({
+      stage: 'preparing_context',
+      message: 'Đang chuẩn bị ngữ cảnh...',
+    });
+
+    const context = await this.buildContext(user, input, {
+      onStatus: (data) => stream.status(data),
+    });
     if (context.contextVersion !== input.contextVersion) {
-      await callbacks.onError({
+      await stream.error({
         code: ErrorCodes.STUDENT_ASSISTANT_CONTEXT_STALE,
         recoverable: true,
+        message: 'Ngữ cảnh đã thay đổi, hãy tải lại câu trả lời.',
       });
       return;
     }
@@ -89,43 +136,111 @@ export class StudentCommunicationAssistantService {
       },
     });
 
-    await callbacks.onMeta({
-      requestId: input.requestId,
-      contextType: context.contextType,
-      contextId: context.contextId,
-      contextVersion: context.contextVersion,
-    });
-    await callbacks.onStatus({ stage: 'preparing_answer' });
+    await stream.status({ stage: 'preparing_answer', message: 'Đang chuẩn bị câu trả lời...' });
 
     const startedAt = Date.now();
-    try {
+    const identity = buildGenerationIdentity(user.id, context, input);
+    const generation = await generationRegistry.run({
+      identity,
+      conversationKey: `${user.id}:${context.contextType}:${context.contextId}:${input.clientConversationId ?? 'default'}`,
+      turnId: input.clientTurnId ?? input.message,
+      signal: input.signal,
+      generate: async (signal) => {
+        try {
+          await createApplicationAudit(this.db, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: auditActions.STUDENT_ASSISTANT_GENERATION_STARTED,
+            targetType: 'student_assistant',
+            targetId: context.contextId,
+            applicationId: applicationIdFromContext(context),
+            metadataJson: {
+              contextType: context.contextType,
+              contextVersion: context.contextVersion,
+              provider: env.STUDENT_ASSISTANT_PROVIDER,
+            },
+          });
+
+          const generated = await this.provider.stream({
+            context,
+            message: input.message,
+            recentMessages: input.recentMessages,
+            signal,
+            safetyIdentifier: buildOpenAiSafetyIdentifier('student', user.id),
+            onDelta: async (delta) => {
+              await stream.delta(delta);
+            },
+          });
+          const navigation = selectStudentNavigationAction(context, generated.answer.suggestedActionId);
+          return {
+            fallback: false,
+            value: {
+              answer: {
+                ...generated.answer,
+                finalText: generated.answer.answer,
+                navigation: navigation.action,
+                contextVersion: context.contextVersion,
+              },
+              model: generated.model,
+              totalTokens: generated.totalTokens,
+            },
+          };
+        } catch (error) {
+          const code = mapStudentAssistantProviderError(error);
+          const fallback = buildDeterministicAnswer(context, input.message);
+          const navigation = selectStudentNavigationAction(context, fallback.suggestedActionId);
+          logger.warn({ code, contextType: context.contextType }, 'Student assistant answer fell back');
+          return {
+            fallback: true,
+            value: {
+              answer: {
+                ...fallback,
+                finalText: fallback.answer,
+                navigation: navigation.action,
+                contextVersion: context.contextVersion,
+              },
+              model: 'deterministic-fallback',
+              errorCode: code,
+            },
+          };
+        }
+      },
+    });
+
+    const generated = generation.value;
+    const navigation = generated.answer.navigation
+      ? {
+          selectedActionId: generated.answer.navigation.id,
+          action: generated.answer.navigation,
+        }
+      : selectStudentNavigationAction(context, generated.answer.suggestedActionId);
+    await stream.sources({ sourceRefs: generated.answer.sourceRefs });
+    await stream.action({ suggestedActionId: generated.answer.suggestedActionId ?? null });
+    await stream.navigation(navigation);
+    await stream.complete({
+      ...generated.answer,
+      finalText: generated.answer.finalText,
+      fallback: generation.fallback,
+      navigation: navigation.action,
+      contextVersion: context.contextVersion,
+    });
+
+    if (generation.fallback) {
       await createApplicationAudit(this.db, {
         actorId: user.id,
         actorRole: user.role,
-        action: auditActions.STUDENT_ASSISTANT_GENERATION_STARTED,
+        action: auditActions.STUDENT_ASSISTANT_GENERATION_FAILED,
         targetType: 'student_assistant',
         targetId: context.contextId,
         applicationId: applicationIdFromContext(context),
         metadataJson: {
           contextType: context.contextType,
           contextVersion: context.contextVersion,
-          provider: env.STUDENT_ASSISTANT_PROVIDER,
+          errorCode: generated.errorCode,
+          latencyMs: Date.now() - startedAt,
         },
       });
-
-      const generated = await this.provider.stream({
-        context,
-        message: input.message,
-        recentMessages: input.recentMessages,
-        signal: input.signal,
-        safetyIdentifier: buildOpenAiSafetyIdentifier('student', user.id),
-        onDelta: callbacks.onDelta,
-      });
-
-      await callbacks.onSources({ sourceRefs: generated.answer.sourceRefs });
-      await callbacks.onAction({ suggestedActionId: generated.answer.suggestedActionId ?? null });
-      await callbacks.onComplete({ ...generated.answer, contextVersion: context.contextVersion });
-
+    } else {
       await createApplicationAudit(this.db, {
         actorId: user.id,
         actorRole: user.role,
@@ -143,28 +258,6 @@ export class StudentCommunicationAssistantService {
           latencyMs: Date.now() - startedAt,
         },
       });
-    } catch (error) {
-      const code = mapStudentAssistantProviderError(error);
-      await callbacks.onError({ code, recoverable: true });
-      const fallback = buildDeterministicAnswer(context, input.message);
-      await callbacks.onSources({ sourceRefs: fallback.sourceRefs });
-      await callbacks.onAction({ suggestedActionId: fallback.suggestedActionId ?? null });
-      await callbacks.onComplete({ ...fallback, contextVersion: context.contextVersion });
-      await createApplicationAudit(this.db, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActions.STUDENT_ASSISTANT_GENERATION_FAILED,
-        targetType: 'student_assistant',
-        targetId: context.contextId,
-        applicationId: applicationIdFromContext(context),
-        metadataJson: {
-          contextType: context.contextType,
-          contextVersion: context.contextVersion,
-          errorCode: code,
-          latencyMs: Date.now() - startedAt,
-        },
-      });
-      logger.warn({ code, contextType: context.contextType }, 'Student assistant answer fell back');
     }
   }
 
@@ -314,10 +407,12 @@ export class StudentCommunicationAssistantService {
   private async buildContext(
     user: AuthenticatedUser,
     query: StudentAssistantContextQuery,
+    stream?: { onStatus: (data: { stage: 'preparing_context' | 'refreshing_evidence' | 'preparing_answer'; message?: string }) => Promise<unknown> | unknown },
   ): Promise<StudentAssistantContext> {
     if (query.contextType === 'dashboard') return this.buildDashboardContext(user, query);
-    if (query.contextType === 'evidence_card') return this.buildEvidenceContext(user, query);
+    if (query.contextType === 'evidence_card') return this.buildEvidenceContext(user, query, stream);
     if (query.contextType === 'precheck') return this.buildPrecheckContext(user, query);
+    if (query.contextType === 'criteria') return this.buildCriteriaContext(user, query);
     if (query.contextType === 'event_registry') return this.buildEventContext(user, query);
     return this.buildSupplementContext(user, query);
   }
@@ -380,15 +475,22 @@ export class StudentCommunicationAssistantService {
     });
   }
 
-  private async buildEvidenceContext(user: AuthenticatedUser, query: StudentAssistantContextQuery) {
+  private async buildEvidenceContext(
+    user: AuthenticatedUser,
+    query: StudentAssistantContextQuery,
+    stream?: { onStatus: (data: { stage: 'preparing_context' | 'refreshing_evidence' | 'preparing_answer'; message?: string }) => Promise<unknown> | unknown },
+  ) {
     const evidenceId = query.evidenceId ?? query.contextId;
     if (!evidenceId) throwNotFound();
-    const evidence = await this.db.evidence.findUnique({
-      where: { id: evidenceId },
-      include: { application: { include: { student: true } }, evidenceCard: true, event: true },
-    });
+    let evidence = await this.findOwnedEvidenceForAssistant(user, evidenceId);
     if (!evidence || evidence.application?.studentId !== user.id) throwForbiddenOrNotFound();
+    const refresh = await this.refreshLegacyEvidenceIfNeeded(user, evidence, stream);
+    if (refresh.refetched) {
+      evidence = await this.findOwnedEvidenceForAssistant(user, evidenceId);
+      if (!evidence) throwForbiddenOrNotFound();
+    }
     const card = evidence.evidenceCard;
+    const evidencePrecheck = asRecord(card?.evidencePrecheckJson);
     const fields = flattenRecord(
       (card?.confirmedFieldsJson as Record<string, unknown> | null) ??
         (card?.normalizedFieldsJson as Record<string, unknown> | null) ??
@@ -399,7 +501,7 @@ export class StudentCommunicationAssistantService {
         'evidence-status',
         'workflow_state',
         'Trạng thái minh chứng',
-        evidence.indexingStatus,
+        friendlyStudentValue(evidence.indexingStatus),
         true,
       ),
       fact(
@@ -414,6 +516,7 @@ export class StudentCommunicationAssistantService {
           query: { evidenceId: evidence.id },
         },
       ),
+      ...evidencePrecheckFacts(evidencePrecheck),
       ...fields
         .slice(0, 8)
         .map(([key, value]) =>
@@ -427,10 +530,16 @@ export class StudentCommunicationAssistantService {
         ),
     ];
     const warningList = Array.isArray(card?.warningsJson) ? card?.warningsJson : [];
-    const warnings = warningList.slice(0, 5).map((warning, index) => ({
+    const precheckWarnings = Array.isArray(evidencePrecheck?.warnings)
+      ? evidencePrecheck.warnings
+      : [];
+    const warnings = [...precheckWarnings, ...warningList].slice(0, 5).map((warning, index) => ({
       code: stringFromRecord(warning, 'code') ?? `EVIDENCE_WARNING_${index + 1}`,
-      severity: 'warning' as const,
-      message: stringFromRecord(warning, 'message') ?? 'Có thông tin cần kiểm tra lại.',
+      severity: warningSeverity(warning),
+      message:
+        stringFromRecord(warning, 'friendlyMessage') ??
+        stringFromRecord(warning, 'message') ??
+        'Có thông tin cần kiểm tra lại.',
       sourceId: 'evidence-status',
     }));
     const canAct = ['draft', 'prechecked', 'ready_to_submit', 'supplement_required'].includes(
@@ -459,7 +568,7 @@ export class StudentCommunicationAssistantService {
       },
       {
         id: `replace-file:${evidence.id}`,
-        type: 'replace_file',
+        type: 'replace_evidence_file',
         label: 'Thay hoặc bổ sung file',
         destination: {
           route: '/app/application',
@@ -480,8 +589,8 @@ export class StudentCommunicationAssistantService {
         actions[0],
       allowedActions: actions,
       suggestedQuestions: [
-        'Phần nào cần kiểm tra?',
-        'Tại sao thông tin này có độ tin cậy thấp?',
+        'Đây là minh chứng gì?',
+        'Thông tin nào đang thiếu?',
         'Tôi nên sửa hay thay file?',
         'Xác nhận có nghĩa là gì?',
       ],
@@ -537,7 +646,7 @@ export class StudentCommunicationAssistantService {
         } satisfies StudentAssistantAction)
       : ({
           id: `run-precheck:${application.id}`,
-          type: latest ? 'rerun_precheck' : 'run_precheck',
+          type: latest ? 'rerun_precheck' : 'open_precheck',
           label: latest ? 'Chạy lại tiền kiểm' : 'Chạy tiền kiểm',
           destination: { route: '/app/application', query: { tab: 'precheck' } },
           allowed: application.status !== ApplicationStatus.under_review,
@@ -562,6 +671,130 @@ export class StudentCommunicationAssistantService {
         'Tiền kiểm có phải kết quả chính thức không?',
       ],
       boundaries: boundaries({ criteria: true, evidence: true }),
+    });
+  }
+
+  private async buildCriteriaContext(user: AuthenticatedUser, query: StudentAssistantContextQuery) {
+    const scope = query.scope ?? scopeFromContextId(query.contextId) ?? Level.school;
+    const { evaluation, application } = await this.criteriaService.buildCriteriaAssistantContext(user, {
+      applicationId: query.applicationId,
+      scope,
+      criterion: query.criterion,
+    });
+    const gap = await this.criteriaService.compareCriteriaLevels(user, application.id, {
+      scopes: [Level.school, Level.university, Level.city, Level.central],
+      criterion: query.criterion,
+    });
+    const criterionFacts = evaluation.criteria.flatMap((criterionResult) => {
+      const base = fact(
+        `criteria:${criterionResult.criterion}:status`,
+        'criteria_rule',
+        criterionLabel(criterionResult.criterion),
+        criteriaStatusLabel(criterionResult.status),
+        true,
+      );
+      const missing = criterionResult.mandatoryRules
+        .filter((rule) => rule.status !== 'MATCHED')
+        .slice(0, 3)
+        .map((rule) =>
+          fact(
+            `criteria:${criterionResult.criterion}:${rule.ruleKey}`,
+            'criteria_gap',
+            rule.title,
+            `${criteriaStatusLabel(rule.status === 'MANUAL_REVIEW' ? 'NEEDS_MANUAL_REVIEW' : rule.status === 'NEEDS_CONFIRMATION' ? 'NEEDS_CONFIRMATION' : 'INCOMPLETE')}: ${rule.studentFriendlyExplanation}`,
+            rule.status === 'MATCHED',
+          ),
+        );
+      return [base, ...missing];
+    });
+    const sourceFacts = evaluation.sourceRefs.slice(0, 5).map((source, index) =>
+      fact(
+        `criteria-source:${index}`,
+        'criteria_source',
+        source.label,
+        `${source.documentName}${source.section ? `, ${source.section}` : ''}${source.page ? `, trang ${source.page}` : ''}`,
+        true,
+      ),
+    );
+    const gapFacts = gap.levels.map((level) =>
+      fact(
+        `criteria-gap:${level.scope}`,
+        'criteria_gap',
+        scopeLabel(level.scope),
+        `${criteriaStatusLabel(level.status)}. Thiếu: ${level.missing.slice(0, 2).join('; ') || 'chưa ghi nhận mục thiếu'}.`,
+        true,
+      ),
+    );
+    const actions: StudentAssistantAction[] = [
+      ...evaluation.allowedActions.map(
+        (action) =>
+          ({
+            id: action.id,
+            type: action.type,
+            label: action.label,
+            destination: action.destination,
+            allowed: action.allowed,
+          }) satisfies StudentAssistantAction,
+      ),
+      {
+        id: `view-source:${evaluation.criteriaConfig.scope}`,
+        type: 'view_source_criteria',
+        label: 'Xem nguồn tiêu chí',
+        destination: {
+          route: '/app/assistant',
+          query: {
+            contextType: 'criteria',
+            scope: evaluation.criteriaConfig.scope,
+            applicationId: application.id,
+          },
+        },
+        allowed: true,
+      },
+    ];
+    const primaryAction = actions.find((action) => action.allowed) ?? null;
+    return finalizeContext({
+      contextType: 'criteria',
+      contextId: `${application.id}:${evaluation.criteriaConfig.scope}`,
+      title: `Trợ lý tiêu chí ${scopeLabel(evaluation.criteriaConfig.scope)}`,
+      deterministicSummary: `Bộ tiêu chí ${scopeLabel(evaluation.criteriaConfig.scope)} đang được đối chiếu ở trạng thái ${criteriaStatusLabel(evaluation.overallStatus).toLowerCase()}. Đây là kết quả hỗ trợ tiền kiểm, không phải kết quả xét chọn chính thức.`,
+      facts: [
+        fact(
+          'criteria-config',
+          'criteria_source',
+          evaluation.criteriaConfig.title,
+          evaluation.criteriaConfig.sourceDocumentName,
+          true,
+        ),
+        fact(
+          'criteria-overall',
+          'precheck_result',
+          'Kết quả đối chiếu',
+          criteriaStatusLabel(evaluation.overallStatus),
+          true,
+        ),
+        ...criterionFacts,
+        ...gapFacts,
+        ...sourceFacts,
+      ],
+      warnings:
+        evaluation.overallStatus === 'NEEDS_MANUAL_REVIEW'
+          ? [
+              {
+                code: 'CRITERIA_MANUAL_REVIEW_REQUIRED',
+                severity: 'warning',
+                message: 'Một số điều kiện cần cán bộ xem trực tiếp theo nguồn tiêu chí.',
+              },
+            ]
+          : [],
+      primaryAction,
+      allowedActions: actions,
+      suggestedQuestions: [
+        `Tiêu chí ${scopeLabel(evaluation.criteriaConfig.scope)} gồm những gì?`,
+        'Hồ sơ của tôi còn thiếu gì?',
+        'Điều kiện nào cần cán bộ xem trực tiếp?',
+        'Nguồn tiêu chí này ở đâu?',
+      ],
+      boundaries: boundaries({ criteria: true, evidence: true, events: true }),
     });
   }
 
@@ -623,7 +856,7 @@ export class StudentCommunicationAssistantService {
       contextId: event.id,
       title: `Trợ lý sự kiện: ${event.eventName}`,
       deterministicSummary: participant
-        ? 'Sự kiện này nằm trong kho chính thức và đã tìm thấy bạn trong danh sách xác nhận. Import sẽ tạo minh chứng tin cậy, không cần OCR.'
+        ? 'Sự kiện này nằm trong kho chính thức và đã tìm thấy bạn trong danh sách xác nhận. Import sẽ tạo minh chứng tin cậy, không cần tải file để đọc lại.'
         : 'Sự kiện này nằm trong kho chính thức, nhưng hệ thống vẫn cần kiểm tra MSSV trong danh sách xác nhận trước khi import.',
       facts: [
         fact('event-name', 'event_registry', 'Sự kiện', event.eventName, true),
@@ -763,6 +996,127 @@ export class StudentCommunicationAssistantService {
       ],
       boundaries: boundaries({ supplement: true, evidence: true, criteria: true }),
     });
+  }
+
+  private findOwnedEvidenceForAssistant(user: AuthenticatedUser, evidenceId: string) {
+    return this.db.evidence.findFirst({
+      where: { id: evidenceId, application: { studentId: user.id } },
+      include: assistantEvidenceInclude,
+    });
+  }
+
+  private async refreshLegacyEvidenceIfNeeded(
+    user: AuthenticatedUser,
+    evidence: AssistantEvidenceRecord,
+    stream?: { onStatus: (data: { stage: 'preparing_context' | 'refreshing_evidence' | 'preparing_answer'; message?: string }) => Promise<unknown> | unknown },
+  ) {
+    const activeFile = resolveNewestAssistantEvidenceFile(evidence.evidenceFiles);
+    const activeJobs = await this.db.indexingJob.findMany({
+      where: {
+        targetId: evidence.id,
+        jobType: JobType.evidence_ocr,
+        status: { in: [JobStatus.queued, JobStatus.processing] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const decision = shouldReanalyseLegacyEvidence({
+      evidence,
+      activeFile,
+      evidenceCard: evidence.evidenceCard,
+      activeJobs,
+      providerConfigured: openAiEvidenceAnalysisConfigured(),
+      allowConfirmed: true,
+    });
+    if (!decision.required || !decision.safeToAutoQueue || !activeFile) {
+      return { refetched: false };
+    }
+
+    await stream?.onStatus({
+      stage: 'refreshing_evidence',
+      message: 'Mình đang đọc lại minh chứng để trả lời chính xác hơn.',
+    });
+
+    const jobInput = buildEvidenceAnalysisJobInput({
+      evidenceId: evidence.id,
+      evidenceFileId: activeFile.evidenceFileId,
+      fileId: activeFile.fileId,
+      provider: 'openai',
+      trigger: 'student_assistant_reanalysis',
+    });
+    const matchingActive = activeJobs.find((job) => {
+      const input = asRecord(job.inputJson);
+      return input?.evidenceFileId === activeFile.evidenceFileId && input?.fileId === activeFile.fileId;
+    });
+    const job =
+      matchingActive ??
+      (await this.db.indexingJob.create({
+        data: {
+          targetId: evidence.id,
+          workspaceId: evidence.application!.workspaceId,
+          jobType: JobType.evidence_ocr,
+          status: JobStatus.queued,
+          attempts: 0,
+          inputJson: jobInput as Prisma.InputJsonValue,
+        },
+      }));
+
+    await this.db.evidence.update({
+      where: { id: evidence.id },
+      data: { status: EvidenceStatus.pending_indexing, indexingStatus: IndexingStatus.pending_indexing },
+    });
+    await createApplicationAudit(this.db, {
+      actorId: user.id,
+      actorRole: user.role,
+      workspaceId: evidence.application!.workspaceId,
+      action: auditActions.EVIDENCE_REANALYSIS_QUEUED,
+      targetType: 'indexing_job',
+      targetId: job.id,
+      applicationId: evidence.applicationId ?? undefined,
+      evidenceId: evidence.id,
+      metadataJson: {
+        trigger: 'student_assistant_reanalysis',
+        reasonCodes: decision.reasons,
+        evidenceFileId: activeFile.evidenceFileId,
+        fileId: activeFile.fileId,
+      },
+    });
+
+    if (job.status !== JobStatus.queued) return { refetched: false };
+    const completed = await withTimeout(runIndexingJob(job.id), evidenceReanalysisWaitMs);
+    if (!completed) return { refetched: false };
+    if (completed.status === JobStatus.completed) {
+      await createApplicationAudit(this.db, {
+        actorId: user.id,
+        actorRole: user.role,
+        workspaceId: evidence.application!.workspaceId,
+        action: auditActions.EVIDENCE_REANALYSIS_COMPLETED,
+        targetType: 'indexing_job',
+        targetId: job.id,
+        applicationId: evidence.applicationId ?? undefined,
+        evidenceId: evidence.id,
+        metadataJson: {
+          trigger: 'student_assistant_reanalysis',
+          reasonCodes: decision.reasons,
+        },
+      });
+      return { refetched: true };
+    }
+    await createApplicationAudit(this.db, {
+      actorId: user.id,
+      actorRole: user.role,
+      workspaceId: evidence.application!.workspaceId,
+      action: auditActions.EVIDENCE_REANALYSIS_FAILED,
+      targetType: 'indexing_job',
+      targetId: job.id,
+      applicationId: evidence.applicationId ?? undefined,
+      evidenceId: evidence.id,
+      metadataJson: {
+        trigger: 'student_assistant_reanalysis',
+        reasonCodes: decision.reasons,
+        status: completed.status,
+      },
+    });
+    return { refetched: true };
   }
 
   private async getOwnedApplication(user: AuthenticatedUser, query: StudentAssistantContextQuery) {
@@ -994,9 +1348,11 @@ function actionFromDashboard(action: {
 }
 
 function dashboardActionType(type: string): StudentAssistantAction['type'] {
+  if (type === 'start_application') return 'start_application';
+  if (type === 'continue_application') return 'open_application';
   if (type === 'confirm_evidence') return 'confirm_evidence';
-  if (type === 'retry_evidence_analysis' || type === 'replace_evidence_file')
-    return 'retry_analysis';
+  if (type === 'retry_evidence_analysis') return 'retry_evidence_analysis';
+  if (type === 'replace_evidence_file') return 'replace_evidence_file';
   if (type === 'import_event') return 'import_event';
   if (type === 'run_precheck') return 'run_precheck';
   if (type === 'rerun_precheck') return 'rerun_precheck';
@@ -1006,10 +1362,18 @@ function dashboardActionType(type: string): StudentAssistantAction['type'] {
   return 'add_evidence';
 }
 
+function scopeFromContextId(contextId?: string): Level | null {
+  if (contextId === Level.school) return Level.school;
+  if (contextId === Level.university) return Level.university;
+  if (contextId === Level.city) return Level.city;
+  if (contextId === Level.central) return Level.central;
+  return null;
+}
+
 function actionTypeFromPrecheck(action: Record<string, unknown>): StudentAssistantAction['type'] {
   const type = String(action.type ?? '');
   if (type.includes('confirm')) return 'confirm_evidence';
-  if (type.includes('precheck')) return 'rerun_precheck';
+  if (type.includes('precheck')) return 'open_precheck';
   if (type.includes('supplement')) return 'open_supplement';
   if (type.includes('submit')) return 'submit_application';
   return 'resolve_precheck_issue';
@@ -1050,6 +1414,63 @@ function flattenRecord(value: Record<string, unknown> | null | undefined) {
   );
 }
 
+function evidencePrecheckFacts(precheck: Record<string, unknown> | null): StudentAssistantFact[] {
+  if (!precheck) return [];
+  const identifiedAs = asRecord(precheck.identifiedAs);
+  const completeness = asRecord(precheck.completeness);
+  const quality = asRecord(precheck.quality);
+  const facts: StudentAssistantFact[] = [];
+  const documentLabel = stringFromRecord(identifiedAs, 'documentLabel');
+  const shortDescription = stringFromRecord(identifiedAs, 'shortDescription');
+  if (documentLabel || shortDescription) {
+    facts.push(
+      fact(
+        'evidence-precheck-identity',
+        'evidence_precheck',
+        'AI nhận diện minh chứng',
+        [documentLabel, shortDescription].filter(Boolean).join(' - '),
+        true,
+      ),
+    );
+  }
+  if (typeof completeness?.score === 'number') {
+    facts.push(
+      fact(
+        'evidence-precheck-completeness',
+        'evidence_precheck',
+        'Mức đầy đủ thông tin',
+        `${Math.round(completeness.score * 100)}%`,
+        true,
+      ),
+    );
+  }
+  const qualityLevel = stringFromRecord(quality, 'level');
+  if (qualityLevel) {
+    facts.push(
+      fact(
+        'evidence-precheck-quality',
+        'evidence_precheck',
+        'Chất lượng tài liệu',
+        friendlyStudentValue(qualityLevel),
+        true,
+      ),
+    );
+  }
+  const recommendedAction = stringFromRecord(precheck, 'recommendedAction');
+  if (recommendedAction) {
+    facts.push(
+      fact(
+        'evidence-precheck-action',
+        'next_action',
+        'Bước nên làm',
+        friendlyStudentValue(recommendedAction),
+        true,
+      ),
+    );
+  }
+  return facts;
+}
+
 function fieldLabel(key: string) {
   const labels: Record<string, string> = {
     student_name: 'Họ tên',
@@ -1069,6 +1490,12 @@ function fieldLabel(key: string) {
     conduct_score: 'Điểm rèn luyện',
   };
   return labels[key] ?? key;
+}
+
+function warningSeverity(value: unknown): 'info' | 'warning' | 'blocking' {
+  const severity = stringFromRecord(value, 'severity');
+  if (severity === 'info' || severity === 'warning' || severity === 'blocking') return severity;
+  return 'warning';
 }
 
 function isCardTrusted(
@@ -1118,6 +1545,62 @@ function applicationIdFromContext(context: StudentAssistantContext) {
   return context.contextType === 'dashboard' || context.contextType === 'precheck'
     ? context.contextId
     : undefined;
+}
+
+function buildGenerationIdentity(
+  userId: string,
+  context: StudentAssistantContext,
+  input: StudentAssistantStreamInput,
+) {
+  return sha256(
+    JSON.stringify(
+      stableSort({
+        userId,
+        contextType: context.contextType,
+        contextId: context.contextId,
+        contextVersion: context.contextVersion,
+        message: String(input.message).replace(/\s+/g, ' ').trim().toLowerCase(),
+        turnId: input.clientTurnId ?? null,
+      }),
+    ),
+  );
+}
+
+function openAiEvidenceAnalysisConfigured() {
+  return Boolean(env.OPENAI_API_KEY && env.OPENAI_EVIDENCE_MODEL);
+}
+
+function resolveNewestAssistantEvidenceFile(
+  evidenceFiles: Array<{ id: string; fileId: string; file: { createdAt: Date; id: string } }>,
+) {
+  const newest = [...evidenceFiles].sort((left, right) => {
+    const createdDiff = right.file.createdAt.getTime() - left.file.createdAt.getTime();
+    if (createdDiff !== 0) return createdDiff;
+    const fileIdDiff = right.file.id.localeCompare(left.file.id);
+    if (fileIdDiff !== 0) return fileIdDiff;
+    return right.id.localeCompare(left.id);
+  })[0];
+  return newest
+    ? {
+        evidenceFileId: newest.id,
+        fileId: newest.fileId,
+        createdAt: newest.file.createdAt,
+      }
+    : null;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function stableSort(value: unknown): unknown {

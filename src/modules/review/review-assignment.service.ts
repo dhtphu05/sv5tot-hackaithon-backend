@@ -1,4 +1,4 @@
-import { Criterion, Role, ReviewTaskStatus, type Prisma } from '@prisma/client';
+import { Criterion, Role, ReviewTaskStatus, WorkspaceType, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { facultyMatches } from '../../shared/utils/faculty';
 
@@ -16,6 +16,7 @@ export class ReviewAssignmentService {
     input: {
       criterion: Criterion;
       faculty?: string | null;
+      workspaceId: string;
       excludeOfficerIds?: string[];
     },
     db: DbClient = prisma,
@@ -25,8 +26,9 @@ export class ReviewAssignmentService {
         criterion: input.criterion,
         isActive: true,
         officer: {
-          role: Role.officer,
+          role: Role.city_officer,
           isActive: true,
+          workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
         },
       },
       include: { officer: true },
@@ -93,13 +95,15 @@ export class ReviewAssignmentService {
     criterion: Criterion,
     _faculty?: string | null,
     db: DbClient = prisma,
+    reviewerRole: Role = Role.officer,
   ): Promise<boolean> {
+    // facultyScope is an assignment preference; criterion specialization governs access.
     const specialization = await db.officerSpecialization.findFirst({
       where: {
         officerId,
         criterion,
         isActive: true,
-        officer: { role: Role.officer, isActive: true },
+        officer: { role: reviewerRole, isActive: true },
       },
     });
 

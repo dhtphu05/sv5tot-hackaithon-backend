@@ -14,7 +14,10 @@ type ApplicationWithCounts = Application & {
   metrics?: unknown[];
 };
 
-export function assertApplicationOwner(application: Application, user: AuthenticatedUser): void {
+export function assertApplicationOwner(
+  application: Pick<Application, 'studentId'>,
+  user: AuthenticatedUser,
+): void {
   if (user.role === Role.admin) {
     return;
   }

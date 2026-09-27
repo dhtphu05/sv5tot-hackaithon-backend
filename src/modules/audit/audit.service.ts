@@ -1,10 +1,55 @@
 // Owns immutable audit log writes and privileged audit querying.
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
+import { auditActions } from '../../shared/constants/application';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
+import {
+  isCityReviewRole,
+  reviewWorkspaceFilterFor,
+} from '../../shared/utils/review-workspace-scope';
 import { redactSmartReaderSecrets } from '../smartreader/smartreader.redactor';
 import type { AuditLogInput } from './audit.types';
+
+const cityReviewAuditActions = [
+  auditActions.REVIEW_TASK_CREATED,
+  auditActions.REVIEW_TASK_ASSIGNED,
+  auditActions.REVIEW_TASK_REASSIGNED,
+  auditActions.REVIEW_TASK_OPENED,
+  auditActions.REVIEW_TASK_STARTED,
+  auditActions.REVIEW_TASK_DECIDED,
+  auditActions.REVIEW_TASK_ACCEPTED,
+  auditActions.REVIEW_TASK_REJECTED,
+  auditActions.REVIEW_TASK_SUPPLEMENT_REQUIRED,
+  auditActions.REVIEW_TASK_ESCALATED_RESOLUTION,
+  auditActions.SUPPLEMENT_REQUESTED,
+  auditActions.SUPPLEMENT_RESUBMITTED,
+  'RESOLUTION_CASE_OPENED',
+  'RESOLUTION_CASE_RESOLVED',
+  'RESOLUTION_DECISION_APPLIED',
+  'RESOLUTION_STATUS_UPDATED',
+  'KNOWLEDGE_BASE_ITEM_CREATED_FROM_RESOLUTION',
+  auditActions.RESOLUTION_CASE_CREATED,
+  auditActions.RESOLUTION_CASE_DECIDED,
+  auditActions.RESOLUTION_CASE_ACCEPTED,
+  auditActions.RESOLUTION_CASE_REJECTED,
+  auditActions.RESOLUTION_CASE_NEEDS_SUPPLEMENT,
+  auditActions.RESOLUTION_CASE_REOPENED,
+  auditActions.APPLICATION_AGGREGATED,
+  auditActions.FINAL_AGGREGATION_VIEWED,
+  auditActions.APPLICATION_FINALIZED,
+  auditActions.FINAL_RESULT_CONFIRMED,
+  auditActions.FINAL_RESULT_OVERRIDDEN,
+  auditActions.FINAL_RESULT_REOPENED,
+  auditActions.COLLECTIVE_REVIEW_TASK_CREATED,
+  auditActions.COLLECTIVE_REVIEW_TASK_ASSIGNED,
+  auditActions.COLLECTIVE_FINALIZED,
+  auditActions.COLLECTIVE_FINAL_REOPENED,
+  auditActions.KNOWLEDGE_BASE_ITEM_CREATED,
+  auditActions.KNOWLEDGE_BASE_ITEM_UPDATED,
+  auditActions.KNOWLEDGE_BASE_ITEM_USED,
+  auditActions.EXPORT_REVIEW_RESULTS_CREATED,
+  auditActions.EXPORT_REVIEW_RESULTS_DOWNLOADED,
+];
 
 type JsonInput = Prisma.InputJsonValue | undefined;
 
@@ -69,10 +114,16 @@ export class AuditService {
     limit: number;
     offset: number;
   }) {
+    const isCityUser = isCityReviewRole(params.user.role);
+    const workspaceScope = reviewWorkspaceFilterFor(params.user);
     return prisma.auditLog.findMany({
       where: {
-        ...workspaceFilterFor(params.user),
-        action: params.action,
+        ...(isCityUser
+          ? { OR: [{ workspaceId: params.user.workspaceId! }, workspaceScope] }
+          : workspaceScope),
+        action: isCityUser
+          ? { in: cityReviewAuditActions.filter((action) => !params.action || action === params.action) }
+          : params.action,
         targetType: params.entityType,
         targetId: params.entityId,
         requestId: params.requestId,

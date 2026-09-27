@@ -3,10 +3,19 @@ import type { Criterion } from '@prisma/client';
 export type EvidenceAnalysisProviderName = 'openai' | 'smartreader' | 'mock';
 
 export type EvidenceDocumentType =
+  | 'conduct_result'
+  | 'student_healthy_certificate'
+  | 'volunteer_certificate'
+  | 'activity_certificate'
+  | 'award_certificate'
+  | 'language_certificate'
+  | 'academic_result'
+  | 'research_achievement'
+  | 'international_exchange'
+  | 'participant_confirmation'
   | 'certificate'
   | 'award'
   | 'transcript'
-  | 'language_certificate'
   | 'participant_list'
   | 'other';
 
@@ -31,7 +40,7 @@ export type ExtractedFieldValue = string | number | null;
 
 export type ExtractedField<T extends ExtractedFieldValue = ExtractedFieldValue> = {
   value: T;
-  confidence: number;
+  confidence: number | null;
   source: EvidenceAnalysisProviderName | 'event_registry';
 };
 
@@ -42,6 +51,79 @@ export type EvidenceAnalysisWarning = {
   severity: 'info' | 'warning' | 'blocking';
   field?: EvidenceAnalysisFieldName;
   message: string;
+};
+
+export type EvidenceDocumentPrecheckInput = {
+  identifiedAs: {
+    documentLabel: string;
+    shortDescription: string;
+  };
+  completeness: {
+    score: number;
+    availableFields: EvidenceAnalysisFieldName[];
+    missingImportantFields: EvidenceAnalysisFieldName[];
+  };
+  quality: {
+    level: 'clear' | 'needs_check' | 'poor';
+    issues: Array<
+      | 'blurred'
+      | 'cropped'
+      | 'low_resolution'
+      | 'handwriting_unclear'
+      | 'multiple_documents'
+      | 'page_missing'
+    >;
+  };
+  relevance: Array<{
+    criterion: Criterion;
+    level: 'strong' | 'possible' | 'unclear';
+    explanation: string;
+  }>;
+};
+
+export type EvidenceDocumentFacts = {
+  documentTitle: string | null;
+  identity: {
+    studentName: string | null;
+    studentCode: string | null;
+    schoolName: string | null;
+  };
+  activity: {
+    eventName: string | null;
+    programName: string | null;
+    location: string | null;
+    activityDate: string | null;
+  };
+  organization: {
+    issuerName: string | null;
+    issuerLevel: string | null;
+  };
+  conductEntries: Array<{
+    semester: string | null;
+    schoolYear: string | null;
+    score: number | null;
+    classification: string | null;
+  }>;
+  fitness: {
+    title: string | null;
+    resultLevel: string | null;
+    sportName: string | null;
+  };
+  language: {
+    certificateType: string | null;
+    score: number | null;
+    frameworkLevel: string | null;
+  };
+  award: {
+    title: string | null;
+    rank: string | null;
+    level: string | null;
+  };
+  academic: {
+    gpa: number | null;
+    gpaScale: number | null;
+    hasFGrade: boolean | null;
+  };
 };
 
 export type EvidenceDocumentAnalysisInput = {
@@ -71,12 +153,14 @@ export type EvidenceDocumentAnalysisResult = {
     totalTokens?: number;
   };
   documentType: EvidenceDocumentType;
+  documentFacts: EvidenceDocumentFacts;
   fields: EvidenceAnalysisFields;
   suggestedCriteria: Array<{
     criterion: Criterion;
     confidence: number;
     reason: string;
   }>;
+  documentPrecheck: EvidenceDocumentPrecheckInput;
   warnings: EvidenceAnalysisWarning[];
   summary: string;
   overallConfidence: number;

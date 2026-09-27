@@ -47,6 +47,9 @@ eventRegistryRouter.get(
     Role.officer,
     Role.manager,
     Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
     Role.admin,
   ),
   validate({ query: searchEventsQuerySchema }),
@@ -61,6 +64,9 @@ eventRegistryRouter.get(
     Role.officer,
     Role.manager,
     Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
     Role.admin,
   ),
   validate({ query: listEventsQuerySchema }),
@@ -69,14 +75,22 @@ eventRegistryRouter.get(
 eventRegistryRouter.post(
   '/',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   validate({ body: createEventSchema }),
   asyncHandler(createEvent),
 );
 eventRegistryRouter.get(
   '/:eventId/staff-workspace',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   asyncHandler(getStaffEventWorkspace),
 );
 eventRegistryRouter.get(
@@ -88,6 +102,9 @@ eventRegistryRouter.get(
     Role.officer,
     Role.manager,
     Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
     Role.admin,
   ),
   asyncHandler(getEvent),
@@ -95,41 +112,49 @@ eventRegistryRouter.get(
 eventRegistryRouter.patch(
   '/:id',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   validate({ body: updateEventSchema }),
   asyncHandler(updateEvent),
 );
 eventRegistryRouter.delete(
   '/:id',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   asyncHandler(deleteEvent),
 );
 eventRegistryRouter.post(
   '/:id/roster-files',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   uploadMiddleware.single('file'),
   asyncHandler(uploadRosterFile),
 );
 eventRegistryRouter.post(
   '/:id/start-indexing',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   validate({ body: startRosterIndexingSchema }),
   asyncHandler(startRosterIndexing),
 );
 eventRegistryRouter.get(
   '/:id/participants',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   validate({ query: participantsQuerySchema }),
   asyncHandler(listParticipants),
 );
 eventRegistryRouter.post(
   '/:id/confirm-index',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   validate({ body: confirmIndexSchema }),
   asyncHandler(confirmIndex),
 );
@@ -142,6 +167,9 @@ eventRegistryRouter.post(
     Role.officer,
     Role.manager,
     Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
     Role.admin,
   ),
   validate({ body: checkParticipantSchema }),
@@ -150,7 +178,7 @@ eventRegistryRouter.post(
 eventRegistryRouter.post(
   '/:id/participants/import',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.admin),
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   validate({ body: importParticipantsJsonSchema }),
   asyncHandler(importParticipants),
 );
@@ -162,6 +190,8 @@ eventRegistryRouter.post(
     Role.class_representative,
     Role.officer,
     Role.manager,
+    Role.city_officer,
+    Role.city_manager,
     Role.admin,
   ),
   validate({ body: importAsEvidenceSchema }),
@@ -175,6 +205,8 @@ eventRegistryRouter.post(
     Role.class_representative,
     Role.officer,
     Role.manager,
+    Role.city_officer,
+    Role.city_manager,
     Role.admin,
   ),
   validate({ body: importToApplicationSchema }),

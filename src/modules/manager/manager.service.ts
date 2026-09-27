@@ -8,6 +8,7 @@ import {
   ResolutionStatus,
   Role,
   ReviewTaskStatus,
+  WorkspaceType,
   type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
@@ -17,6 +18,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { facultyMatches } from '../../shared/utils/faculty';
 import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
+import { assertReviewWorkspaceAccess, reviewWorkspaceFilterFor } from '../../shared/utils/review-workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
@@ -40,6 +42,7 @@ const applicationSummaryInclude = {
 } satisfies Prisma.ApplicationInclude;
 
 const applicationDetailInclude = {
+  workspace: { select: { type: true, isActive: true } },
   student: true,
   metrics: true,
   requirementResponses: true,
@@ -80,7 +83,7 @@ export class ManagerService {
 
   async listApplications(user: AuthenticatedUser, query: ListManagerApplicationsQuery) {
     const where: Prisma.ApplicationWhereInput = {
-      ...workspaceFilterFor(user),
+      ...reviewWorkspaceFilterFor(user),
       ...(query.status ? { status: query.status } : {}),
       ...(query.targetLevel ? { targetLevel: query.targetLevel } : {}),
       ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
@@ -118,10 +121,14 @@ export class ManagerService {
   }
 
   async getDashboardSummary(user: AuthenticatedUser) {
-    const applicationScope = workspaceFilterFor(user);
-    const taskScope = workspaceFilterFor(user);
-    const resolutionScope = workspaceFilterFor(user);
+    if (user.role === Role.city_committee || user.role === Role.city_officer) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'This role cannot view management workloads');
+    }
+    const applicationScope = reviewWorkspaceFilterFor(user);
+    const taskScope = reviewWorkspaceFilterFor(user);
+    const resolutionScope = reviewWorkspaceFilterFor(user);
     const userScope = workspaceFilterFor(user);
+    const cityManager = user.role === Role.city_manager;
     const [
       applicationStatusGroups,
       targetLevelGroups,
@@ -175,10 +182,20 @@ export class ManagerService {
       }),
       prisma.resolutionCase.count({ where: { ...resolutionScope, closedAt: { not: null } } }),
       prisma.user.findMany({
-        where: { ...userScope, role: Role.officer, isActive: true },
+        where: cityManager
+          ? {
+              workspaceId: user.workspaceId ?? undefined,
+              workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+              role: Role.city_officer,
+              isActive: true,
+            }
+          : { ...userScope, role: Role.officer, isActive: true },
         include: {
           officerSpecializations: { where: { isActive: true } },
-          assignedReviewTasks: { select: { status: true } },
+          assignedReviewTasks: {
+            where: cityManager ? reviewWorkspaceFilterFor(user) : undefined,
+            select: { status: true },
+          },
         },
         orderBy: { fullName: 'asc' },
       }),
@@ -315,7 +332,7 @@ export class ManagerService {
   async listResults(user: AuthenticatedUser, query: ListManagerResultsQuery) {
     const where: Prisma.ApplicationWhereInput = {
       ...buildResultsWhere(query),
-      ...workspaceFilterFor(user),
+      ...reviewWorkspaceFilterFor(user),
     };
     const allCandidates = await prisma.application.findMany({
       where,
@@ -340,7 +357,7 @@ export class ManagerService {
     const pageIds = sortedCandidates.slice(skip, skip + query.pageSize).map((item) => item.id);
     const applications = pageIds.length
       ? await prisma.application.findMany({
-          where: { id: { in: pageIds }, ...workspaceFilterFor(user) },
+          where: { id: { in: pageIds }, ...reviewWorkspaceFilterFor(user) },
           include: {
             student: true,
             finalizedBy: true,
@@ -385,7 +402,7 @@ export class ManagerService {
     const limit = query.limit;
     const now = new Date();
     const applications = await prisma.application.findMany({
-      where: { ...buildCommitteeInboxWhere(query), ...workspaceFilterFor(user) },
+      where: { ...buildCommitteeInboxWhere(query), ...reviewWorkspaceFilterFor(user) },
       include: {
         student: true,
         finalizedBy: true,
@@ -448,10 +465,10 @@ export class ManagerService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
-    assertSameWorkspace(user, application, 'Application not found');
+    assertReviewWorkspaceAccess(user, reviewResource(application), 'Application not found');
 
     const auditTimeline = await prisma.auditLog.findMany({
-      where: { applicationId, ...workspaceFilterFor(user) },
+      where: { applicationId, ...reviewWorkspaceFilterFor(user) },
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
@@ -523,12 +540,12 @@ export class ManagerService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
-    assertSameWorkspace(user, application, 'Application not found');
+    assertReviewWorkspaceAccess(user, reviewResource(application), 'Application not found');
 
     const [notificationCount, auditTimeline] = await Promise.all([
-      prisma.notification.count({ where: { applicationId, ...workspaceFilterFor(user) } }),
+      prisma.notification.count({ where: { applicationId, ...reviewWorkspaceFilterFor(user) } }),
       prisma.auditLog.findMany({
-        where: { applicationId, ...workspaceFilterFor(user) },
+        where: { applicationId, ...reviewWorkspaceFilterFor(user) },
         orderBy: { createdAt: 'desc' },
         take: 20,
       }),
@@ -572,13 +589,25 @@ export class ManagerService {
   }
 
   async getWorkloads(user: AuthenticatedUser) {
-    const scope = workspaceFilterFor(user);
+    if (user.role === Role.city_committee || user.role === Role.city_officer) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'This role cannot view reviewer workloads');
+    }
+    const cityManager = user.role === Role.city_manager;
+    const scope = reviewWorkspaceFilterFor(user);
     const [officers, unassignedTasks] = await Promise.all([
       prisma.user.findMany({
-        where: { ...scope, role: Role.officer, isActive: true },
+        where: cityManager
+          ? {
+              workspaceId: user.workspaceId ?? undefined,
+              workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
+              role: Role.city_officer,
+              isActive: true,
+            }
+          : { ...workspaceFilterFor(user), role: Role.officer, isActive: true },
         include: {
           officerSpecializations: { where: { isActive: true } },
           assignedReviewTasks: {
+            where: cityManager ? scope : undefined,
             select: { status: true, dueDate: true },
           },
         },
@@ -633,6 +662,10 @@ export class ManagerService {
   }
 
   async reassignTask(user: AuthenticatedUser, taskId: string, input: AssignReviewTaskInput) {
+    if (user.role === Role.city_committee || user.role === Role.city_officer) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'This role cannot assign review tasks');
+    }
+    const cityManager = user.role === Role.city_manager;
     const assignedOfficerId = input.assignedOfficerId ?? input.officerId;
     const reason = input.reason ?? input.note;
     if (!assignedOfficerId) {
@@ -643,30 +676,49 @@ export class ManagerService {
       prisma.reviewTask.findUnique({
         where: { id: taskId },
         include: {
+          workspace: { select: { type: true, isActive: true } },
           application: { include: { student: true } },
           collectiveProfile: { include: { representative: true } },
         },
       }),
       prisma.user.findUnique({
         where: { id: assignedOfficerId },
-        include: { officerSpecializations: { where: { isActive: true } } },
+        include: {
+          workspace: { select: { type: true, isActive: true } },
+          officerSpecializations: { where: { isActive: true } },
+        },
       }),
     ]);
 
     if (!task) {
       throw new AppError(404, ErrorCodes.REVIEW_TASK_NOT_FOUND, 'Review task not found');
     }
-    assertSameWorkspace(user, task, 'Review task not found');
+    if (cityManager) {
+      assertReviewWorkspaceAccess(user, reviewResource(task), 'Review task not found');
+    } else {
+      assertSameWorkspace(user, task, 'Review task not found');
+    }
     if (!officer || !officer.isActive) {
       throw new AppError(404, ErrorCodes.OFFICER_NOT_FOUND, 'Officer not found');
     }
-    if (user.role !== Role.admin && officer.workspaceId !== task.workspaceId) {
+    if (cityManager) {
+      if (
+        officer.role !== Role.city_officer ||
+        officer.workspaceId !== user.workspaceId ||
+        officer.workspace?.type !== WorkspaceType.CITY ||
+        officer.workspace?.isActive !== true
+      ) {
+        throw new AppError(404, ErrorCodes.OFFICER_NOT_FOUND, 'Officer not found');
+      }
+    } else if (user.role !== Role.admin && officer.workspaceId !== task.workspaceId) {
       throw new AppError(404, ErrorCodes.OFFICER_NOT_FOUND, 'Officer not found');
     }
     if (
+      !cityManager &&
       officer.role !== Role.officer &&
       officer.role !== Role.manager &&
-      officer.role !== Role.committee
+      officer.role !== Role.committee &&
+      officer.role !== Role.city_officer
     ) {
       throw new AppError(
         400,
@@ -679,12 +731,20 @@ export class ManagerService {
       task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty ?? null;
     const specialized = isSpecializedForTask(officer.officerSpecializations, task.criterion, faculty);
     const shouldCheckSpecialization =
-      officer.role === Role.officer || officer.officerSpecializations.length > 0;
-    if (shouldCheckSpecialization && !specialized && !input.overrideSpecialization) {
+      officer.role === Role.officer ||
+      officer.role === Role.city_officer ||
+      officer.officerSpecializations.length > 0;
+    if (
+      shouldCheckSpecialization &&
+      !specialized &&
+      (cityManager || !input.overrideSpecialization)
+    ) {
       throw new AppError(
         400,
         ErrorCodes.VALIDATION_ERROR,
-        'Officer is not specialized for this task. Set overrideSpecialization=true to override.',
+        cityManager
+          ? 'City Officer is not specialized for this task.'
+          : 'Officer is not specialized for this task. Set overrideSpecialization=true to override.',
       );
     }
 
@@ -796,7 +856,13 @@ export class ManagerService {
     applicationId: string,
     input: FinalizeApplicationInput,
   ) {
-    if (user.role !== Role.manager && user.role !== Role.committee && user.role !== Role.admin) {
+    if (
+      user.role !== Role.manager &&
+      user.role !== Role.committee &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.city_committee &&
+      user.role !== Role.admin
+    ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager, committee, or admin can finalize results');
     }
     if (
@@ -1025,11 +1091,14 @@ export class ManagerService {
   }
 
   async reopenFinal(user: AuthenticatedUser, applicationId: string, input: ReopenFinalInput) {
-    const application = await prisma.application.findUnique({ where: { id: applicationId } });
+    const application = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: { workspace: { select: { type: true, isActive: true } } },
+    });
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
-    assertSameWorkspace(user, application, 'Application not found');
+    assertReviewWorkspaceAccess(user, reviewResource(application), 'Application not found');
     if (
       application.status !== ApplicationStatus.completed &&
       application.status !== ApplicationStatus.rejected
@@ -1086,9 +1155,20 @@ export class ManagerService {
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
-    assertSameWorkspace(user, application, 'Application not found');
+    assertReviewWorkspaceAccess(user, reviewResource(application), 'Application not found');
     return application;
   }
+}
+
+function reviewResource(resource: {
+  workspaceId: string | null;
+  workspace?: { type: WorkspaceType; isActive: boolean } | null;
+}) {
+  return {
+    workspaceId: resource.workspaceId,
+    workspaceType: resource.workspace?.type,
+    workspaceIsActive: resource.workspace?.isActive,
+  };
 }
 
 export function buildAggregation(application: ApplicationDetail) {

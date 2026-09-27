@@ -3,15 +3,29 @@ import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
 import { MockEvidenceAnalysisAdapter } from './mock-evidence-analysis.adapter';
 import { OpenAiEvidenceAnalysisAdapter } from './openai-evidence-analysis.adapter';
-import { SmartReaderEvidenceAnalysisAdapter } from './smartreader-evidence-analysis.adapter';
 import type { EvidenceAnalysisProvider, EvidenceAnalysisRuntimeConfig } from './evidence-analysis.types';
 
 export function createEvidenceAnalysisProvider(
   config: EvidenceAnalysisRuntimeConfig = {},
 ): EvidenceAnalysisProvider {
   const provider = config.provider ?? 'openai';
-  if (provider === 'mock') return new MockEvidenceAnalysisAdapter();
-  if (provider === 'smartreader') return new SmartReaderEvidenceAnalysisAdapter();
+  if (provider === 'mock') {
+    if (env.NODE_ENV === 'test') return new MockEvidenceAnalysisAdapter();
+    throw new AppError(
+      409,
+      ErrorCodes.AI_PROVIDER_NOT_ALLOWED,
+      'Mock evidence analysis is only available in tests',
+      { provider, retryable: false },
+    );
+  }
+  if (provider === 'smartreader') {
+    throw new AppError(
+      409,
+      ErrorCodes.AI_PROVIDER_NOT_ALLOWED,
+      'Manual evidence analysis is locked to OpenAI',
+      { provider, retryable: false },
+    );
+  }
 
   const apiKey = config.openaiApiKey ?? env.OPENAI_API_KEY;
   const model = config.openaiModel ?? env.OPENAI_EVIDENCE_MODEL;

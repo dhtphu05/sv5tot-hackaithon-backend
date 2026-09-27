@@ -21,6 +21,24 @@ describe('Smartbot env validation', () => {
     expect(env.SMARTBOT_MODE).toBe('mock');
   });
 
+  it('defaults the demo review bypass to false', async () => {
+    vi.resetModules();
+    delete process.env.ENABLE_DEMO_REVIEW_BYPASS;
+
+    const { env } = await import('../../src/config/env');
+
+    expect(env.ENABLE_DEMO_REVIEW_BYPASS).toBe(false);
+  });
+
+  it('enables the demo review bypass only when explicitly set to true', async () => {
+    vi.resetModules();
+    process.env.ENABLE_DEMO_REVIEW_BYPASS = 'true';
+
+    const { env } = await import('../../src/config/env');
+
+    expect(env.ENABLE_DEMO_REVIEW_BYPASS).toBe(true);
+  });
+
   it('allows live mode to start without Smartbot credentials so runtime can return SMARTBOT_ENV_MISSING', async () => {
     vi.resetModules();
     process.env.SMARTBOT_MODE = 'real';

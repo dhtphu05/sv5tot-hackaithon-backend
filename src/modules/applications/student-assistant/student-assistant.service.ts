@@ -7,6 +7,7 @@ import type { AuthenticatedUser } from '../../../shared/types/auth';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
 import { buildOpenAiSafetyIdentifier } from '../../ai/openai-client';
+import { createStudentAssistantStreamLifecycle } from '../../student-assistant/student-assistant-stream';
 import { isApplicationPrecheckStale } from '../application-freshness';
 import { evaluateCriterionCompletion } from '../../criteria-completion/criteria-completion.evaluator';
 import type { CompletionEvidence, CompletionResponse, CriterionCompletionDto } from '../../criteria-completion/criteria-completion.types';
@@ -155,21 +156,32 @@ export class StudentAssistantService {
     callbacks: AssistantStreamEventCallbacks,
   ) {
     assertStudent(user);
+    const stream = createStudentAssistantStreamLifecycle({
+      requestId: input.requestId,
+      signal: input.signal,
+      callbacks: callbacks as never,
+    });
     const normalizedSchoolYear = normalizeSchoolYear(input.schoolYear);
     const key = cacheKey(user.id, normalizedSchoolYear, input.contextVersion);
     const cached = this.cache.get(key);
     if (!cached) {
-      await callbacks.onError({ code: ErrorCodes.ASSISTANT_CONTEXT_STALE, recoverable: true });
+      await stream.error({ code: ErrorCodes.ASSISTANT_CONTEXT_STALE, recoverable: true });
       return;
     }
-    await callbacks.onMeta({
+    await stream.meta({
+      contextType: 'dashboard',
+      contextId: cached.context.application.id ?? 'current',
       contextVersion: cached.context.contextVersion,
-      requestId: input.requestId,
       cached: Boolean(cached.narrative),
     });
-    await callbacks.onStatus({ stage: 'preparing_explanation' });
+    await stream.status({ stage: 'preparing_explanation' });
     if (cached.narrative) {
-      await callbacks.onComplete({ text: cached.narrative, contextVersion: cached.context.contextVersion });
+      await stream.complete({
+        text: cached.narrative,
+        finalText: cached.narrative,
+        contextVersion: cached.context.contextVersion,
+        fallback: false,
+      });
       return;
     }
 
@@ -187,11 +199,18 @@ export class StudentAssistantService {
       const generated = await this.narrativeProvider.stream(cached.context, {
         signal: input.signal,
         safetyIdentifier: buildOpenAiSafetyIdentifier('student', user.id),
-        onDelta: (delta) => callbacks.onDelta(delta),
+        onDelta: async (delta) => {
+          await stream.delta(delta);
+        },
       });
       const finalText = validateFinalNarrative(generated.text, cached.context.narrative.fallbackText);
       this.cache.setNarrative(key, finalText);
-      await callbacks.onComplete({ text: finalText, contextVersion: cached.context.contextVersion });
+      await stream.complete({
+        text: finalText,
+        finalText,
+        contextVersion: cached.context.contextVersion,
+        fallback: finalText === cached.context.narrative.fallbackText && generated.text !== finalText,
+      });
       logger.info(
         {
           applicationId: cached.context.application.id,
@@ -205,7 +224,13 @@ export class StudentAssistantService {
         'Student assistant narrative generation completed',
       );
     } catch {
-      await callbacks.onError({ code: ErrorCodes.ASSISTANT_NARRATIVE_FAILED, recoverable: true });
+      const fallback = cached.context.narrative.fallbackText;
+      await stream.complete({
+        text: fallback,
+        finalText: fallback,
+        contextVersion: cached.context.contextVersion,
+        fallback: true,
+      });
       logger.warn(
         {
           applicationId: cached.context.application.id,

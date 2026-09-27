@@ -14,6 +14,7 @@ import { processDecisionMetadataJob } from './processors/decision-metadata.proce
 import { processDecisionRosterOcrJob } from './processors/decision-roster-ocr.processor';
 import { processEventRosterIndexingJob } from './processors/event-roster-indexing.processor';
 import { processEvidenceOcrJob } from './processors/evidence-ocr.processor';
+import { processAwardRosterIngestionJob } from './processors/award-roster-ingestion.processor';
 
 export class JobsService {
   constructor(private readonly jobsRepository = new JobsRepository()) {}
@@ -142,6 +143,9 @@ export class JobsService {
   }
 
   private async assertCanViewJob(user: AuthenticatedUser, job: IndexingJob): Promise<void> {
+    if (job.jobType === JobType.award_roster_ingestion) {
+      throw new AppError(404, ErrorCodes.JOB_NOT_FOUND, 'Job not found');
+    }
     if (user.role === Role.admin) {
       return;
     }
@@ -232,7 +236,15 @@ export async function runIndexingJob(jobId: string) {
     },
   });
   const decisionImport = await prisma.decisionImport.findUnique({ where: { id: job.targetId } });
-  assertJobWorkspaceMatchesTarget(job, resolveTargetWorkspaceId(evidence, decisionImport));
+  const awardDecision =
+    job.jobType === JobType.award_roster_ingestion
+      ? await prisma.awardDecision.findUnique({ where: { id: job.targetId }, select: { issuerWorkspaceId: true } })
+      : null;
+  assertJobWorkspaceMatchesTarget(
+    job,
+    resolveTargetWorkspaceId(evidence, decisionImport, awardDecision),
+    job.jobType === JobType.award_roster_ingestion,
+  );
 
   if (job.status === JobStatus.processing) {
     throw new AppError(409, ErrorCodes.JOB_ALREADY_RUNNING, 'Job is already running');
@@ -259,7 +271,15 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
     },
   });
   const decisionImport = await prisma.decisionImport.findUnique({ where: { id: processingJob.targetId } });
-  assertJobWorkspaceMatchesTarget(processingJob, resolveTargetWorkspaceId(evidence, decisionImport));
+  const awardDecision =
+    processingJob.jobType === JobType.award_roster_ingestion
+      ? await prisma.awardDecision.findUnique({ where: { id: processingJob.targetId }, select: { issuerWorkspaceId: true } })
+      : null;
+  assertJobWorkspaceMatchesTarget(
+    processingJob,
+    resolveTargetWorkspaceId(evidence, decisionImport, awardDecision),
+    processingJob.jobType === JobType.award_roster_ingestion,
+  );
 
   if (evidence) {
     const actor = evidence.application?.student ?? evidence.collectiveProfile?.representative;
@@ -300,6 +320,8 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
             ? await processDecisionMetadataJob(processingJob)
             : processingJob.jobType === JobType.decision_roster_ocr
               ? await processDecisionRosterOcrJob(processingJob)
+              : processingJob.jobType === JobType.award_roster_ingestion
+                ? await processAwardRosterIngestionJob(processingJob)
               : { message: 'Unsupported job type' };
 
     const completed = await prisma.indexingJob.update({
@@ -417,11 +439,13 @@ function resolveTargetWorkspaceId(
       }
     | null,
   decisionImport: { workspaceId: string } | null,
+  awardDecision: { issuerWorkspaceId: string } | null = null,
 ) {
   return (
     evidence?.application?.workspaceId ??
     evidence?.collectiveProfile?.workspaceId ??
     decisionImport?.workspaceId ??
+    awardDecision?.issuerWorkspaceId ??
     null
   );
 }
@@ -429,7 +453,11 @@ function resolveTargetWorkspaceId(
 function assertJobWorkspaceMatchesTarget(
   job: Pick<IndexingJob, 'workspaceId'>,
   targetWorkspaceId: string | null,
+  requireMatch = false,
 ) {
+  if (requireMatch && (!job.workspaceId || !targetWorkspaceId || job.workspaceId !== targetWorkspaceId)) {
+    throw new AppError(404, ErrorCodes.JOB_NOT_FOUND, 'Job not found');
+  }
   if (job.workspaceId && targetWorkspaceId && job.workspaceId !== targetWorkspaceId) {
     throw new AppError(404, ErrorCodes.JOB_NOT_FOUND, 'Job not found');
   }

@@ -3,6 +3,7 @@ import {
   EventStatus,
   EvidenceSourceType,
   Role,
+  WorkspaceType,
   type Application,
   type EventParticipant,
   type EventRegistry,
@@ -81,7 +82,9 @@ export class EvidenceMatchingService {
 
     const search = query.search?.trim();
     const where: Prisma.EventRegistryWhereInput = {
-      workspaceId: application.workspaceId,
+      ...(query.projection === 'reference'
+        ? { workspaceId: application.workspaceId }
+        : studentEventWorkspaceFilter(application.workspaceId)),
       status: EventStatus.active,
       ...(query.criterion ? { criterion: query.criterion } : {}),
       ...(query.projection === 'reference'
@@ -272,7 +275,7 @@ export class EvidenceMatchingService {
     }
 
     const where: Prisma.EventRegistryWhereInput = {
-      workspaceId: application.workspaceId,
+      ...studentEventWorkspaceFilter(application.workspaceId),
       status: EventStatus.active,
       rosterIndexed: true,
       ...(query.criterion ? { criterion: query.criterion } : {}),
@@ -360,8 +363,12 @@ export class EvidenceMatchingService {
     query: EvidenceMatchingSearchQuery,
     target: { studentCode?: string | null; studentName?: string | null },
   ): Promise<EventWithParticipant[]> {
+    const workspaceScope: Prisma.EventRegistryWhereInput =
+      user.role === Role.student || user.role === Role.class_representative
+        ? studentEventWorkspaceFilter(user.workspaceId)
+        : workspaceFilterFor(user);
     const where: Prisma.EventRegistryWhereInput = {
-      ...workspaceFilterFor(user),
+      ...workspaceScope,
       status: EventStatus.active,
       rosterIndexed: true,
       ...(query.criterion ? { criterion: query.criterion } : {}),
@@ -385,6 +392,11 @@ export class EvidenceMatchingService {
 
     return events.map((event) => {
       const nameMatch = resolveExactParticipantNameMatch(event.participants, target.studentName);
+      if (target.studentCode) {
+        const exactIdentity = nameMatch.status === 'matched' &&
+          nameMatch.participant.studentCode === target.studentCode;
+        return { ...event, participants: exactIdentity ? [nameMatch.participant] : [] };
+      }
       if (nameMatch.status === 'matched') {
         return { ...event, participants: [nameMatch.participant] };
       }
@@ -821,5 +833,14 @@ function toParticipantDto(participant: EventParticipant) {
     className: participant.className,
     faculty: participant.faculty,
     convertedValue: participant.convertedValue,
+  };
+}
+
+function studentEventWorkspaceFilter(workspaceId: string | null): Prisma.EventRegistryWhereInput {
+  return {
+    OR: [
+      { workspaceId: workspaceId ?? undefined },
+      { workspace: { is: { type: WorkspaceType.CITY, isActive: true } } },
+    ],
   };
 }

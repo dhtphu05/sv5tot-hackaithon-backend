@@ -6,7 +6,7 @@ import {
 } from '../openai-client';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
-import { validateEvidenceAnalysisOutput } from './evidence-analysis.schema';
+import { evidenceDocumentTypes, validateEvidenceAnalysisOutput } from './evidence-analysis.schema';
 import type {
   EvidenceAnalysisProvider,
   EvidenceDocumentAnalysisInput,
@@ -256,7 +256,9 @@ function zodToJsonSchema(): Record<string, unknown> {
     required: [
       'documentType',
       'fields',
+      'documentFacts',
       'suggestedCriteria',
+      'documentPrecheck',
       'warnings',
       'summary',
       'overallConfidence',
@@ -265,9 +267,10 @@ function zodToJsonSchema(): Record<string, unknown> {
     properties: {
       documentType: {
         type: 'string',
-        enum: ['certificate', 'award', 'transcript', 'language_certificate', 'participant_list', 'other'],
+        enum: [...evidenceDocumentTypes],
       },
       fields: evidenceFieldsJsonSchema(),
+      documentFacts: documentFactsJsonSchema(),
       suggestedCriteria: {
         type: 'array',
         items: {
@@ -281,17 +284,18 @@ function zodToJsonSchema(): Record<string, unknown> {
           },
         },
       },
+      documentPrecheck: documentPrecheckJsonSchema(),
       warnings: {
         type: 'array',
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['code', 'severity', 'message'],
+          required: ['code', 'severity', 'field', 'message'],
           properties: {
             code: { type: 'string' },
             severity: { type: 'string', enum: ['info', 'warning', 'blocking'] },
             field: {
-              type: 'string',
+              type: ['string', 'null'],
               enum: [
                 'student_name',
                 'student_code',
@@ -308,6 +312,7 @@ function zodToJsonSchema(): Record<string, unknown> {
                 'language_score',
                 'gpa',
                 'conduct_score',
+                null,
               ],
             },
             message: { type: 'string' },
@@ -317,6 +322,203 @@ function zodToJsonSchema(): Record<string, unknown> {
       summary: { type: 'string' },
       overallConfidence: { type: 'number', minimum: 0, maximum: 1 },
       requiresHumanConfirmation: { type: 'boolean' },
+    },
+  };
+}
+
+function documentFactsJsonSchema() {
+  const nullableText = { type: ['string', 'null'] };
+  const nullableNumber = { type: ['number', 'null'] };
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'documentTitle',
+      'identity',
+      'activity',
+      'organization',
+      'conductEntries',
+      'fitness',
+      'language',
+      'award',
+      'academic',
+    ],
+    properties: {
+      documentTitle: nullableText,
+      identity: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['studentName', 'studentCode', 'schoolName'],
+        properties: {
+          studentName: nullableText,
+          studentCode: nullableText,
+          schoolName: nullableText,
+        },
+      },
+      activity: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['eventName', 'programName', 'location', 'activityDate'],
+        properties: {
+          eventName: nullableText,
+          programName: nullableText,
+          location: nullableText,
+          activityDate: nullableText,
+        },
+      },
+      organization: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['issuerName', 'issuerLevel'],
+        properties: {
+          issuerName: nullableText,
+          issuerLevel: nullableText,
+        },
+      },
+      conductEntries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['semester', 'schoolYear', 'score', 'classification'],
+          properties: {
+            semester: nullableText,
+            schoolYear: nullableText,
+            score: nullableNumber,
+            classification: nullableText,
+          },
+        },
+      },
+      fitness: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title', 'resultLevel', 'sportName'],
+        properties: {
+          title: nullableText,
+          resultLevel: nullableText,
+          sportName: nullableText,
+        },
+      },
+      language: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['certificateType', 'score', 'frameworkLevel'],
+        properties: {
+          certificateType: nullableText,
+          score: nullableNumber,
+          frameworkLevel: nullableText,
+        },
+      },
+      award: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title', 'rank', 'level'],
+        properties: {
+          title: nullableText,
+          rank: nullableText,
+          level: nullableText,
+        },
+      },
+      academic: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['gpa', 'gpaScale', 'hasFGrade'],
+        properties: {
+          gpa: nullableNumber,
+          gpaScale: nullableNumber,
+          hasFGrade: { type: ['boolean', 'null'] },
+        },
+      },
+    },
+  };
+}
+
+function documentPrecheckJsonSchema() {
+  const fieldEnum = [
+    'student_name',
+    'student_code',
+    'class_name',
+    'faculty',
+    'event_name',
+    'organizer',
+    'organizer_level',
+    'issue_date',
+    'activity_date',
+    'award_level',
+    'volunteer_days',
+    'certificate_type',
+    'language_score',
+    'gpa',
+    'conduct_score',
+  ];
+  const criterionEnum = [
+    'ethics',
+    'academic',
+    'physical',
+    'volunteer',
+    'integration',
+    'priority',
+    'collective',
+  ];
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['identifiedAs', 'completeness', 'quality', 'relevance'],
+    properties: {
+      identifiedAs: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['documentLabel', 'shortDescription'],
+        properties: {
+          documentLabel: { type: 'string' },
+          shortDescription: { type: 'string' },
+        },
+      },
+      completeness: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['score', 'availableFields', 'missingImportantFields'],
+        properties: {
+          score: { type: 'number', minimum: 0, maximum: 1 },
+          availableFields: { type: 'array', items: { type: 'string', enum: fieldEnum } },
+          missingImportantFields: { type: 'array', items: { type: 'string', enum: fieldEnum } },
+        },
+      },
+      quality: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['level', 'issues'],
+        properties: {
+          level: { type: 'string', enum: ['clear', 'needs_check', 'poor'] },
+          issues: {
+            type: 'array',
+            items: {
+              type: 'string',
+              enum: [
+                'blurred',
+                'cropped',
+                'low_resolution',
+                'handwriting_unclear',
+                'multiple_documents',
+                'page_missing',
+              ],
+            },
+          },
+        },
+      },
+      relevance: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['criterion', 'level', 'explanation'],
+          properties: {
+            criterion: { type: 'string', enum: criterionEnum },
+            level: { type: 'string', enum: ['strong', 'possible', 'unclear'] },
+            explanation: { type: 'string' },
+          },
+        },
+      },
     },
   };
 }
@@ -357,7 +559,18 @@ function evidenceFieldsJsonSchema() {
           ...fieldJsonSchema(['string', 'null']).properties,
           value: {
             type: ['string', 'null'],
-            enum: ['class', 'faculty', 'school', 'university', 'city', 'central', 'unknown', null],
+            enum: [
+              'class',
+              'faculty',
+              'school',
+              'university',
+              'city',
+              'central',
+              'club',
+              'external',
+              'unknown',
+              null,
+            ],
           },
         },
       },
@@ -380,7 +593,7 @@ function fieldJsonSchema(valueType: Array<'string' | 'number' | 'null'>) {
     required: ['value', 'confidence', 'source'],
     properties: {
       value: { type: valueType },
-      confidence: { type: 'number', minimum: 0, maximum: 1 },
+      confidence: { type: ['number', 'null'], minimum: 0, maximum: 1 },
       source: { type: 'string', enum: ['openai', 'smartreader', 'mock', 'event_registry'] },
     },
   };

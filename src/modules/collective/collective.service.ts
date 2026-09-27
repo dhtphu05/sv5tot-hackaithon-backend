@@ -10,19 +10,20 @@ import {
   NotificationType,
   ReviewTaskStatus,
   Role,
+  WorkspaceType,
   type CollectiveProfile,
   type Prisma,
 } from '@prisma/client';
-import { readSheet } from 'read-excel-file/node';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { normalizeSchoolYear } from '../../shared/utils/school-year';
+import { readRosterTable } from '../../shared/utils/roster-table-reader';
+import { assertReviewWorkspaceAccess, reviewWorkspaceFilterFor } from '../../shared/utils/review-workspace-scope';
 import {
   assertSameWorkspace,
-  workspaceFilterFor,
   workspaceIdForWrite,
 } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
@@ -185,6 +186,7 @@ export class CollectiveService {
     const profile = await prisma.collectiveProfile.findUnique({
       where: { id: profileId },
       include: {
+        workspace: { select: { type: true, isActive: true } },
         representative: true,
         members: { orderBy: { studentCode: 'asc' } },
         evidences: {
@@ -201,7 +203,9 @@ export class CollectiveService {
     });
     if (!profile) this.notFound();
     this.assertCanView(user, profile);
-    return this.toProfileDto(profile);
+    const { workspace, ...profileDto } = profile;
+    void workspace;
+    return this.toProfileDto(profileDto);
   }
 
   async update(user: AuthenticatedUser, profileId: string, input: UpdateCollectiveProfileInput) {
@@ -766,6 +770,7 @@ export class CollectiveService {
     const officer = await this.assignmentService.assignOfficerForCriterion({
       criterion: Criterion.collective,
       faculty: user.faculty,
+      workspaceId: profile.workspaceId,
     });
 
     const reviewTask = await prisma.$transaction(async (tx) => {
@@ -837,8 +842,11 @@ export class CollectiveService {
   }
 
   async listForManager(user: AuthenticatedUser, query: ListManagerCollectivesQuery) {
+    if (user.role === Role.city_officer) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'City Officers cannot access collective profiles');
+    }
     const where: Prisma.CollectiveProfileWhereInput = {
-      ...workspaceFilterFor(user),
+      ...reviewWorkspaceFilterFor(user),
       ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
       ...(query.targetLevel ? { targetLevel: query.targetLevel } : {}),
       ...(query.status ? { status: query.status } : {}),
@@ -892,10 +900,11 @@ export class CollectiveService {
     };
   }
 
-  async aggregation(profileId: string) {
+  async aggregation(user: AuthenticatedUser, profileId: string) {
     const profile = await prisma.collectiveProfile.findUnique({
       where: { id: profileId },
       include: {
+        workspace: { select: { type: true, isActive: true } },
         representative: true,
         members: true,
         evidenceRecords: true,
@@ -904,6 +913,9 @@ export class CollectiveService {
       },
     });
     if (!profile) this.notFound();
+    this.assertCanView(user, profile);
+    const { workspace, ...profileDto } = profile;
+    void workspace;
     const memberSummary = buildCollectiveMemberSummary(profile.members);
     const evidenceSummary = {
       total: profile.evidenceRecords.length,
@@ -918,7 +930,7 @@ export class CollectiveService {
       profile.reviewTasks.map((task) => task.status),
     );
     return {
-      profile,
+      profile: profileDto,
       memberSummary,
       evidenceSummary,
       latestPrecheck: profile.precheckResults[0] ?? null,
@@ -934,7 +946,10 @@ export class CollectiveService {
   }
 
   async finalize(user: AuthenticatedUser, profileId: string, input: FinalizeCollectiveInput) {
-    const aggregation = await this.aggregation(profileId);
+    if (user.role === Role.city_manager || user.role === Role.city_officer) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'City Committee is required to finalize collectives');
+    }
+    const aggregation = await this.aggregation(user, profileId);
     if (input.overrideAggregation && user.role !== Role.admin) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only admin can override finalize blockers');
     }
@@ -991,7 +1006,10 @@ export class CollectiveService {
   }
 
   private async getRequiredProfile(profileId: string) {
-    const profile = await prisma.collectiveProfile.findUnique({ where: { id: profileId } });
+    const profile = await prisma.collectiveProfile.findUnique({
+      where: { id: profileId },
+      include: { workspace: { select: { type: true, isActive: true } } },
+    });
     if (!profile) this.notFound();
     return profile;
   }
@@ -1030,7 +1048,24 @@ export class CollectiveService {
     return className;
   }
 
-  private assertCanView(user: AuthenticatedUser, profile: CollectiveProfile): void {
+  private assertCanView(
+    user: AuthenticatedUser,
+    profile: CollectiveProfile & {
+      workspace?: { type: WorkspaceType; isActive: boolean };
+    },
+  ): void {
+    if (user.role === Role.city_manager || user.role === Role.city_committee) {
+      assertReviewWorkspaceAccess(
+        user,
+        {
+          workspaceId: profile.workspaceId,
+          workspaceType: profile.workspace?.type,
+          workspaceIsActive: profile.workspace?.isActive,
+        },
+        'Collective profile not found',
+      );
+      return;
+    }
     assertSameWorkspace(user, profile, 'Collective profile not found');
     if (profile.representativeId === user.id) return;
     const privilegedRoles: Role[] = [Role.manager, Role.committee, Role.admin, Role.officer];
@@ -1100,12 +1135,15 @@ export class CollectiveService {
   private toProfileDto(profile: {
     members: Array<Parameters<typeof buildCollectiveMemberSummary>[0][number]>;
     evidences: unknown[];
+    workspace?: unknown;
     [key: string]: unknown;
   }) {
+    const { workspace, ...profileDto } = profile;
+    void workspace;
     return {
-      ...profile,
-      memberSummary: buildCollectiveMemberSummary(profile.members),
-      evidenceCount: profile.evidences.length,
+      ...profileDto,
+      memberSummary: buildCollectiveMemberSummary(profileDto.members),
+      evidenceCount: profileDto.evidences.length,
     };
   }
 }
@@ -1114,14 +1152,12 @@ async function parseRosterFile(file: UploadedFile): Promise<RosterParseResult> {
   const isXlsx =
     file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
     file.originalname.toLowerCase().endsWith('.xlsx');
-  const matrix: string[][] = isXlsx
-    ? (await readSheet(file.buffer)).map((row) => row.map((cell) => String(cell ?? '').trim()))
-    : file.buffer
-        .toString('utf8')
-        .replace(/^\uFEFF/, '')
-        .split(/\r?\n/)
-        .filter((line) => line.trim())
-        .map(parseCsvLine);
+  const table = await readRosterTable({
+    buffer: file.buffer,
+    format: isXlsx ? 'xlsx' : 'csv',
+    preserveBlankRows: true,
+  });
+  const matrix: string[][] = [table.columns, ...table.rows.map((row) => row.map((cell) => String(cell ?? '').trim()))];
   if (matrix.length < 2) return { rows: [], totalRows: 0, invalidRows: [] };
   const headers = matrix[0].map((value) => canonicalHeader(normalizeHeader(value)));
   const rows: UpsertCollectiveMemberInput[] = [];
@@ -1203,28 +1239,6 @@ function canonicalHeader(value: string): string {
     ghichu: 'note',
   };
   return aliases[value] ?? value;
-}
-
-function parseCsvLine(line: string): string[] {
-  const values: string[] = [];
-  let current = '';
-  let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if (character === '"' && line[index + 1] === '"') {
-      current += '"';
-      index += 1;
-    } else if (character === '"') {
-      quoted = !quoted;
-    } else if (character === ',' && !quoted) {
-      values.push(current.trim());
-      current = '';
-    } else {
-      current += character;
-    }
-  }
-  values.push(current.trim());
-  return values;
 }
 
 function normalizeParticipation(value?: string): string {

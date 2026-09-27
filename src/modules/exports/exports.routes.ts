@@ -22,34 +22,34 @@ export const exportsRouter = Router();
 exportsRouter.get(
   '/applications.json',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: exportApplicationsQuerySchema }),
   asyncHandler(exportApplicationsJson),
 );
 exportsRouter.get(
   '/applications.csv',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: exportApplicationsQuerySchema }),
   asyncHandler(exportApplicationsCsv),
 );
 exportsRouter.get(
   '/review-tasks.csv',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: exportReviewTasksQuerySchema }),
   asyncHandler(exportReviewTasksCsv),
 );
 exportsRouter.post(
   '/review-results',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ body: exportReviewResultsSchema }),
   asyncHandler(exportReviewResults),
 );
 exportsRouter.get(
   '/:fileId/download',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   asyncHandler(downloadExportFile),
 );

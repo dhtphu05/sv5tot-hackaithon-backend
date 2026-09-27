@@ -1,5 +1,12 @@
 // Owns export job requests for applications and review results.
-import { FileStorageType, Level, ReviewTaskStatus, Role, type Prisma } from '@prisma/client';
+import {
+  FileStorageType,
+  Level,
+  ReviewTaskStatus,
+  Role,
+  WorkspaceType,
+  type Prisma,
+} from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { env } from '../../config/env';
@@ -9,7 +16,11 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
+import {
+  assertReviewWorkspaceAccess,
+  reviewWorkspaceFilterFor,
+} from '../../shared/utils/review-workspace-scope';
+import { assertSameWorkspace } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { StorageService } from '../storage/storage.service';
 import type {
@@ -124,14 +135,39 @@ export class ExportsService {
   }
 
   async getDownloadFile(user: AuthenticatedUser, fileId: string) {
-    if (user.role !== Role.manager && user.role !== Role.committee && user.role !== Role.admin) {
+    if (
+      user.role !== Role.manager &&
+      user.role !== Role.committee &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.city_committee &&
+      user.role !== Role.admin
+    ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Export download is restricted');
     }
-    const file = await prisma.file.findUnique({ where: { id: fileId } });
+    const file = await prisma.file.findUnique({
+      where: { id: fileId },
+      include: { workspace: { select: { type: true, isActive: true } } },
+    });
     if (!file || !isExportFilePath(file.filePath)) {
       throw new AppError(404, ErrorCodes.EXPORT_FILE_NOT_FOUND, 'Export file not found');
     }
-    assertSameWorkspace(user, file, 'Export file not found');
+    if (user.role === Role.city_manager || user.role === Role.city_committee) {
+      const isCityOwnedExport =
+        file.workspaceId === user.workspaceId && file.workspace?.type === WorkspaceType.CITY;
+      if (!isCityOwnedExport) {
+        assertReviewWorkspaceAccess(
+          user,
+          {
+            workspaceId: file.workspaceId,
+            workspaceType: file.workspace?.type,
+            workspaceIsActive: file.workspace?.isActive,
+          },
+          'Export file not found',
+        );
+      }
+    } else {
+      assertSameWorkspace(user, file, 'Export file not found');
+    }
     const absolutePath = path.resolve(uploadConfig.uploadDir, file.filePath);
     const root = path.resolve(uploadConfig.uploadDir);
     const relativePath = path.relative(root, absolutePath);
@@ -147,12 +183,13 @@ export class ExportsService {
       targetType: 'file',
       targetId: file.id,
     });
-    return { file, absolutePath };
+    const { workspace: _workspace, ...fileResponse } = file;
+    return { file: fileResponse, absolutePath };
   }
 
   private async buildRows(user: AuthenticatedUser, input: ExportReviewResultsInput) {
     const where: Prisma.ApplicationWhereInput = {
-      ...workspaceFilterFor(user),
+      ...reviewWorkspaceFilterFor(user),
       ...(input.schoolYear ? { schoolYear: input.schoolYear } : {}),
       ...(input.status ? { status: input.status } : {}),
       ...(input.targetLevel ? { targetLevel: input.targetLevel } : {}),
@@ -216,7 +253,7 @@ export class ExportsService {
   }
 
   private async buildApplicationRows(user: AuthenticatedUser, query: ExportApplicationsQuery) {
-    const where = { ...buildApplicationWhere(query), ...workspaceFilterFor(user) };
+    const where = { ...buildApplicationWhere(query), ...reviewWorkspaceFilterFor(user) };
     const applications = await prisma.application.findMany({
       where,
       include: {
@@ -253,7 +290,7 @@ export class ExportsService {
 
   private async buildReviewTaskRows(user: AuthenticatedUser, query: ExportReviewTasksQuery) {
     const where: Prisma.ReviewTaskWhereInput = {
-      ...workspaceFilterFor(user),
+      ...reviewWorkspaceFilterFor(user),
       ...(query.criterion ? { criterion: query.criterion } : {}),
       application: buildApplicationWhere(query),
     };

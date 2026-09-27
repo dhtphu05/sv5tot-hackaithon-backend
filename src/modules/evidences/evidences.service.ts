@@ -313,6 +313,7 @@ export class EvidencesService {
     }
 
     const evidence = await this.getRequiredEvidence(evidenceId);
+    assertSameWorkspace(user, evidence.application!, 'Evidence not found');
 
     // Business rule: Student phải là owner application nếu role student.
     // Application còn editable hoặc đang supplement_required cho evidence/criterion đó.
@@ -1031,6 +1032,11 @@ export class EvidencesService {
     const studentCard = {
       id: card.id,
       provider: card.provider,
+      sourceFileId: card.sourceFileId,
+      analysisRevision: card.analysisRevision,
+      documentType: card.documentType,
+      suggestedCriteria: Array.isArray(card.suggestedCriteriaJson) ? card.suggestedCriteriaJson : [],
+      evidencePrecheck: card.evidencePrecheckJson ?? null,
       confirmationStatus: normalizeConfirmationStatus(card.confirmationStatus),
       requiresHumanConfirmation: card.requiresHumanConfirmation,
       confirmedFields: fieldState.confirmedFields,

@@ -2,10 +2,11 @@
 import { Role, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
+import { reviewWorkspaceFilterFor } from '../../shared/utils/review-workspace-scope';
 import type { ListReviewTasksQuery } from './review.validation';
 
 export const reviewTaskListInclude = {
+  workspace: { select: { type: true, isActive: true } },
   application: { include: { student: true } },
   collectiveProfile: { include: { representative: true } },
   assignedOfficer: { select: { id: true, fullName: true } },
@@ -29,6 +30,7 @@ export const reviewTaskListInclude = {
 } satisfies Prisma.ReviewTaskInclude;
 
 export const reviewTaskDetailInclude = {
+  workspace: { select: { type: true, isActive: true } },
   application: {
     include: {
       student: true,
@@ -69,7 +71,7 @@ export class ReviewRepository {
     dueSoonLimit.setDate(dueSoonLimit.getDate() + 3);
 
     const andFilters: Prisma.ReviewTaskWhereInput[] = [];
-    andFilters.push(workspaceFilterFor(user));
+    andFilters.push(reviewWorkspaceFilterFor(user));
     if (query.status) andFilters.push({ status: query.status });
     if (query.supplementRequired) andFilters.push({ status: 'supplement_required' });
     if (query.resolutionNeeded) andFilters.push({ status: 'resolution_needed' });
@@ -144,11 +146,11 @@ export class ReviewRepository {
     }
     const base: Prisma.ReviewTaskWhereInput = andFilters.length ? { AND: andFilters } : {};
 
-    if (user.role === Role.manager || user.role === Role.admin) {
+    if (user.role === Role.manager || user.role === Role.city_manager || user.role === Role.admin) {
       return query.assignedToMe ? { ...base, assignedOfficerId: user.id } : base;
     }
 
-    if (user.role === Role.committee) {
+    if (user.role === Role.committee || user.role === Role.city_committee) {
       return { ...base, status: query.status ?? 'resolution_needed' };
     }
 
@@ -157,6 +159,10 @@ export class ReviewRepository {
       select: { criterion: true },
     });
     const criteria = Array.from(new Set(specializations.map((item) => item.criterion)));
+
+    if (user.role === Role.city_officer) {
+      return { ...base, criterion: { in: criteria } };
+    }
 
     return {
       ...base,

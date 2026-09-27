@@ -24,48 +24,64 @@ export const resolutionRouter = Router();
 resolutionRouter.get(
   '/my-escalated-cases',
   requireAuth,
-  requireRole(Role.officer),
+  requireRole(Role.officer, Role.city_officer),
   validate({ query: listResolutionCasesQuerySchema }),
   asyncHandler(listMyEscalatedCases),
 );
 resolutionRouter.get(
   '/cases',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   validate({ query: listResolutionCasesQuerySchema }),
   asyncHandler(listResolutionCases),
 );
 resolutionRouter.get(
   '/cases/:id',
   requireAuth,
-  requireRole(Role.officer, Role.manager, Role.committee, Role.admin),
+  requireRole(
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+    Role.admin,
+  ),
   asyncHandler(getResolutionCase),
 );
 resolutionRouter.post(
   '/cases/:id/resolve',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ body: resolutionDecisionSchema }),
   asyncHandler(decideResolutionCase),
 );
 resolutionRouter.post(
   '/cases/:id/decision',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ body: resolutionDecisionSchema }),
   asyncHandler(decideResolutionCase),
 );
 resolutionRouter.patch(
   '/cases/:id/status',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.admin),
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ body: resolutionStatusUpdateSchema }),
   asyncHandler(updateResolutionCaseStatus),
 );
 resolutionRouter.post(
   '/cases/:id/reopen',
   requireAuth,
-  requireRole(Role.committee, Role.admin),
+  requireRole(Role.committee, Role.city_committee, Role.admin),
   validate({ body: reopenResolutionCaseSchema }),
   asyncHandler(reopenResolutionCase),
 );

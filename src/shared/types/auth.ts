@@ -1,4 +1,4 @@
-import type { Role } from '@prisma/client';
+import type { Role, WorkspaceType } from '@prisma/client';
 
 export type AuthenticatedUser = {
   id: string;
@@ -13,6 +13,7 @@ export type AuthenticatedUser = {
   workspace: {
     id: string;
     code: string;
+    type?: WorkspaceType;
     name: string;
     shortName: string | null;
   } | null;

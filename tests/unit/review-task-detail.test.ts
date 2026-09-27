@@ -9,8 +9,10 @@ import {
   MetricType,
   ReviewTaskStatus,
   Role,
+  WorkspaceType,
 } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { env } from '../../src/config/env';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
 const prismaMock = vi.hoisted(() => ({
@@ -118,9 +120,10 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
 describe('ReviewService demo officer permissions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    env.ENABLE_DEMO_REVIEW_BYPASS = false;
   });
 
-  it('allows a demo officer with matching specialization to act on a task assigned to another officer', async () => {
+  it('does not let a demo email bypass another officer assignment by default', async () => {
     const reviewRepository = {
       list: vi.fn().mockResolvedValue({
         items: [
@@ -144,6 +147,39 @@ describe('ReviewService demo officer permissions', () => {
     } as any);
 
     expect(result.items).toHaveLength(1);
+    expect(result.items[0].permissions).toMatchObject({
+      canView: true,
+      canAct: false,
+      canClaim: false,
+      canRequestSupport: true,
+      reason: 'assigned_to_other',
+    });
+  });
+
+  it('preserves legacy demo access only when explicitly enabled', async () => {
+    env.ENABLE_DEMO_REVIEW_BYPASS = true;
+    const reviewRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [
+          buildTask({
+            matchedEventId: null,
+            assignedOfficerId,
+            criterion: Criterion.ethics,
+          }),
+        ],
+        total: 1,
+      }),
+    };
+    const assignmentService = {
+      canOfficerHandleCriterion: vi.fn().mockResolvedValue(true),
+    };
+    const service = new ReviewService(reviewRepository as any, assignmentService as any);
+
+    const result = await service.listTasks(buildOfficerUser('officer.ethics@dut.udn.vn'), {
+      page: 1,
+      limit: 10,
+    } as any);
+
     expect(result.items[0].permissions).toMatchObject({
       canView: true,
       canAct: true,
@@ -185,20 +221,94 @@ describe('ReviewService demo officer permissions', () => {
   });
 });
 
+describe('City Officer access to School review tasks', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.auditLog.findMany.mockResolvedValue([]);
+    prismaMock.knowledgeBaseItem.findMany.mockResolvedValue([]);
+  });
+
+  it('allows cross-school read for a matching specialization but keeps another assignment read-only', async () => {
+    const task = buildTask({
+      matchedEventId: null,
+      assignedOfficerId: 'officer-school-b',
+      criterion: Criterion.ethics,
+    });
+    const reviewRepository = { findDetail: vi.fn().mockResolvedValue(task) };
+    const assignmentService = { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) };
+    const service = new ReviewService(reviewRepository as any, assignmentService as any);
+
+    const result = await service.getTaskDetail(cityOfficerUser(), 'task-1');
+
+    expect(assignmentService.canOfficerHandleCriterion).toHaveBeenCalledWith(
+      'city-officer',
+      Criterion.ethics,
+      'CNTT',
+      undefined,
+      Role.city_officer,
+    );
+    expect(result.task.permissions).toMatchObject({
+      canView: true,
+      canAct: false,
+      canClaim: false,
+      reason: 'assigned_to_other',
+    });
+  });
+
+  it('denies detail access to an assigned task when City Officer specialization is no longer active', async () => {
+    const task = buildTask({
+      matchedEventId: null,
+      assignedOfficerId: 'city-officer',
+      criterion: Criterion.ethics,
+    });
+    const assignmentService = { canOfficerHandleCriterion: vi.fn().mockResolvedValue(false) };
+    const service = new ReviewService({ findDetail: vi.fn().mockResolvedValue(task) } as any, assignmentService as any);
+
+    await expect(service.getTaskDetail(cityOfficerUser(), 'task-1')).rejects.toMatchObject({
+      statusCode: 403,
+    });
+
+    expect(assignmentService.canOfficerHandleCriterion).toHaveBeenCalled();
+  });
+
+  it('does not let an unassigned City Officer claim a final School task', async () => {
+    const task = buildTask({
+      matchedEventId: null,
+      criterion: Criterion.ethics,
+      status: ReviewTaskStatus.accepted,
+    });
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(task) } as any,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as any,
+    );
+
+    const result = await service.getTaskDetail(cityOfficerUser(), 'task-1');
+
+    expect(result.task.permissions).toMatchObject({
+      canView: true,
+      canAct: false,
+      canClaim: false,
+      reason: 'finalized',
+    });
+  });
+});
+
 function buildTask(input: {
   matchedEventId: string | null;
   normalizedFieldsJson?: Record<string, unknown>;
   assignedOfficerId?: string | null;
   criterion?: Criterion;
+  status?: ReviewTaskStatus;
 }) {
   return {
     id: 'task-1',
     workspaceId,
+    workspace: { type: 'SCHOOL', isActive: true },
     applicationId: 'app-1',
     collectiveProfileId: null,
     assignedOfficerId: input.assignedOfficerId ?? null,
     criterion: input.criterion ?? Criterion.academic,
-    status: ReviewTaskStatus.reviewing,
+    status: input.status ?? ReviewTaskStatus.reviewing,
     decision: null,
     officerNote: null,
     officerSuggestedLevel: null,
@@ -290,5 +400,26 @@ function buildOfficerUser(email: string): AuthenticatedUser {
     avatarUrl: null,
     workspaceId,
     workspace: null,
+  };
+}
+
+function cityOfficerUser(): AuthenticatedUser {
+  return {
+    id: 'city-officer',
+    email: 'officer@danang.city',
+    fullName: 'City Officer',
+    role: Role.city_officer,
+    studentCode: null,
+    className: null,
+    faculty: null,
+    avatarUrl: null,
+    workspaceId: 'city-workspace',
+    workspace: {
+      id: 'city-workspace',
+      code: 'DANANG_CITY',
+      type: WorkspaceType.CITY,
+      name: 'Da Nang',
+      shortName: 'Da Nang',
+    },
   };
 }

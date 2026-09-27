@@ -107,6 +107,103 @@ describe('student communication assistant answer validation', () => {
     expect(parsed.answer).toContain('Kết quả chính thức vẫn do cán bộ');
   });
 
+  it('falls back when the model exposes internal implementation language', () => {
+    const parsed = parseAndValidateAnswer(
+      JSON.stringify({
+        answer: 'Trạng thái needs_manual_review đến từ OCR provider và rawResponseJson.',
+        intent: 'explain_supplement',
+        sourceRefs: [{ factId: 'supplement-message', label: 'Yêu cầu từ cán bộ' }],
+        suggestedActionId: 'resubmit-supplement:task-1',
+        requiresOfficerClarification: false,
+      }),
+      context(),
+    );
+
+    expect(parsed.answer).not.toContain('needs_manual_review');
+    expect(parsed.answer).not.toContain('rawResponseJson');
+  });
+
+  it('does not answer criteria questions from a non-criteria context without criteria facts', () => {
+    const parsed = parseAndValidateAnswer(
+      JSON.stringify({
+        answer: 'Cấp Đại học Đà Nẵng yêu cầu GPA 3,2.',
+        intent: 'explain_criterion',
+        sourceRefs: [{ factId: 'supplement-message', label: 'Yêu cầu từ cán bộ' }],
+        suggestedActionId: 'resubmit-supplement:task-1',
+        requiresOfficerClarification: false,
+      }),
+      context(),
+      'Cấp Đại học Đà Nẵng cần GPA bao nhiêu?',
+    );
+
+    expect(parsed.intent).toBe('out_of_scope');
+    expect(parsed.answer).toContain('không thuộc nội dung');
+  });
+
+  it('falls back when criteria answer invents a number not present in backend facts', () => {
+    const criteriaContext: StudentAssistantContext = {
+      ...context(),
+      contextType: 'criteria',
+      title: 'Trợ lý tiêu chí cấp Đại học Đà Nẵng',
+      deterministicSummary: 'Tiêu chí Học tập yêu cầu GPA từ 3,2/4,0 và một thành tích học thuật bổ sung.',
+      facts: [
+        {
+          id: 'criteria:academic:gpa',
+          type: 'criteria_rule',
+          label: 'Học tập tốt',
+          value: 'GPA từ 3,2/4,0 và một thành tích học thuật bổ sung',
+          verified: true,
+        },
+      ],
+      primaryAction: null,
+      allowedActions: [],
+    };
+    const parsed = parseAndValidateAnswer(
+      JSON.stringify({
+        answer: 'Bạn cần GPA từ 3,5/4,0 và một thành tích học thuật bổ sung.',
+        intent: 'explain_criterion',
+        sourceRefs: [{ factId: 'criteria:academic:gpa', label: 'Học tập tốt' }],
+        requiresOfficerClarification: false,
+      }),
+      criteriaContext,
+      'Cấp Đại học Đà Nẵng cần GPA bao nhiêu?',
+    );
+
+    expect(parsed.answer).toContain('3,2/4,0');
+    expect(parsed.answer).not.toContain('3,5');
+  });
+
+  it('answers identify-evidence questions directly in the first sentence', () => {
+    const evidenceContext = {
+      ...context(),
+      contextType: 'evidence_card' as const,
+      title: 'Trợ lý minh chứng: Học bổng Synopsys',
+      facts: [
+        {
+          id: 'evidence-name',
+          type: 'evidence_field' as const,
+          label: 'Tên minh chứng',
+          value: 'Học bổng Synopsys IC Design Scholarship 2025',
+          verified: true,
+        },
+      ],
+    };
+
+    const parsed = parseAndValidateAnswer(
+      JSON.stringify({
+        answer: 'Thông tin này được lấy từ dữ liệu minh chứng trong hồ sơ.',
+        intent: 'explain_evidence',
+        sourceRefs: [{ factId: 'evidence-name', label: 'Tên minh chứng' }],
+        suggestedActionId: 'resubmit-supplement:task-1',
+        requiresOfficerClarification: false,
+      }),
+      evidenceContext,
+      'Đây là minh chứng gì?',
+    );
+
+    expect(parsed.answer.startsWith('Đây là minh chứng về Học bổng Synopsys')).toBe(true);
+  });
+
   it('uses strict OpenAI structured output settings and a safety identifier', async () => {
     const output = JSON.stringify({
       answer:

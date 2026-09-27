@@ -304,8 +304,12 @@ export function resolveStudentStatusForCard(input: {
     return evidenceStudentStatuses.unreadable_file;
   }
 
+  const readableSummary = buildReadableSummary(input.fields);
+  const hasStructuredFields = Object.keys(readableSummary).length > 0;
+
   if (
     !input.ocrText?.trim() &&
+    !hasStructuredFields &&
     input.indexingStatus !== 'not_started' &&
     input.indexingStatus !== 'pending_indexing'
   ) {
@@ -330,7 +334,7 @@ export function resolveStudentStatusForCard(input: {
     return evidenceStudentStatuses.recorded_waiting_review;
   }
 
-  if (input.ocrText?.trim()) {
+  if (input.ocrText?.trim() || hasStructuredFields) {
     return evidenceStudentStatuses.evidence_read;
   }
 

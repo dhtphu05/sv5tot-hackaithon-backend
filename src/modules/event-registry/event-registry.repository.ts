@@ -6,6 +6,7 @@ import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import type { ListEventsQuery, ParticipantsQuery } from './event-registry.validation';
 
 export const eventInclude = {
+  workspace: { select: { type: true, isActive: true } },
   eventFiles: {
     include: { file: true },
     orderBy: { createdAt: 'desc' },
@@ -72,8 +73,18 @@ export class EventRegistryRepository {
             }
           : {};
 
+    const workspaceScope: Prisma.EventRegistryWhereInput =
+      user.role === Role.student || user.role === Role.class_representative
+        ? {
+            OR: [
+              { workspaceId: user.workspaceId ?? undefined },
+              { workspace: { is: { type: 'CITY', isActive: true } } },
+            ],
+          }
+        : workspaceFilterFor(user);
+
     const where: Prisma.EventRegistryWhereInput = {
-      ...workspaceFilterFor(user),
+      ...workspaceScope,
       ...studentVisibility,
       ...(query.criterion ? { criterion: query.criterion } : {}),
       ...(query.organizerLevel ? { organizerLevel: query.organizerLevel } : {}),
@@ -87,9 +98,13 @@ export class EventRegistryRepository {
         : {}),
       ...(query.q
         ? {
-            OR: [
-              { eventName: { contains: query.q, mode: 'insensitive' } },
-              { organizer: { contains: query.q, mode: 'insensitive' } },
+            AND: [
+              {
+                OR: [
+                  { eventName: { contains: query.q, mode: 'insensitive' } },
+                  { organizer: { contains: query.q, mode: 'insensitive' } },
+                ],
+              },
             ],
           }
         : {}),

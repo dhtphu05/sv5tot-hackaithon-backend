@@ -1,5 +1,7 @@
 import type OpenAI from 'openai';
 import { env } from '../../../config/env';
+import { AppError } from '../../../shared/errors/app-error';
+import { ErrorCodes } from '../../../shared/errors/error-codes';
 import { getOpenAiClient } from '../../ai/openai-client';
 import type { StudentAssistantContext } from './student-assistant.dto';
 
@@ -19,8 +21,11 @@ export type AssistantNarrativeProvider = {
 };
 
 export function createAssistantNarrativeProvider(): AssistantNarrativeProvider {
-  if (env.ASSISTANT_NARRATIVE_PROVIDER === 'mock') {
+  if (env.ASSISTANT_NARRATIVE_PROVIDER === 'mock' && env.NODE_ENV === 'test') {
     return new MockAssistantNarrativeProvider(env.ASSISTANT_MOCK_STREAM_DELAY_MS);
+  }
+  if (env.ASSISTANT_NARRATIVE_PROVIDER === 'disabled' && env.NODE_ENV === 'test') {
+    return new DisabledAssistantNarrativeProvider();
   }
   if (env.ASSISTANT_NARRATIVE_PROVIDER === 'openai' && env.OPENAI_API_KEY && env.OPENAI_ASSISTANT_MODEL) {
     return new OpenAiAssistantNarrativeProvider({
@@ -31,7 +36,12 @@ export function createAssistantNarrativeProvider(): AssistantNarrativeProvider {
       promptVersion: env.OPENAI_ASSISTANT_PROMPT_VERSION,
     });
   }
-  return new DisabledAssistantNarrativeProvider();
+  throw new AppError(
+    503,
+    ErrorCodes.ASSISTANT_NARRATIVE_UNAVAILABLE,
+    'Dashboard assistant narrative requires OpenAI runtime configuration',
+    { retryable: false },
+  );
 }
 
 export class MockAssistantNarrativeProvider implements AssistantNarrativeProvider {
