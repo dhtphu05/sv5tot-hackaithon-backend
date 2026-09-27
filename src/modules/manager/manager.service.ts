@@ -19,7 +19,11 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { facultyMatches } from '../../shared/utils/faculty';
 import { assertSameWorkspace, workspaceFilterFor } from '../../shared/utils/workspace-scope';
-import { assertReviewWorkspaceAccess, reviewWorkspaceFilterFor } from '../../shared/utils/review-workspace-scope';
+import {
+  assertReviewWorkspaceAccess,
+  currentReviewTaskApplicationFilter,
+  reviewWorkspaceFilterFor,
+} from '../../shared/utils/review-workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
 import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
@@ -280,7 +284,9 @@ export class ManagerService {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'This role cannot view management workloads');
     }
     const applicationScope = reviewWorkspaceFilterFor(user);
-    const taskScope = reviewWorkspaceFilterFor(user);
+    const taskScope: Prisma.ReviewTaskWhereInput = {
+      AND: [reviewWorkspaceFilterFor(user), currentReviewTaskApplicationFilter()],
+    };
     const resolutionScope = reviewWorkspaceFilterFor(user);
     const userScope = workspaceFilterFor(user);
     const cityManager = user.role === Role.city_manager;
@@ -348,7 +354,9 @@ export class ManagerService {
         include: {
           officerSpecializations: { where: { isActive: true } },
           assignedReviewTasks: {
-            where: cityManager ? reviewWorkspaceFilterFor(user) : undefined,
+            where: cityManager
+              ? { AND: [reviewWorkspaceFilterFor(user), currentReviewTaskApplicationFilter()] }
+              : currentReviewTaskApplicationFilter(),
             select: { status: true },
           },
         },
@@ -762,14 +770,18 @@ export class ManagerService {
         include: {
           officerSpecializations: { where: { isActive: true } },
           assignedReviewTasks: {
-            where: cityManager ? scope : undefined,
+            where: cityManager
+              ? { AND: [scope, currentReviewTaskApplicationFilter()] }
+              : currentReviewTaskApplicationFilter(),
             select: { status: true, dueDate: true },
           },
         },
         orderBy: { fullName: 'asc' },
       }),
       prisma.reviewTask.findMany({
-        where: { ...scope, assignedOfficerId: null },
+        where: {
+          AND: [scope, currentReviewTaskApplicationFilter(), { assignedOfficerId: null }],
+        },
         select: { criterion: true, status: true, dueDate: true },
       }),
     ]);

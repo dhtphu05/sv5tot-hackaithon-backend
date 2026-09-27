@@ -1,6 +1,7 @@
 import { Criterion, ReviewTaskStatus } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../../../infrastructure/database/prisma';
+import { currentReviewTaskApplicationFilter } from '../../../shared/utils/review-workspace-scope';
 import type { ChatbotToolDefinition, ChatbotToolResult } from './chatbot-tool.types';
 import { ChatbotToolPermissionService } from './tool-permission.service';
 
@@ -25,10 +26,13 @@ export const officerTools: ChatbotToolDefinition[] = [
         .parse(input);
       const tasks = await prisma.reviewTask.findMany({
         where: {
-          ...workspaceFilter(ctx),
-          ...(ctx.role === 'officer' ? { assignedOfficerId: ctx.userId } : {}),
-          ...(parsed.status ? { status: parsed.status } : {}),
-          ...(parsed.criterion ? { criterion: parsed.criterion } : {}),
+          AND: [
+            workspaceFilter(ctx),
+            currentReviewTaskApplicationFilter(),
+            ...(ctx.role === 'officer' ? [{ assignedOfficerId: ctx.userId }] : []),
+            ...(parsed.status ? [{ status: parsed.status }] : []),
+            ...(parsed.criterion ? [{ criterion: parsed.criterion }] : []),
+          ],
         },
         include: { evidences: true },
         take: 100,

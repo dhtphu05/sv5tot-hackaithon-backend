@@ -1,6 +1,7 @@
 import { Criterion, Role, ReviewTaskStatus, WorkspaceType, type Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { facultyMatches } from '../../shared/utils/faculty';
+import { currentReviewTaskApplicationFilter } from '../../shared/utils/review-workspace-scope';
 
 const activeTaskStatuses = [
   ReviewTaskStatus.waiting,
@@ -79,6 +80,7 @@ export class ReviewAssignmentService {
       where: {
         assignedOfficerId: { in: officerIds },
         status: { in: activeTaskStatuses },
+        ...currentReviewTaskApplicationFilter(),
       },
       _count: { _all: true },
     });

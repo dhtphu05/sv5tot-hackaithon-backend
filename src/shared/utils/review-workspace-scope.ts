@@ -1,4 +1,4 @@
-import { Role, WorkspaceType } from '@prisma/client';
+import { Role, WorkspaceType, type Prisma } from '@prisma/client';
 import { AppError } from '../errors/app-error';
 import { ErrorCodes } from '../errors/error-codes';
 import type { AuthenticatedUser } from '../types/auth';
@@ -15,6 +15,15 @@ type ReviewWorkspaceFilter = {
   workspace?: { is: { id?: string; type?: WorkspaceType; isActive?: boolean } };
   OR?: ReviewWorkspaceFilter[];
 };
+
+export function currentReviewTaskApplicationFilter(): Prisma.ReviewTaskWhereInput {
+  return {
+    OR: [
+      { applicationId: null },
+      { application: { is: { cancelledAt: null } } },
+    ],
+  };
+}
 
 export function isCityReviewRole(role: Role): boolean {
   return cityReviewRoles.has(role);

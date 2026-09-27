@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '../../../infrastructure/database/prisma';
+import { currentReviewTaskApplicationFilter } from '../../../shared/utils/review-workspace-scope';
 import type { ChatbotToolDefinition } from './chatbot-tool.types';
 
 export const managerTools: ChatbotToolDefinition[] = [
@@ -13,7 +14,11 @@ export const managerTools: ChatbotToolDefinition[] = [
       const scope = workspaceFilter(ctx);
       const [applications, pending, supplement, resolution] = await Promise.all([
         prisma.application.groupBy({ by: ['status'], where: scope, _count: { status: true } }),
-        prisma.reviewTask.count({ where: { ...scope, status: { in: ['waiting', 'reviewing'] } } }),
+        prisma.reviewTask.count({
+          where: {
+            AND: [scope, currentReviewTaskApplicationFilter(), { status: { in: ['waiting', 'reviewing'] } }],
+          },
+        }),
         prisma.application.count({ where: { ...scope, status: 'supplement_required' } }),
         prisma.application.count({ where: { ...scope, status: 'resolution_needed' } }),
       ]);
@@ -33,7 +38,9 @@ export const managerTools: ChatbotToolDefinition[] = [
     handler: async (ctx) => {
       const workloads = await prisma.reviewTask.groupBy({
         by: ['criterion', 'assignedOfficerId'],
-        where: { ...workspaceFilter(ctx), status: { in: ['waiting', 'reviewing'] } },
+        where: {
+          AND: [workspaceFilter(ctx), currentReviewTaskApplicationFilter(), { status: { in: ['waiting', 'reviewing'] } }],
+        },
         _count: { id: true },
       });
       return {
@@ -56,8 +63,11 @@ export const managerTools: ChatbotToolDefinition[] = [
       const grouped = await prisma.reviewTask.groupBy({
         by: ['criterion'],
         where: {
-          ...workspaceFilter(ctx),
-          status: { in: ['waiting', 'reviewing', 'supplement_required', 'resolution_needed'] },
+          AND: [
+            workspaceFilter(ctx),
+            currentReviewTaskApplicationFilter(),
+            { status: { in: ['waiting', 'reviewing', 'supplement_required', 'resolution_needed'] } },
+          ],
         },
         _count: { id: true },
         orderBy: { _count: { id: 'desc' } },
