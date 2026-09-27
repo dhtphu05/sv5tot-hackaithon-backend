@@ -1104,7 +1104,7 @@ export class ReviewService {
       }
 
       return { task: saved, applicationOutcome };
-    });
+    }, { maxWait: 10_000, timeout: 30_000 });
 
     return {
       task: result.task,
