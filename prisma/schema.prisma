@@ -389,6 +389,10 @@ model User {
   collectiveProfiles       CollectiveProfile[]
   assignedReviewTasks      ReviewTask[]
   finalizedApplications    Application[]                    @relation("ApplicationFinalizedBy")
+  cancelledApplications   Application[]                    @relation("ApplicationCancelledBy")
+  archivedApplications    Application[]                    @relation("ApplicationArchivedBy")
+  finalizedDecisionHistories ApplicationFinalDecisionHistory[] @relation("ApplicationFinalDecisionHistoryFinalizedBy")
+  supersededDecisionHistories ApplicationFinalDecisionHistory[] @relation("ApplicationFinalDecisionHistorySupersededBy")
   createdSupplementRequests SupplementRequest[]              @relation("SupplementRequestCreatedBy")
   eligibilityVerifications  ApplicationEligibilityVerification[] @relation("EligibilityVerificationDecidedBy")
   grantedSubmissionExceptions CitySubmissionWindowException[] @relation("SubmissionWindowExceptionGrantedBy")
@@ -445,11 +449,19 @@ model Application {
   finalNote            String?
   finalizedAt          DateTime?
   finalizedById        String?                          @db.Uuid
+  cancelledAt          DateTime?
+  cancelledById        String?                          @db.Uuid
+  cancelReason         String?
+  archivedAt           DateTime?
+  archivedById         String?                          @db.Uuid
+  archiveReason        String?
   createdAt            DateTime                         @default(now())
   updatedAt            DateTime                         @updatedAt
   workspace            Workspace                        @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   student              User                             @relation(fields: [studentId], references: [id], onDelete: Cascade)
   finalizedBy          User?                            @relation("ApplicationFinalizedBy", fields: [finalizedById], references: [id], onDelete: SetNull)
+  cancelledBy          User?                            @relation("ApplicationCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
+  archivedBy           User?                            @relation("ApplicationArchivedBy", fields: [archivedById], references: [id], onDelete: SetNull)
   draftSnapshots       ApplicationDraftSnapshot[]
   metrics              ApplicationMetric[]
   evidences            Evidence[]
@@ -463,6 +475,7 @@ model Application {
   supplementRequests   SupplementRequest[]
   eligibilityVerification ApplicationEligibilityVerification?
   submissionWindowException CitySubmissionWindowException?
+  finalDecisionHistory ApplicationFinalDecisionHistory[]
 
   @@unique([studentId, schoolYear, applicationType])
   @@unique([workspaceId, studentId, schoolYear, applicationType])
@@ -474,6 +487,27 @@ model Application {
   @@index([finalStatus, finalLevel])
   @@index([finalizedById])
   @@index([studentId, schoolYear])
+  @@index([workspaceId, cancelledAt, archivedAt])
+}
+
+model ApplicationFinalDecisionHistory {
+  id             String       @id @default(uuid()) @db.Uuid
+  applicationId  String       @db.Uuid
+  finalStatus    FinalStatus
+  finalLevel     Level?
+  finalNote      String?
+  finalizedAt    DateTime?
+  finalizedById  String?      @db.Uuid
+  supersededAt   DateTime
+  supersededById String?      @db.Uuid
+  supersedeReason String
+  createdAt      DateTime     @default(now())
+  application    Application  @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+  finalizedBy    User?        @relation("ApplicationFinalDecisionHistoryFinalizedBy", fields: [finalizedById], references: [id], onDelete: SetNull)
+  supersededBy   User?        @relation("ApplicationFinalDecisionHistorySupersededBy", fields: [supersededById], references: [id], onDelete: SetNull)
+
+  @@index([applicationId, supersededAt])
+  @@index([supersededById])
 }
 
 model ApplicationEligibilityVerification {
