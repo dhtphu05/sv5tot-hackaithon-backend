@@ -14,9 +14,14 @@ const exportBaseQuerySchema = z.object({
   toDate: z.string().datetime().optional(),
 });
 
-export const exportApplicationsQuerySchema = exportBaseQuerySchema;
+const exportLifecycleSchema = z.enum(['active', 'cancelled', 'all']).default('active');
+
+export const exportApplicationsQuerySchema = exportBaseQuerySchema.extend({
+  lifecycle: exportLifecycleSchema,
+});
 
 export const exportReviewTasksQuerySchema = exportBaseQuerySchema.extend({
+  lifecycle: exportLifecycleSchema,
   criterion: z.nativeEnum(Criterion).optional(),
 });
 

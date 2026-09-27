@@ -190,6 +190,7 @@ export class ExportsService {
   private async buildRows(user: AuthenticatedUser, input: ExportReviewResultsInput) {
     const where: Prisma.ApplicationWhereInput = {
       ...reviewWorkspaceFilterFor(user),
+      cancelledAt: null,
       ...(input.schoolYear ? { schoolYear: input.schoolYear } : {}),
       ...(input.status ? { status: input.status } : {}),
       ...(input.targetLevel ? { targetLevel: input.targetLevel } : {}),
@@ -253,7 +254,11 @@ export class ExportsService {
   }
 
   private async buildApplicationRows(user: AuthenticatedUser, query: ExportApplicationsQuery) {
-    const where = { ...buildApplicationWhere(query), ...reviewWorkspaceFilterFor(user) };
+    const where = {
+      ...buildApplicationWhere(query),
+      ...buildLifecycleWhere(query.lifecycle),
+      ...reviewWorkspaceFilterFor(user),
+    };
     const applications = await prisma.application.findMany({
       where,
       include: {
@@ -292,7 +297,10 @@ export class ExportsService {
     const where: Prisma.ReviewTaskWhereInput = {
       ...reviewWorkspaceFilterFor(user),
       ...(query.criterion ? { criterion: query.criterion } : {}),
-      application: buildApplicationWhere(query),
+      application: {
+        ...buildApplicationWhere(query),
+        ...buildLifecycleWhere(query.lifecycle),
+      },
     };
     const tasks = await prisma.reviewTask.findMany({
       where,
@@ -345,6 +353,13 @@ function buildApplicationWhere(input: ExportApplicationsQuery): Prisma.Applicati
         }
       : {}),
   };
+}
+
+function buildLifecycleWhere(
+  lifecycle: ExportApplicationsQuery['lifecycle'] = 'active',
+): Prisma.ApplicationWhereInput {
+  if (lifecycle === 'all') return {};
+  return lifecycle === 'cancelled' ? { cancelledAt: { not: null } } : { cancelledAt: null };
 }
 
 function buildExportDecisionReason(

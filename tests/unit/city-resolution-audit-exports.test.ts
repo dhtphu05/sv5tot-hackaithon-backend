@@ -506,7 +506,10 @@ describe('City audit and export scope', () => {
     await new ExportsService().exportApplicationsJson(cityUser(Role.city_committee), {} as never);
     expect(prisma.application.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        where: { workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } } },
+        where: {
+          cancelledAt: null,
+          workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+        },
       }),
     );
 
@@ -515,7 +518,10 @@ describe('City audit and export scope', () => {
     } as never);
     expect(prisma.application.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        where: { workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } } },
+        where: {
+          cancelledAt: null,
+          workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+        },
       }),
     );
 
@@ -524,7 +530,7 @@ describe('City audit and export scope', () => {
       expect.objectContaining({
         where: {
           workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
-          application: {},
+          application: { cancelledAt: null },
         },
       }),
     );
