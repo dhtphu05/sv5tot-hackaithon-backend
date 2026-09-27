@@ -1097,7 +1097,7 @@ export class ManagerService {
     const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
     if (!overrideRecommendation) {
       const cityHumanReviewComplete =
-        isCityIndividualApplication(aggregation.application) &&
+        isCityIndividualApplication(applicationForCascade) &&
         aggregation.reviewProgress.totalTasks > 0 &&
         aggregation.reviewProgress.accepted + aggregation.reviewProgress.rejected ===
           aggregation.reviewProgress.totalTasks &&
@@ -1140,7 +1140,7 @@ export class ManagerService {
 
     return prisma.$transaction(async (tx) => {
       const before = await tx.application.findUniqueOrThrow({ where: { id: applicationId } });
-      const cityIndividual = isCityIndividualApplication(aggregation.application);
+      const cityIndividual = isCityIndividualApplication(applicationForCascade);
       const finalizationData = {
         status,
         finalStatus: input.finalStatus,

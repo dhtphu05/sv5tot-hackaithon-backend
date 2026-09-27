@@ -596,17 +596,25 @@ describe('non-AI individual application end-to-end flow', () => {
       })
       .expect(403);
 
-    const finalized = await request(app)
-      .post(`/api/manager/applications/${applicationId}/finalize`)
-      .set('Authorization', `Bearer ${cityCommittee.accessToken}`)
-      .send({
-        finalStatus: FinalStatus.passed,
-        finalLevel: Level.school,
-        finalNote: 'City Committee confirms the result after reviewing advisory warnings.',
-        overrideAggregation: false,
-        notifyStudent: true,
-      })
-      .expect(200);
+    const finalizePayload = {
+      finalStatus: FinalStatus.passed,
+      finalLevel: Level.school,
+      finalNote: 'City Committee confirms the result after reviewing advisory warnings.',
+      overrideAggregation: false,
+      notifyStudent: true,
+    };
+    const finalizeAttempts = await Promise.all([
+      request(app)
+        .post(`/api/manager/applications/${applicationId}/finalize`)
+        .set('Authorization', `Bearer ${cityCommittee.accessToken}`)
+        .send(finalizePayload),
+      request(app)
+        .post(`/api/manager/applications/${applicationId}/finalize`)
+        .set('Authorization', `Bearer ${cityCommittee.accessToken}`)
+        .send(finalizePayload),
+    ]);
+    expect(finalizeAttempts.map((response) => response.status).sort()).toEqual([200, 409]);
+    const finalized = finalizeAttempts.find((response) => response.status === 200)!;
     expect(finalized.body.data.finalResult).toMatchObject({
       finalStatus: FinalStatus.passed,
       finalLevel: Level.school,
@@ -616,6 +624,9 @@ describe('non-AI individual application end-to-end flow', () => {
       status: 'completed',
       finalStatus: FinalStatus.passed,
     });
+    expect(
+      await prisma.auditLog.count({ where: { applicationId, action: 'APPLICATION_FINALIZED' } }),
+    ).toBe(1);
 
     const notifications = await request(app)
       .get('/api/notifications')

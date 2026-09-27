@@ -1,4 +1,12 @@
-import { ApplicationStatus, Criterion, Role, WorkspaceType } from '@prisma/client';
+import {
+  ApplicationStatus,
+  ApplicationType,
+  Criterion,
+  FinalStatus,
+  Level,
+  Role,
+  WorkspaceType,
+} from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
@@ -418,5 +426,97 @@ describe('ManagerService City workspace scope', () => {
     ).rejects.toMatchObject({ statusCode: 403 });
     expect(prismaMock.user.findMany).not.toHaveBeenCalled();
     expect(prismaMock.reviewTask.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('uses the conditional finalization update for a City application despite the aggregation projection', async () => {
+    const application = {
+      id: 'city-application-1',
+      applicationType: ApplicationType.individual,
+      targetLevel: Level.city,
+      workspaceId: schoolAId,
+      status: ApplicationStatus.under_review,
+      finalStatus: FinalStatus.pending,
+      finalLevel: null,
+      finalNote: null,
+      finalizedAt: null,
+      finalizedById: null,
+      updatedAt: new Date(),
+      createdAt: new Date(),
+      readinessScore: 0,
+      submittedAt: new Date(),
+      student: { id: 'student-1', fullName: 'Student', email: 'student@example.test' },
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      reviewTasks: [],
+      resolutionCases: [],
+      cascadeReviews: [],
+      metrics: [],
+      evidences: [],
+      requirementResponses: [],
+      precheckResults: [],
+    };
+    prismaMock.application.findUnique.mockResolvedValue(application);
+
+    const tx = {
+      application: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue(application),
+        findUnique: vi.fn().mockResolvedValue({ workspaceId: schoolAId }),
+        updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+        update: vi.fn().mockResolvedValue({
+          ...application,
+          status: ApplicationStatus.completed,
+          finalStatus: FinalStatus.passed,
+          finalLevel: Level.city,
+          finalizedAt: new Date(),
+        }),
+      },
+      cascadeReview: { create: vi.fn().mockResolvedValue({ id: 'cascade-1' }) },
+      auditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+    prismaMock.$transaction.mockImplementation((callback: (transaction: unknown) => unknown) =>
+      callback(tx),
+    );
+
+    const service = new ManagerService();
+    vi.spyOn(service, 'getAggregation').mockResolvedValue({
+      application: {
+        id: application.id,
+        targetLevel: Level.city,
+        status: ApplicationStatus.under_review,
+        finalStatus: FinalStatus.pending,
+        finalLevel: null,
+        finalizedAt: null,
+        readinessScore: 0,
+      },
+      reviewProgress: { totalTasks: 5, accepted: 5, rejected: 0 },
+      resolutionSummary: { open: 0 },
+      canFinalize: true,
+      latestCascade: null,
+    } as never);
+
+    await expect(
+      service.finalizeApplication(
+        { ...cityManager, role: Role.city_committee },
+        application.id,
+        {
+          finalStatus: FinalStatus.passed,
+          finalLevel: Level.city,
+          finalNote: 'Final review complete.',
+          overrideAggregation: false,
+          notifyStudent: false,
+        } as never,
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(tx.application.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: application.id,
+        finalStatus: FinalStatus.pending,
+        finalizedAt: null,
+      },
+      data: expect.objectContaining({ status: ApplicationStatus.completed }),
+    });
+    expect(tx.application.update).not.toHaveBeenCalled();
+    expect(tx.cascadeReview.create).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
   });
 });
