@@ -26,6 +26,7 @@ import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.se
 import { toJsonValue } from '../rules/criteria.loader';
 import { buildReviewProgress } from '../review/review-progress.service';
 import { CitySubmissionEligibilityService } from '../applications/city-submission-eligibility.service';
+import { lockApplicationAndAssertNotCancelled } from '../applications/application-lifecycle.policy';
 import type {
   AggregateApplicationInput,
   AssignReviewTaskInput,
@@ -1325,14 +1326,42 @@ export class ManagerService {
         'Only City Managers, City Committee, or admins may reopen City results',
       );
     }
-    if (
-      application.status !== ApplicationStatus.completed &&
-      application.status !== ApplicationStatus.rejected
-    ) {
-      return application;
-    }
-
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, applicationId);
+      const lockedApplication = await tx.application.findUnique({
+        where: { id: applicationId },
+        include: { workspace: { select: { type: true, isActive: true } } },
+      });
+      if (!lockedApplication) {
+        throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+      }
+      assertReviewWorkspaceAccess(user, reviewResource(lockedApplication), 'Application not found');
+      if (
+        lockedApplication.status !== ApplicationStatus.completed &&
+        lockedApplication.status !== ApplicationStatus.rejected
+      ) {
+        return lockedApplication;
+      }
+
+      if (
+        lockedApplication.finalizedAt !== null ||
+        lockedApplication.finalStatus !== FinalStatus.pending
+      ) {
+        await tx.applicationFinalDecisionHistory.create({
+          data: {
+            applicationId,
+            finalStatus: lockedApplication.finalStatus,
+            finalLevel: lockedApplication.finalLevel,
+            finalNote: lockedApplication.finalNote,
+            finalizedAt: lockedApplication.finalizedAt,
+            finalizedById: lockedApplication.finalizedById,
+            supersededAt: new Date(),
+            supersededById: user.id,
+            supersedeReason: input.reason,
+          },
+        });
+      }
+
       const updated = await tx.application.update({
         where: { id: applicationId },
         data: {
@@ -1352,9 +1381,9 @@ export class ManagerService {
         targetId: applicationId,
         applicationId,
         beforeStateJson: {
-          status: application.status,
-          finalStatus: application.finalStatus,
-          finalLevel: application.finalLevel,
+          status: lockedApplication.status,
+          finalStatus: lockedApplication.finalStatus,
+          finalLevel: lockedApplication.finalLevel,
         },
         afterStateJson: { status: updated.status, finalStatus: updated.finalStatus },
         note: input.reason,
