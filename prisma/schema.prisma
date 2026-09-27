@@ -391,6 +391,8 @@ model User {
   finalizedApplications    Application[]                    @relation("ApplicationFinalizedBy")
   createdSupplementRequests SupplementRequest[]              @relation("SupplementRequestCreatedBy")
   eligibilityVerifications  ApplicationEligibilityVerification[] @relation("EligibilityVerificationDecidedBy")
+  grantedSubmissionExceptions CitySubmissionWindowException[] @relation("SubmissionWindowExceptionGrantedBy")
+  revokedSubmissionExceptions CitySubmissionWindowException[] @relation("SubmissionWindowExceptionRevokedBy")
 
   @@unique([workspaceId, studentCode])
   @@index([role])
@@ -460,6 +462,7 @@ model Application {
   auditLogs            AuditLog[]
   supplementRequests   SupplementRequest[]
   eligibilityVerification ApplicationEligibilityVerification?
+  submissionWindowException CitySubmissionWindowException?
 
   @@unique([studentId, schoolYear, applicationType])
   @@unique([workspaceId, studentId, schoolYear, applicationType])
@@ -487,6 +490,40 @@ model ApplicationEligibilityVerification {
   decidedBy     User                                      @relation("EligibilityVerificationDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict)
 
   @@index([decidedById])
+}
+
+model CityReviewSeason {
+  id                     String   @id @default(uuid()) @db.Uuid
+  schoolYear             String   @unique
+  submissionOpensAt      DateTime?
+  submissionClosesAt     DateTime?
+  reviewDeadlineAt       DateTime?
+  supplementDeadlineAt   DateTime?
+  finalizationDeadlineAt DateTime?
+  version                Int      @default(1)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@index([schoolYear, version])
+}
+
+model CitySubmissionWindowException {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @unique @db.Uuid
+  validUntil    DateTime
+  reason        String
+  grantedById   String      @db.Uuid
+  grantedAt     DateTime    @default(now())
+  revokedAt     DateTime?
+  revokedById   String?     @db.Uuid
+  revokeReason  String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  grantedBy     User        @relation("SubmissionWindowExceptionGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+  revokedBy     User?       @relation("SubmissionWindowExceptionRevokedBy", fields: [revokedById], references: [id], onDelete: SetNull)
+
+  @@index([validUntil, revokedAt])
 }
 
 model ApplicationDraftSnapshot {

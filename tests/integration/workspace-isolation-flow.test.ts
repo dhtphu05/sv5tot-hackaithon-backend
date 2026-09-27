@@ -1,6 +1,8 @@
 import {
   ApplicationStatus,
   ApplicationType,
+  AwardDecisionStatus,
+  AwardLevel,
   Criterion,
   DecisionImportStatus,
   FileStorageType,
@@ -25,11 +27,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { prisma } from '../../src/infrastructure/database/prisma';
 import { PasswordService } from '../../src/modules/auth/password.service';
+import { TokenService } from '../../src/modules/auth/token.service';
 
 const app = createApp();
+const tokenService = new TokenService();
 const validPassphrase = process.env.SEED_DEFAULT_PASSWORD ?? ['Password', '@123'].join('');
 const schoolYear = '2097-2098';
-const runId = `ab-${Date.now()}-${randomUUID().slice(0, 8)}`;
+const runId = process.env.E2E_P3B_RUN_PREFIX ?? `ab-${Date.now()}-${randomUUID().slice(0, 8)}`;
 const uploadRoot = path.resolve(process.env.UPLOAD_DIR ?? './uploads');
 
 type TokenBundle = {
@@ -687,9 +691,14 @@ async function cleanupFixture(current: Fixture | null) {
     prisma.decisionDocument.deleteMany({ where: { decisionImportId: { in: decisionImportIds } } }),
     prisma.indexingJob.deleteMany({
       where: {
-        id: {
-          in: [current.a.jobId, current.b.jobId, current.mismatchJobId, ...current.createdUploadJobIds],
-        },
+        OR: [
+          {
+            id: {
+              in: [current.a.jobId, current.b.jobId, current.mismatchJobId, ...current.createdUploadJobIds],
+            },
+          },
+          { workspaceId: { in: workspaceIds } },
+        ],
       },
     }),
     prisma.smartReaderJob.deleteMany({ where: { workspaceId: { in: workspaceIds } } }),
@@ -782,6 +791,511 @@ describe('workspace A/B HTTP isolation flow', () => {
       .expect(200);
     expectBodyNotToContain(inbox, b.applicationId, b.resolutionCaseId, b.studentCode);
   });
+
+  it('enforces the City submission season and application-scoped deadline exceptions', async () => {
+    const current = fixture!;
+    const now = new Date();
+    const startYear = 1900 + (Date.now() % 90);
+    const seasonYear = process.env.E2E_P3B_SCHOOL_YEAR ?? `${startYear}-${startYear + 1}`;
+    const workspace = await prisma.workspace.create({
+      data: {
+        code: `CITY-SEASON-${runId}`.toUpperCase(),
+        name: `City Season School ${runId}`,
+        shortName: 'CSS',
+        type: WorkspaceType.SCHOOL,
+        isActive: true,
+        registrationEnabled: true,
+      },
+    });
+    const users: Array<{ id: string; email: string; token: string }> = [];
+    const applicationIds: string[] = [];
+    const extraWorkspaceIds: string[] = [];
+    const awardDecisionIds: string[] = [];
+    let seasonId: string | undefined;
+    let scenarioFailed = false;
+    let scenarioError: unknown;
+
+    try {
+      for (const label of ['A', 'B', 'C', 'D', 'E']) {
+        const email = `city-season-${label.toLowerCase()}-${runId}@example.test`;
+        const user = await seedUser({
+          workspaceId: workspace.id,
+          email,
+          role: Role.student,
+          fullName: `Season Student ${label} ${runId}`,
+          studentCode: `${label}${runId.replace(/[^0-9a-z]/gi, '').slice(-12)}`,
+          className: 'Season Class',
+        });
+        users.push({ ...user, token: '' });
+        users[users.length - 1].token = tokenService.createAccessToken(user.id);
+        const application = await prisma.application.create({
+          data: {
+            workspaceId: workspace.id,
+            studentId: user.id,
+            schoolYear: seasonYear,
+            applicationType: ApplicationType.individual,
+            targetLevel: Level.city,
+            status: ApplicationStatus.draft,
+            finalStatus: FinalStatus.pending,
+          },
+        });
+        applicationIds.push(application.id);
+      }
+
+      const createSeason = await request(app)
+        .post('/api/manager/city-review-seasons')
+        .set(auth(current.cityManagerToken))
+        .send({
+          schoolYear: seasonYear,
+          submissionOpensAt: new Date(now.getTime() + 5 * 60_000).toISOString(),
+          submissionClosesAt: new Date(now.getTime() + 6 * 60_000).toISOString(),
+          reviewDeadlineAt: null,
+          supplementDeadlineAt: null,
+          finalizationDeadlineAt: null,
+          reason: 'Integration test season setup',
+        })
+        .expect(201);
+      seasonId = createSeason.body.data.id as string;
+
+      const cityOfficerToken = tokenService.createAccessToken(current.cityOfficerId);
+      const cityCommitteeEmail = `city-season-committee-${runId}@example.test`;
+      const cityCommittee = await seedUser({
+        workspaceId: current.cityWorkspaceId,
+        email: cityCommitteeEmail,
+        role: Role.city_committee,
+        fullName: `City Season Committee ${runId}`,
+      });
+      users.push({ ...cityCommittee, token: '' });
+      users[users.length - 1].token = tokenService.createAccessToken(cityCommittee.id);
+      const uploaderEmail = `city-season-uploader-${runId}@example.test`;
+      const uploader = await seedUser({
+        workspaceId: workspace.id,
+        email: uploaderEmail,
+        role: Role.data_uploader,
+        fullName: `City Season Uploader ${runId}`,
+      });
+      users.push({ ...uploader, token: '' });
+      users[users.length - 1].token = tokenService.createAccessToken(uploader.id);
+
+      const managerDeniedRoles = [
+        ['city_officer', cityOfficerToken],
+        ['city_committee', users[5].token],
+        ['data_uploader', users[6].token],
+        ['legacy manager', current.a.managerToken],
+        ['legacy committee', current.a.committeeToken],
+        ['student', users[0].token],
+      ] as const;
+      for (const [, token] of managerDeniedRoles) {
+        await request(app)
+          .get(`/api/manager/city-review-seasons/${seasonYear}`)
+          .set(auth(token))
+          .expect(403);
+        await request(app)
+          .get(`/api/manager/applications/${applicationIds[2]}/submission-deadline`)
+          .set(auth(token))
+          .expect(403);
+      }
+
+      await request(app)
+        .get(`/api/manager/city-review-seasons/${seasonYear}`)
+        .set(auth(current.adminToken))
+        .expect(200);
+      await request(app)
+        .get(`/api/manager/city-review-seasons/${seasonYear}`)
+        .set(auth(current.cityManagerToken))
+        .expect(200);
+      await request(app)
+        .get(`/api/manager/city-review-seasons/${seasonYear}`)
+        .set(auth(current.a.managerToken))
+        .expect(403);
+      await request(app)
+        .get(`/api/applications/${applicationIds[1]}/submission-deadline`)
+        .set(auth(users[0].token))
+        .expect(404);
+      await request(app)
+        .get(`/api/manager/applications/${applicationIds[2]}/submission-deadline`)
+        .set(auth(current.adminToken))
+        .expect(200);
+
+      const beforeOpen = await request(app)
+        .get(`/api/applications/${applicationIds[0]}/submission-deadline`)
+        .set(auth(users[0].token))
+        .expect(200);
+      expect(beforeOpen.body.data.submission.status).toBe('NOT_OPEN');
+      const applicationBeforeClosedSubmit = await prisma.application.findUniqueOrThrow({
+        where: { id: applicationIds[0] },
+        select: { status: true, submittedAt: true, updatedAt: true, readinessScore: true },
+      });
+      const blockedBeforeOpen = await request(app)
+        .post(`/api/applications/${applicationIds[0]}/submit`)
+        .set(auth(users[0].token))
+        .send({ allowSubmitWithWarnings: true })
+        .expect(409);
+      expect(blockedBeforeOpen.body.error.code).toBe('CITY_SUBMISSION_NOT_OPEN');
+      await expect(
+        prisma.application.findUniqueOrThrow({
+          where: { id: applicationIds[0] },
+          select: { status: true, submittedAt: true, updatedAt: true, readinessScore: true },
+        }),
+      ).resolves.toEqual(applicationBeforeClosedSubmit);
+      await expect(prisma.reviewTask.count({ where: { applicationId: applicationIds[0] } })).resolves.toBe(0);
+      await expect(prisma.notification.count({ where: { applicationId: applicationIds[0] } })).resolves.toBe(0);
+      await expect(prisma.precheckResult.count({ where: { applicationId: applicationIds[0] } })).resolves.toBe(0);
+      await expect(prisma.emailOutbox.count({ where: { applicationId: applicationIds[0] } })).resolves.toBe(0);
+      await expect(
+        prisma.auditLog.count({
+          where: {
+            applicationId: applicationIds[0],
+            action: { in: ['PRECHECK_COMPLETED', 'APPLICATION_READINESS_UPDATED', 'REVIEW_TASK_CREATED', 'APPLICATION_SUBMITTED'] },
+          },
+        }),
+      ).resolves.toBe(0);
+
+      const openAt = new Date(now.getTime() - 60_000).toISOString();
+      const closeAt = new Date(now.getTime() + 60_000).toISOString();
+      await request(app)
+        .patch(`/api/manager/city-review-seasons/${seasonYear}`)
+        .set(auth(current.cityManagerToken))
+        .send({
+          submissionOpensAt: openAt,
+          submissionClosesAt: closeAt,
+          reviewDeadlineAt: null,
+          supplementDeadlineAt: null,
+          finalizationDeadlineAt: null,
+          expectedVersion: 1,
+          reason: 'Open integration test window',
+        })
+        .expect(200);
+      const open = await request(app)
+        .get(`/api/applications/${applicationIds[0]}/submission-deadline`)
+        .set(auth(users[0].token))
+        .expect(200);
+      expect(open.body.data.submission.status).toBe('OPEN');
+      const submittedInsideWindow = await request(app)
+        .post(`/api/applications/${applicationIds[0]}/submit`)
+        .set(auth(users[0].token))
+        .send({ allowSubmitWithWarnings: true })
+        .expect(200);
+      expect(submittedInsideWindow.body.data.application.status).toBe(ApplicationStatus.under_review);
+      await expect(
+        prisma.reviewTask.count({ where: { applicationId: applicationIds[0] } }),
+      ).resolves.toBe(5);
+
+      const baseCloseAt = new Date(now.getTime() - 60_000);
+      await request(app)
+        .patch(`/api/manager/city-review-seasons/${seasonYear}`)
+        .set(auth(current.cityManagerToken))
+        .send({
+          submissionOpensAt: new Date(now.getTime() - 120_000).toISOString(),
+          submissionClosesAt: baseCloseAt.toISOString(),
+          reviewDeadlineAt: null,
+          supplementDeadlineAt: null,
+          finalizationDeadlineAt: null,
+          expectedVersion: 2,
+          reason: 'Close integration test window',
+        })
+        .expect(200);
+
+      const grantUntil = new Date(now.getTime() + 60 * 60_000).toISOString();
+      await request(app)
+        .put(`/api/manager/applications/${applicationIds[1]}/submission-deadline-exception`)
+        .set(auth(current.cityManagerToken))
+        .send({ validUntil: grantUntil, reason: 'Grant one-app integration extension' })
+        .expect(200);
+      const extended = await request(app)
+        .get(`/api/manager/applications/${applicationIds[1]}/submission-deadline`)
+        .set(auth(current.cityManagerToken))
+        .expect(200);
+      expect(extended.body.data.submission.status).toBe('EXCEPTION_ACTIVE');
+      expect(extended.body.data.exception.reason).toBe('Grant one-app integration extension');
+      const submittedWithException = await request(app)
+        .post(`/api/applications/${applicationIds[1]}/submit`)
+        .set(auth(users[1].token))
+        .send({ allowSubmitWithWarnings: true })
+        .expect(200);
+      expect(submittedWithException.body.data.application.status).toBe(ApplicationStatus.under_review);
+      await expect(
+        prisma.reviewTask.count({ where: { applicationId: applicationIds[1] } }),
+      ).resolves.toBe(5);
+
+      const unaffected = await request(app)
+        .get(`/api/manager/applications/${applicationIds[2]}/submission-deadline`)
+        .set(auth(current.cityManagerToken))
+        .expect(200);
+      expect(unaffected.body.data.submission.status).toBe('CLOSED');
+      const blockedUnaffected = await request(app)
+        .post(`/api/applications/${applicationIds[2]}/submit`)
+        .set(auth(users[2].token))
+        .send({ allowSubmitWithWarnings: true })
+        .expect(409);
+      expect(blockedUnaffected.body.error.code).toBe('CITY_SUBMISSION_CLOSED');
+      await expect(
+        prisma.application.findUniqueOrThrow({
+          where: { id: applicationIds[2] },
+          select: { status: true, submittedAt: true },
+        }),
+      ).resolves.toMatchObject({ status: ApplicationStatus.draft, submittedAt: null });
+      await expect(
+        prisma.reviewTask.count({ where: { applicationId: applicationIds[2] } }),
+      ).resolves.toBe(0);
+      await expect(
+        prisma.notification.count({ where: { applicationId: applicationIds[2] } }),
+      ).resolves.toBe(0);
+      await expect(
+        prisma.auditLog.count({
+          where: { applicationId: applicationIds[2], action: 'APPLICATION_SUBMITTED' },
+        }),
+      ).resolves.toBe(0);
+
+      await request(app)
+        .put(`/api/manager/applications/${applicationIds[3]}/submission-deadline-exception`)
+        .set(auth(current.cityManagerToken))
+        .send({
+          validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+          reason: 'Expired integration extension',
+        })
+        .expect(200);
+      await prisma.citySubmissionWindowException.update({
+        where: { applicationId: applicationIds[3] },
+        data: { validUntil: new Date(Date.now() - 30_000) },
+      });
+      const expired = await request(app)
+        .get(`/api/manager/applications/${applicationIds[3]}/submission-deadline`)
+        .set(auth(current.cityManagerToken))
+        .expect(200);
+      expect(expired.body.data.submission.status).toBe('CLOSED');
+      expect(expired.body.data.submission.exceptionActive).toBe(false);
+
+      await request(app)
+        .put(`/api/manager/applications/${applicationIds[4]}/submission-deadline-exception`)
+        .set(auth(current.cityManagerToken))
+        .send({
+          validUntil: new Date(now.getTime() + 60 * 60_000).toISOString(),
+          reason: 'Extension that is revoked',
+        })
+        .expect(200);
+      await request(app)
+        .delete(`/api/manager/applications/${applicationIds[4]}/submission-deadline-exception`)
+        .set(auth(current.cityManagerToken))
+        .send({ reason: 'Revoke integration extension' })
+        .expect(200);
+      const revoked = await request(app)
+        .get(`/api/manager/applications/${applicationIds[4]}/submission-deadline`)
+        .set(auth(current.cityManagerToken))
+        .expect(200);
+      expect(revoked.body.data.submission.status).toBe('CLOSED');
+      expect(revoked.body.data.exception.revokedAt).not.toBeNull();
+      await expect(
+        prisma.auditLog.count({
+          where: {
+            targetType: 'city_submission_window_exception',
+            targetId: { in: [applicationIds[1], applicationIds[3], applicationIds[4]] },
+          },
+        }),
+      ).resolves.toBe(4);
+
+      const udnWorkspace = await prisma.workspace.create({
+        data: {
+          code: `CITY-SEASON-UDN-${runId}`.toUpperCase(),
+          name: `City Season UDN ${runId}`,
+          type: WorkspaceType.UNIVERSITY_SYSTEM,
+          isActive: true,
+        },
+      });
+      extraWorkspaceIds.push(udnWorkspace.id);
+      const eligibilitySchool = await prisma.workspace.create({
+        data: {
+          code: `CITY-SEASON-ELIGIBILITY-SCHOOL-${runId}`.toUpperCase(),
+          name: `City Season Eligibility School ${runId}`,
+          type: WorkspaceType.SCHOOL,
+          parentWorkspaceId: udnWorkspace.id,
+          isActive: true,
+          registrationEnabled: true,
+        },
+      });
+      extraWorkspaceIds.push(eligibilitySchool.id);
+      const verificationAward = await prisma.awardDecision.create({
+        data: {
+          issuerWorkspaceId: udnWorkspace.id,
+          awardLevel: AwardLevel.UNIVERSITY_SYSTEM,
+          schoolYear: seasonYear,
+          status: AwardDecisionStatus.CONFIRMED,
+          createdById: current.cityManagerId,
+          confirmedById: current.cityManagerId,
+          confirmedAt: new Date(),
+        },
+      });
+      awardDecisionIds.push(verificationAward.id);
+      await prisma.awardRecipient.create({
+        data: {
+          awardDecisionId: verificationAward.id,
+          studentCode: `AWARDCODE-${runId}`,
+          fullName: `Verification Candidate ${runId}`,
+          className: `Verification Class ${runId}`,
+          institutionWorkspaceId: eligibilitySchool.id,
+        },
+      });
+
+      const eligibilityCases = [
+        {
+          label: 'needs-verification',
+          code: `VERIFY-${runId}`,
+          fullName: `Verification Candidate ${runId}`,
+          className: `Verification Class ${runId}`,
+          expectedCode: 'CITY_SUBMISSION_NEEDS_VERIFICATION',
+        },
+        {
+          label: 'not-eligible',
+          code: `NOAWARD-${runId}`,
+          fullName: `No Recipient ${runId}`,
+          className: `No Award Class ${runId}`,
+          expectedCode: 'CITY_SUBMISSION_NOT_ELIGIBLE',
+        },
+      ];
+      for (const eligibilityCase of eligibilityCases) {
+        const email = `city-season-${eligibilityCase.label}-${runId}@example.test`;
+        const student = await seedUser({
+          workspaceId: eligibilitySchool.id,
+          email,
+          role: Role.student,
+          fullName: eligibilityCase.fullName,
+          studentCode: eligibilityCase.code,
+          className: eligibilityCase.className,
+        });
+        users.push({ ...student, token: tokenService.createAccessToken(student.id) });
+        const application = await prisma.application.create({
+          data: {
+            workspaceId: eligibilitySchool.id,
+            studentId: student.id,
+            schoolYear: seasonYear,
+            applicationType: ApplicationType.individual,
+            targetLevel: Level.city,
+            status: ApplicationStatus.draft,
+            finalStatus: FinalStatus.pending,
+          },
+        });
+        applicationIds.push(application.id);
+
+        await request(app)
+          .put(`/api/manager/applications/${application.id}/submission-deadline-exception`)
+          .set(auth(current.cityManagerToken))
+          .send({
+            validUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
+            reason: `Eligibility remains required for ${eligibilityCase.label}.`,
+          })
+          .expect(200);
+
+        const applicationBeforeEligibilityGate = await prisma.application.findUniqueOrThrow({
+          where: { id: application.id },
+          select: {
+            status: true,
+            submittedAt: true,
+            updatedAt: true,
+            readinessScore: true,
+            currentDraftVersion: true,
+          },
+        });
+
+        const blockedByEligibility = await request(app)
+          .post(`/api/applications/${application.id}/submit`)
+          .set(auth(tokenService.createAccessToken(student.id)))
+          .send({ allowSubmitWithWarnings: true })
+          .expect(409);
+        expect(blockedByEligibility.body.error.code).toBe(eligibilityCase.expectedCode);
+
+        await expect(
+          prisma.application.findUniqueOrThrow({
+            where: { id: application.id },
+            select: {
+              status: true,
+              submittedAt: true,
+              updatedAt: true,
+              readinessScore: true,
+              currentDraftVersion: true,
+            },
+          }),
+        ).resolves.toEqual(applicationBeforeEligibilityGate);
+        await expect(prisma.reviewTask.count({ where: { applicationId: application.id } })).resolves.toBe(0);
+        await expect(prisma.notification.count({ where: { applicationId: application.id } })).resolves.toBe(0);
+        await expect(prisma.precheckResult.count({ where: { applicationId: application.id } })).resolves.toBe(0);
+        await expect(prisma.emailOutbox.count({ where: { applicationId: application.id } })).resolves.toBe(0);
+        await expect(
+          prisma.auditLog.count({
+            where: {
+              applicationId: application.id,
+              action: { in: ['PRECHECK_COMPLETED', 'APPLICATION_READINESS_UPDATED', 'REVIEW_TASK_CREATED', 'APPLICATION_SUBMITTED'] },
+            },
+          }),
+        ).resolves.toBe(0);
+        await expect(
+          prisma.citySubmissionWindowException.findUnique({ where: { applicationId: application.id } }),
+        ).resolves.toMatchObject({ revokedAt: null });
+      }
+
+      const beforeSideEffects = await prisma.application.findUniqueOrThrow({
+        where: { id: applicationIds[2] },
+        select: { status: true, submittedAt: true },
+      });
+      expect(beforeSideEffects).toMatchObject({ status: ApplicationStatus.draft, submittedAt: null });
+      await expect(
+        prisma.reviewTask.count({ where: { applicationId: { in: [applicationIds[2], applicationIds[3], applicationIds[4]] } } }),
+      ).resolves.toBe(0);
+    } catch (error) {
+      scenarioFailed = true;
+      scenarioError = error;
+    } finally {
+      const cleanupFailures: unknown[] = [];
+      const userIds = users.map((user) => user.id);
+      const cleanupSteps = [
+        () => seasonId
+          ? prisma.auditLog.deleteMany({ where: { targetId: seasonId, targetType: 'city_review_season' } })
+          : Promise.resolve({ count: 0 }),
+        () => seasonId
+          ? prisma.cityReviewSeason.deleteMany({ where: { id: seasonId } })
+          : Promise.resolve({ count: 0 }),
+        () => prisma.auditLog.deleteMany({ where: { applicationId: { in: applicationIds } } }),
+        () => prisma.emailOutbox.deleteMany({ where: { applicationId: { in: applicationIds } } }),
+        () => prisma.notification.deleteMany({ where: { applicationId: { in: applicationIds } } }),
+        () => prisma.citySubmissionWindowException.deleteMany({ where: { applicationId: { in: applicationIds } } }),
+        async () => {
+          const tasks = await prisma.reviewTask.findMany({
+            where: { applicationId: { in: applicationIds } },
+            select: { id: true },
+          });
+          return prisma.reviewTaskEvidence.deleteMany({
+            where: { reviewTaskId: { in: tasks.map((task) => task.id) } },
+          });
+        },
+        () => prisma.reviewTask.deleteMany({ where: { applicationId: { in: applicationIds } } }),
+        () => prisma.precheckResult.deleteMany({ where: { applicationId: { in: applicationIds } } }),
+        () => prisma.application.deleteMany({ where: { id: { in: applicationIds } } }),
+        () => prisma.awardDecision.deleteMany({ where: { id: { in: awardDecisionIds } } }),
+        () => prisma.refreshToken.deleteMany({ where: { userId: { in: userIds } } }),
+        () => prisma.user.deleteMany({ where: { id: { in: userIds } } }),
+        () => prisma.workspace.updateMany({
+          where: { id: { in: extraWorkspaceIds } },
+          data: { parentWorkspaceId: null },
+        }),
+        () => prisma.workspace.deleteMany({ where: { id: { in: extraWorkspaceIds } } }),
+        () => prisma.workspace.deleteMany({ where: { id: workspace.id } }),
+      ];
+      for (const cleanup of cleanupSteps) {
+        try {
+          await cleanup();
+        } catch (cleanupError) {
+          cleanupFailures.push(cleanupError);
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        scenarioFailed = true;
+        scenarioError = new AggregateError(
+          [...(scenarioError ? [scenarioError] : []), ...cleanupFailures],
+          'City submission integration cleanup failed',
+        );
+      }
+    }
+    if (scenarioFailed) throw scenarioError;
+  }, 180_000);
 
   it('isolates evidence and file access across workspaces', async () => {
     const current = fixture!;

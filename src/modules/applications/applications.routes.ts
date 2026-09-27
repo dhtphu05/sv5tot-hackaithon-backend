@@ -7,6 +7,7 @@ import { asyncHandler } from '../../shared/utils/async-handler';
 import {
   autosaveApplicationDraft,
   getApplicationEligibility,
+  getApplicationSubmissionDeadline,
   getApplicationTimeline,
   getCurrentApplication,
   reopenApplicationSupplement,
@@ -126,6 +127,12 @@ applicationsRouter.get(
   requireAuth,
   requireRole(Role.student),
   asyncHandler(getApplicationEligibility),
+);
+applicationsRouter.get(
+  '/:id/submission-deadline',
+  requireAuth,
+  requireRole(Role.student),
+  asyncHandler(getApplicationSubmissionDeadline),
 );
 applicationsRouter.post(
   '/:id/eligibility-verification',

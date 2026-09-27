@@ -16,7 +16,7 @@ import { PasswordService } from '../../src/modules/auth/password.service';
 import { runIndexingJob } from '../../src/modules/jobs/jobs.service';
 
 const app = createApp();
-const runId = randomUUID().slice(0, 8).toUpperCase();
+const runId = process.env.E2E_P3B_ROSTER_RUN_ID ?? randomUUID().slice(0, 8).toUpperCase();
 const password = process.env.SEED_DEFAULT_PASSWORD ?? 'Password@123';
 const uploadRoot = path.resolve(process.env.UPLOAD_DIR ?? './uploads');
 

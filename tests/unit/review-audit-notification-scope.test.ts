@@ -104,6 +104,10 @@ describe('resolution escalation notification recipients', () => {
       evidenceAssessments: [],
     } as never);
 
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      maxWait: 10_000,
+      timeout: 30_000,
+    });
     expect(tx.user.findMany).toHaveBeenCalledWith({
       where: {
         isActive: true,

@@ -18,6 +18,9 @@ import {
 } from '../collective/collective.validation';
 import {
   aggregateApplication,
+  createCityReviewSeason,
+  getCityReviewSeason,
+  getManagerSubmissionDeadline,
   assignManagerReviewTask,
   finalizeApplication,
   getApplicationAggregation,
@@ -30,6 +33,9 @@ import {
   listManagerResults,
   listManagerApplications,
   reopenFinalApplication,
+  grantSubmissionWindowException,
+  revokeSubmissionWindowException,
+  updateCityReviewSeason,
 } from './manager.controller';
 import {
   aggregateApplicationSchema,
@@ -39,9 +45,56 @@ import {
   listManagerApplicationsQuerySchema,
   listManagerResultsQuerySchema,
   reopenFinalSchema,
+  cityReviewSeasonCreateSchema,
+  cityReviewSeasonParamsSchema,
+  cityReviewSeasonUpdateSchema,
+  revokeSubmissionWindowExceptionSchema,
+  submissionWindowExceptionSchema,
 } from './manager.validation';
 
 export const managerRouter = Router();
+
+managerRouter.get(
+  '/city-review-seasons/:schoolYear',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ params: cityReviewSeasonParamsSchema }),
+  asyncHandler(getCityReviewSeason),
+);
+managerRouter.post(
+  '/city-review-seasons',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ body: cityReviewSeasonCreateSchema }),
+  asyncHandler(createCityReviewSeason),
+);
+managerRouter.patch(
+  '/city-review-seasons/:schoolYear',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ params: cityReviewSeasonParamsSchema, body: cityReviewSeasonUpdateSchema }),
+  asyncHandler(updateCityReviewSeason),
+);
+managerRouter.get(
+  '/applications/:id/submission-deadline',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  asyncHandler(getManagerSubmissionDeadline),
+);
+managerRouter.put(
+  '/applications/:id/submission-deadline-exception',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ body: submissionWindowExceptionSchema }),
+  asyncHandler(grantSubmissionWindowException),
+);
+managerRouter.delete(
+  '/applications/:id/submission-deadline-exception',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ body: revokeSubmissionWindowExceptionSchema }),
+  asyncHandler(revokeSubmissionWindowException),
+);
 
 function requireCityManagerForPendingEligibility(req: Request, _res: Response, next: NextFunction) {
   if (req.query.eligibilityVerification && req.user?.role !== Role.city_manager) {

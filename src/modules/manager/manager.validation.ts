@@ -1,6 +1,63 @@
 import { ApplicationStatus, FinalStatus, Level } from '@prisma/client';
 import { z } from 'zod';
 
+const timestampWithOffset = z.string().trim().refine((value) => {
+  const hasOffset = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value);
+  return hasOffset && Number.isFinite(Date.parse(value));
+}, 'Timestamp must be valid ISO 8601 and include an explicit timezone offset');
+
+const nullableTimestampWithOffset = timestampWithOffset.nullable();
+
+const cityReviewSeasonFields = {
+  submissionOpensAt: nullableTimestampWithOffset,
+  submissionClosesAt: nullableTimestampWithOffset,
+  reviewDeadlineAt: nullableTimestampWithOffset,
+  supplementDeadlineAt: nullableTimestampWithOffset,
+  finalizationDeadlineAt: nullableTimestampWithOffset,
+};
+
+function validateSubmissionWindowOrder(
+  value: { submissionOpensAt: string | null; submissionClosesAt: string | null },
+  ctx: z.RefinementCtx,
+) {
+  if (
+    value.submissionOpensAt &&
+    value.submissionClosesAt &&
+    Date.parse(value.submissionOpensAt) >= Date.parse(value.submissionClosesAt)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'submissionOpensAt must be earlier than submissionClosesAt',
+      path: ['submissionClosesAt'],
+    });
+  }
+}
+
+export const cityReviewSeasonCreateSchema = z.object({
+  schoolYear: z.string().regex(/^\d{4}-\d{4}$/),
+  ...cityReviewSeasonFields,
+  reason: z.string().trim().min(1).max(1000),
+}).superRefine(validateSubmissionWindowOrder);
+
+export const cityReviewSeasonUpdateSchema = z.object({
+  ...cityReviewSeasonFields,
+  expectedVersion: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(1000),
+}).superRefine(validateSubmissionWindowOrder);
+
+export const cityReviewSeasonParamsSchema = z.object({
+  schoolYear: z.string().regex(/^\d{4}-\d{4}$/),
+});
+
+export const submissionWindowExceptionSchema = z.object({
+  validUntil: timestampWithOffset,
+  reason: z.string().trim().min(1).max(1000),
+});
+
+export const revokeSubmissionWindowExceptionSchema = z.object({
+  reason: z.string().trim().min(1).max(1000),
+});
+
 export const listManagerApplicationsQuerySchema = z.object({
   eligibilityVerification: z.enum(['pending']).optional(),
   status: z.nativeEnum(ApplicationStatus).optional(),
@@ -124,3 +181,7 @@ export type AssignReviewTaskInput = z.infer<typeof assignReviewTaskSchema>;
 export type AggregateApplicationInput = z.infer<typeof aggregateApplicationSchema>;
 export type FinalizeApplicationInput = z.infer<typeof finalizeApplicationSchema>;
 export type ReopenFinalInput = z.infer<typeof reopenFinalSchema>;
+export type CityReviewSeasonCreateInput = z.infer<typeof cityReviewSeasonCreateSchema>;
+export type CityReviewSeasonUpdateInput = z.infer<typeof cityReviewSeasonUpdateSchema>;
+export type SubmissionWindowExceptionInput = z.infer<typeof submissionWindowExceptionSchema>;
+export type RevokeSubmissionWindowExceptionInput = z.infer<typeof revokeSubmissionWindowExceptionSchema>;
