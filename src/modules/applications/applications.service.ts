@@ -441,7 +441,7 @@ export class ApplicationsService {
       submissionState.targetLevel !== application.targetLevel ||
       submissionState.currentDraftVersion !== application.currentDraftVersion ||
       submissionState.submittedAt?.getTime() !== application.submittedAt?.getTime() ||
-      (isCitySubmissionWindowed &&
+      (isInitialCityWindowSubmission &&
         submissionState.updatedAt.getTime() !== application.updatedAt.getTime()) ||
       !editableApplicationStatuses.includes(submissionState.status as never)
     ) {

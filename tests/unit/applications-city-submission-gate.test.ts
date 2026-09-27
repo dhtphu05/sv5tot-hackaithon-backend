@@ -187,7 +187,12 @@ function configureSuccessfulTransaction(updateCount = 1) {
       updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
     },
     applicationDraftSnapshot: { create: vi.fn().mockResolvedValue({}) },
-    reviewTask: { findMany: vi.fn().mockResolvedValue([task]) },
+    reviewTask: {
+      findMany: vi.fn().mockResolvedValue([task]),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    },
+    reviewTaskEvidence: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    evidence: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
     auditLog: { create: vi.fn().mockResolvedValue({}) },
   };
   mocks.prisma.$transaction.mockImplementation(async (callback) => callback(tx));
@@ -906,6 +911,53 @@ describe('ApplicationsService City submission eligibility gate', () => {
 
     expect(repository.findApplication).not.toHaveBeenCalled();
     expect(mocks.prisma.$transaction).toHaveBeenCalledOnce();
+  });
+
+  it('allows an actual City supplement resubmission after its own stale-precheck refresh', async () => {
+    const { service: eligibility, repository } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [],
+    });
+    const beforePrecheck = application({
+      status: ApplicationStatus.supplement_required,
+      submittedAt: new Date('2026-09-01T00:00:00.000Z'),
+      updatedAt: new Date('2026-09-01T00:00:00.000Z'),
+      reviewTasks: [
+        { id: 'review-task-a', criterion: 'academic', status: 'supplement_required', assignedOfficer: null },
+      ],
+    });
+    const afterPrecheck = {
+      ...beforePrecheck,
+      updatedAt: new Date('2026-09-03T00:00:00.000Z'),
+    };
+    const tx = configureSuccessfulTransaction();
+    tx.reviewTask.updateMany.mockResolvedValue({ count: 1 });
+    mocks.prisma.application.findUnique
+      .mockResolvedValueOnce(beforePrecheck)
+      .mockResolvedValueOnce(afterPrecheck);
+    mocks.prisma.precheckResult.findFirst
+      .mockResolvedValueOnce({ createdAt: new Date('2026-08-31T00:00:00.000Z') })
+      .mockResolvedValueOnce({
+        createdAt: afterPrecheck.updatedAt,
+        resultJson: null,
+        missingItemsJson: null,
+      });
+    mocks.precheck.run.mockResolvedValue({});
+
+    const result = await buildService(eligibility).submit(student, 'application-a', {
+      allowSubmitWithWarnings: true,
+    });
+
+    expect(result.application.status).toBe(ApplicationStatus.under_review);
+    expect(repository.findApplication).not.toHaveBeenCalled();
+    expect(mocks.precheck.run).toHaveBeenCalledOnce();
+    expect(tx.application.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        status: ApplicationStatus.supplement_required,
+        updatedAt: afterPrecheck.updatedAt,
+      }),
+      data: expect.objectContaining({ status: ApplicationStatus.under_review }),
+    });
   });
 
   it.each([
