@@ -1,9 +1,9 @@
-import { Criterion, Role, WorkspaceType } from '@prisma/client';
+import { ApplicationStatus, Criterion, Role, WorkspaceType } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
 const prismaMock = vi.hoisted(() => ({
-  application: { findMany: vi.fn(), count: vi.fn() },
+  application: { findMany: vi.fn(), count: vi.fn(), findUnique: vi.fn() },
   reviewTask: { findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
   user: { findMany: vi.fn(), findUnique: vi.fn() },
   auditLog: { create: vi.fn() },
@@ -12,6 +12,11 @@ const prismaMock = vi.hoisted(() => ({
 }));
 
 vi.mock('../../src/infrastructure/database/prisma', () => ({ prisma: prismaMock }));
+vi.mock('../../src/modules/cascade/cascade.service', () => ({
+  computeActiveCascadeSnapshot: vi
+    .fn()
+    .mockResolvedValue({ targetLevel: 'city', suggestedLevel: 'city' }),
+}));
 
 import { ManagerService } from '../../src/modules/manager/manager.service';
 
@@ -90,7 +95,11 @@ describe('ManagerService City workspace scope', () => {
       assignedOfficerId: null,
       applicationId: 'application-1',
       collectiveProfileId: null,
-      application: { student: { faculty: 'Computer Science' } },
+      application: {
+        applicationType: 'individual',
+        targetLevel: 'city',
+        student: { faculty: 'Computer Science' },
+      },
       collectiveProfile: null,
     };
     prismaMock.reviewTask.findUnique.mockResolvedValue(task);
@@ -130,6 +139,176 @@ describe('ManagerService City workspace scope', () => {
         data: { assignedOfficerId: 'city-officer-1' },
       }),
     );
+  });
+
+  it('denies legacy school managers from assigning individual City review tasks', async () => {
+    const legacyManager: AuthenticatedUser = {
+      ...cityManager,
+      id: 'school-manager',
+      role: Role.manager,
+      workspaceId: schoolAId,
+      workspace: {
+        id: schoolAId,
+        code: 'SCHOOL-A',
+        name: 'School A',
+        shortName: 'A',
+        type: WorkspaceType.SCHOOL,
+      },
+    };
+    prismaMock.reviewTask.findUnique.mockResolvedValue({
+      id: 'city-task',
+      workspaceId: schoolAId,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      criterion: Criterion.academic,
+      assignedOfficerId: null,
+      applicationId: 'application-1',
+      collectiveProfileId: null,
+      application: {
+        applicationType: 'individual',
+        targetLevel: 'city',
+        student: { faculty: 'Computer Science' },
+      },
+      collectiveProfile: null,
+    });
+    const service = new ManagerService();
+
+    await expect(
+      service.reassignTask(legacyManager, 'city-task', { assignedOfficerId: 'officer-1' } as never),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([Role.manager, Role.committee])(
+    'denies legacy %s from aggregating an individual City application',
+    async (role) => {
+      const legacyStaff: AuthenticatedUser = {
+        ...cityManager,
+        id: 'legacy-staff',
+        role,
+        workspaceId: schoolAId,
+        workspace: {
+          id: schoolAId,
+          code: 'SCHOOL-A',
+          name: 'School A',
+          shortName: 'A',
+          type: WorkspaceType.SCHOOL,
+        },
+      };
+      prismaMock.application.findUnique.mockResolvedValue({
+        id: 'application-city',
+        workspaceId: schoolAId,
+        workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+        applicationType: 'individual',
+        targetLevel: 'city',
+      });
+      const service = new ManagerService();
+
+      await expect(
+        service.aggregateApplication(legacyStaff, 'application-city', {} as never),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      await expect(
+        service.finalizeApplication(legacyStaff, 'application-city', {
+          finalStatus: 'failed',
+          finalLevel: null,
+          finalNote: 'Not allowed',
+        } as never),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('denies a legacy school manager from reopening an individual City final result', async () => {
+    const legacyManager: AuthenticatedUser = {
+      ...cityManager,
+      id: 'school-manager',
+      role: Role.manager,
+      workspaceId: schoolAId,
+      workspace: {
+        id: schoolAId,
+        code: 'SCHOOL-A',
+        name: 'School A',
+        shortName: 'A',
+        type: WorkspaceType.SCHOOL,
+      },
+    };
+    prismaMock.application.findUnique.mockResolvedValue({
+      id: 'application-city',
+      workspaceId: schoolAId,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      applicationType: 'individual',
+      targetLevel: 'city',
+      status: ApplicationStatus.completed,
+    } as never);
+    const service = new ManagerService();
+
+    await expect(
+      service.reopenFinal(legacyManager, 'application-city', {
+        status: ApplicationStatus.under_review,
+        reason: 'Reopen for correction',
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('does not create final result records when a concurrent finalization already won', async () => {
+    const admin: AuthenticatedUser = {
+      ...cityManager,
+      id: 'admin',
+      role: Role.admin,
+      workspaceId: null,
+      workspace: null,
+    };
+    const application = {
+      id: 'application-city',
+      workspaceId: schoolAId,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      applicationType: 'individual',
+      targetLevel: 'city',
+      status: ApplicationStatus.under_review,
+      finalStatus: 'pending',
+      finalLevel: null,
+      finalNote: null,
+      finalizedAt: null,
+      finalizedById: null,
+      studentId: 'student-1',
+      schoolYear: '2025-2026',
+    };
+    prismaMock.application.findUnique.mockResolvedValue(application as never);
+    const service = new ManagerService();
+    vi.spyOn(service, 'getAggregation').mockResolvedValue({
+      application,
+      canFinalize: true,
+      reviewProgress: { totalTasks: 5, accepted: 5, rejected: 0 },
+      resolutionSummary: { open: 0 },
+    } as never);
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const createCascadeReview = vi.fn();
+    const tx = {
+      application: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue(application),
+        updateMany,
+      },
+      cascadeReview: { create: createCascadeReview },
+      auditLog: { create: vi.fn() },
+      user: { findUniqueOrThrow: vi.fn() },
+      notification: { create: vi.fn() },
+    };
+    prismaMock.$transaction.mockImplementation((callback: (transaction: unknown) => unknown) =>
+      callback(tx),
+    );
+
+    await expect(
+      service.finalizeApplication(admin, 'application-city', {
+        finalStatus: 'passed',
+        finalLevel: 'city',
+        finalNote: 'Final decision',
+        overrideAggregation: true,
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(updateMany).toHaveBeenCalledOnce();
+    expect(createCascadeReview).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(tx.notification.create).not.toHaveBeenCalled();
   });
 
   it('rejects assignment to legacy school staff from a City Manager', async () => {

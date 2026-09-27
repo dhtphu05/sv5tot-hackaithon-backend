@@ -39,6 +39,8 @@ describe('ApplicationsService City supplement reopening', () => {
       id: 'application-school-b',
       workspaceId: 'school-b',
       workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      applicationType: 'individual',
+      targetLevel: 'city',
       status: 'under_review',
       studentId: 'student-b',
     });
@@ -56,5 +58,32 @@ describe('ApplicationsService City supplement reopening', () => {
       include: { workspace: { select: { type: true, isActive: true } } },
     });
     expect(prismaMock.$transaction).toHaveBeenCalledOnce();
+  });
+
+  it('denies a legacy school manager from reopening a City application supplement', async () => {
+    const legacyManager = {
+      ...cityManager,
+      id: 'school-manager',
+      workspaceId: 'school-b',
+      workspace: null,
+      role: Role.manager,
+    };
+    prismaMock.application.findUnique.mockResolvedValue({
+      id: 'application-school-b',
+      workspaceId: 'school-b',
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      applicationType: 'individual',
+      targetLevel: 'city',
+      status: 'under_review',
+      studentId: 'student-b',
+    });
+    const service = new ApplicationsService({ findById: vi.fn() } as never);
+
+    await expect(
+      service.reopenSupplement(legacyManager, 'application-school-b', {
+        reason: 'Please supplement evidence',
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
   });
 });

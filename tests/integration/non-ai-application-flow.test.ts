@@ -3,6 +3,7 @@ import {
   Criterion,
   EvidenceStatus,
   FinalStatus,
+  IndexingStatus,
   Level,
   MetricType,
   ReviewDecision,
@@ -28,6 +29,7 @@ const accounts = {
   student: 'e2e.student@dut.udn.vn',
   manager: 'e2e.manager@dut.udn.vn',
   committee: 'e2e.committee@dut.udn.vn',
+  cityCommittee: 'e2e.city-committee@dut.udn.vn',
   officers: {
     [Criterion.ethics]: 'e2e.officer.ethics@dut.udn.vn',
     [Criterion.academic]: 'e2e.officer.academic@dut.udn.vn',
@@ -51,10 +53,7 @@ type TokenBundle = {
 };
 
 async function login(email: string): Promise<TokenBundle> {
-  const response = await request(app)
-    .post('/api/auth/login')
-    .send({ email, password })
-    .expect(200);
+  const response = await request(app).post('/api/auth/login').send({ email, password }).expect(200);
 
   expect(response.body.success).toBe(true);
   return {
@@ -181,6 +180,12 @@ describe('non-AI individual application end-to-end flow', () => {
       role: Role.committee,
       fullName: 'E2E Committee',
     });
+    await seedUser({
+      email: accounts.cityCommittee,
+      role: Role.city_committee,
+      fullName: 'E2E City Committee',
+      workspaceId: cityWorkspaceId,
+    });
 
     for (const criterion of criteria) {
       await seedUser({
@@ -205,6 +210,7 @@ describe('non-AI individual application end-to-end flow', () => {
     const student = await login(accounts.student);
     const manager = await login(accounts.manager);
     const committee = await login(accounts.committee);
+    const cityCommittee = await login(accounts.cityCommittee);
 
     const currentBeforeStart = await request(app)
       .get('/api/applications/current')
@@ -254,7 +260,7 @@ describe('non-AI individual application end-to-end flow', () => {
     });
 
     const metricInputs = [
-      { metricType: MetricType.gpa, value: 3.6, scale: 4 },
+      { metricType: MetricType.gpa, value: 1, scale: 4 },
       { metricType: MetricType.conduct_score, value: 92 },
       { metricType: MetricType.physical_score, value: 8.5 },
       { metricType: MetricType.volunteer_days, value: 12 },
@@ -308,40 +314,32 @@ describe('non-AI individual application end-to-end flow', () => {
       });
     }
 
+    const priorityEvidence = await request(app)
+      .post(`/api/applications/${applicationId}/evidences`)
+      .set('Authorization', `Bearer ${student.accessToken}`)
+      .send({
+        evidenceName: 'E2E priority evidence',
+        criterion: Criterion.priority,
+        sourceType: 'manual_upload',
+      })
+      .expect(201);
+    evidenceIds[Criterion.priority] = (priorityEvidence.body.data.evidence?.id ??
+      priorityEvidence.body.data.id) as string;
+
     const listedEvidences = await request(app)
       .get(`/api/applications/${applicationId}/evidences`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
     expect(listedEvidences.body.data.items ?? listedEvidences.body.data).toHaveLength(
-      criteria.length,
+      criteria.length + 1,
     );
-
-    const blockedSubmit = await request(app)
-      .post(`/api/applications/${applicationId}/submit`)
-      .set('Authorization', `Bearer ${student.accessToken}`)
-      .send({
-        allowSubmitWithWarnings: true,
-        studentNote: 'Submit should wait for upload processing.',
-      })
-      .expect(409);
-    expect(blockedSubmit.body.error).toMatchObject({
-      code: 'APPLICATION_NOT_READY',
-    });
-
-    await prisma.evidence.updateMany({
-      where: { id: { in: Object.values(evidenceIds) } },
-      data: {
-        status: EvidenceStatus.indexed,
-        indexingStatus: 'indexed',
-      },
-    });
 
     const submitted = await request(app)
       .post(`/api/applications/${applicationId}/submit`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .send({
         allowSubmitWithWarnings: true,
-        studentNote: 'Submit E2E non-AI application.',
+        studentNote: 'Submit while saved evidence OCR is pending.',
       })
       .expect(200);
     expect(submitted.body.data.application).toMatchObject({
@@ -351,13 +349,23 @@ describe('non-AI individual application end-to-end flow', () => {
     expect(submitted.body.data.reviewTasks).toHaveLength(criteria.length);
     for (const task of submitted.body.data.reviewTasks) {
       expect(task).toMatchObject({
-        criterion: expect.stringMatching(
-          /^(ethics|academic|physical|volunteer|integration)$/,
-        ),
+        criterion: expect.stringMatching(/^(ethics|academic|physical|volunteer|integration)$/),
         status: ReviewTaskStatus.waiting,
         assignedOfficer: expect.objectContaining({ id: expect.any(String) }),
       });
     }
+
+    const ensuredTasks = await request(app)
+      .post(`/api/review/applications/${applicationId}/tasks/ensure`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ mode: 'missing_only' })
+      .expect(200);
+    expect(ensuredTasks.body.data.ensuredCount).toBe(0);
+
+    await prisma.evidence.updateMany({
+      where: { id: { in: Object.values(evidenceIds) } },
+      data: { status: EvidenceStatus.indexed, indexingStatus: IndexingStatus.failed },
+    });
 
     const managerApplications = await request(app)
       .get('/api/manager/applications')
@@ -378,9 +386,9 @@ describe('non-AI individual application end-to-end flow', () => {
       .get('/api/manager/workloads')
       .set('Authorization', `Bearer ${manager.accessToken}`)
       .expect(200);
-    expect(workloads.body.data.officers.some((officer: { totalOpen: number }) => officer.totalOpen > 0)).toBe(
-      true,
-    );
+    expect(
+      workloads.body.data.officers.some((officer: { totalOpen: number }) => officer.totalOpen > 0),
+    ).toBe(true);
 
     for (const criterion of criteria) {
       const officer = await login(accounts.officers[criterion]);
@@ -413,24 +421,121 @@ describe('non-AI individual application end-to-end flow', () => {
         ]),
       );
 
-      const decision = await request(app)
-        .post(`/api/review/tasks/${task.id}/decision`)
-        .set('Authorization', `Bearer ${officer.accessToken}`)
-        .send({
-          decision: ReviewDecision.accepted,
-          officerSuggestedLevel: Level.school,
-          officerNote: `Accepted ${criterion} in E2E flow.`,
-          evidenceDecisions: [
-            {
-              evidenceId: evidenceIds[criterion],
-              status: EvidenceStatus.accepted,
-              note: 'Valid uploaded proof.',
-            },
-          ],
-        })
-        .expect(200);
-      expect(decision.body.data.reviewProgress.accepted).toBeGreaterThanOrEqual(1);
+      const rejected = criterion === Criterion.ethics;
+      const needsSupplement = criterion === Criterion.volunteer;
+      const decisionPayload = {
+        decision: rejected
+          ? ReviewDecision.rejected
+          : needsSupplement
+            ? ReviewDecision.supplement_required
+            : ReviewDecision.accepted,
+        officerSuggestedLevel: rejected || needsSupplement ? undefined : Level.school,
+        officerNote: rejected
+          ? 'Rejected after human review.'
+          : needsSupplement
+            ? 'Please provide clearer volunteer evidence for this criterion.'
+            : `Accepted ${criterion} in E2E flow.`,
+        evidenceDecisions: [
+          {
+            evidenceId: evidenceIds[criterion],
+            status: rejected
+              ? EvidenceStatus.rejected
+              : needsSupplement
+                ? EvidenceStatus.needs_supplement
+                : EvidenceStatus.accepted,
+            note: rejected
+              ? 'Human reviewer rejected this proof.'
+              : needsSupplement
+                ? 'The volunteer proof needs a clearer record.'
+                : 'Valid uploaded proof.',
+          },
+        ],
+      };
+      if (rejected) {
+        const concurrentDecisions = await Promise.all([
+          request(app)
+            .post(`/api/review/tasks/${task.id}/decision`)
+            .set('Authorization', `Bearer ${officer.accessToken}`)
+            .send(decisionPayload),
+          request(app)
+            .post(`/api/review/tasks/${task.id}/decision`)
+            .set('Authorization', `Bearer ${officer.accessToken}`)
+            .send(decisionPayload),
+        ]);
+        expect(concurrentDecisions.map((response) => response.status).sort()).toEqual([200, 409]);
+        expect(
+          await prisma.auditLog.count({
+            where: { targetId: task.id, action: 'REVIEW_DECISION_REJECTED' },
+          }),
+        ).toBe(1);
+      } else {
+        await request(app)
+          .post(`/api/review/tasks/${task.id}/decision`)
+          .set('Authorization', `Bearer ${officer.accessToken}`)
+          .send(decisionPayload)
+          .expect(200);
+      }
     }
+
+    const tasksBeforeResubmit = await prisma.reviewTask.findMany({
+      where: { applicationId },
+      select: { criterion: true, status: true },
+    });
+    expect(tasksBeforeResubmit).toEqual(
+      expect.arrayContaining([
+        { criterion: Criterion.ethics, status: ReviewTaskStatus.rejected },
+        { criterion: Criterion.academic, status: ReviewTaskStatus.accepted },
+        { criterion: Criterion.physical, status: ReviewTaskStatus.accepted },
+        { criterion: Criterion.volunteer, status: ReviewTaskStatus.supplement_required },
+        { criterion: Criterion.integration, status: ReviewTaskStatus.accepted },
+      ]),
+    );
+
+    const resubmitted = await request(app)
+      .post(`/api/applications/${applicationId}/submit`)
+      .set('Authorization', `Bearer ${student.accessToken}`)
+      .send({
+        allowSubmitWithWarnings: true,
+        studentNote: 'Resubmit volunteer evidence without resetting other City tasks.',
+      })
+      .expect(200);
+    expect(resubmitted.body.data.reviewTasks).toHaveLength(criteria.length);
+
+    const tasksAfterResubmit = await prisma.reviewTask.findMany({
+      where: { applicationId },
+      select: { criterion: true, status: true },
+    });
+    expect(tasksAfterResubmit).toEqual(
+      expect.arrayContaining([
+        { criterion: Criterion.ethics, status: ReviewTaskStatus.rejected },
+        { criterion: Criterion.academic, status: ReviewTaskStatus.accepted },
+        { criterion: Criterion.physical, status: ReviewTaskStatus.accepted },
+        { criterion: Criterion.volunteer, status: ReviewTaskStatus.waiting },
+        { criterion: Criterion.integration, status: ReviewTaskStatus.accepted },
+      ]),
+    );
+
+    const volunteerOfficer = await login(accounts.officers[Criterion.volunteer]);
+    const volunteerTask = await prisma.reviewTask.findFirstOrThrow({
+      where: { applicationId, criterion: Criterion.volunteer },
+      select: { id: true },
+    });
+    await request(app)
+      .post(`/api/review/tasks/${volunteerTask.id}/decision`)
+      .set('Authorization', `Bearer ${volunteerOfficer.accessToken}`)
+      .send({
+        decision: ReviewDecision.accepted,
+        officerSuggestedLevel: Level.school,
+        officerNote: 'Reviewed the resubmitted volunteer evidence.',
+        evidenceDecisions: [
+          {
+            evidenceId: evidenceIds[Criterion.volunteer],
+            status: EvidenceStatus.accepted,
+            note: 'Updated proof is sufficient.',
+          },
+        ],
+      })
+      .expect(200);
 
     const aggregation = await request(app)
       .get(`/api/manager/applications/${applicationId}/aggregation`)
@@ -443,22 +548,44 @@ describe('non-AI individual application end-to-end flow', () => {
       },
       reviewProgress: {
         totalTasks: criteria.length,
-        accepted: criteria.length,
+        accepted: criteria.length - 1,
+        rejected: 1,
         canAggregate: true,
       },
       resolutionSummary: { open: 0 },
-      suggestedFinalStatus: FinalStatus.passed,
-      suggestedFinalLevel: Level.school,
+      suggestedFinalStatus: FinalStatus.pending,
+      suggestedFinalLevel: null,
       canFinalize: true,
     });
 
-    const finalized = await request(app)
+    const preFinalApplication = await prisma.application.findUniqueOrThrow({
+      where: { id: applicationId },
+    });
+    expect(preFinalApplication).toMatchObject({
+      status: 'under_review',
+      finalStatus: FinalStatus.pending,
+      finalizedAt: null,
+    });
+
+    await request(app)
       .post(`/api/manager/applications/${applicationId}/finalize`)
       .set('Authorization', `Bearer ${committee.accessToken}`)
       .send({
+        finalStatus: FinalStatus.failed,
+        finalLevel: null,
+        finalNote: 'Legacy school committee cannot finalize a City application.',
+        overrideAggregation: false,
+        notifyStudent: false,
+      })
+      .expect(403);
+
+    const finalized = await request(app)
+      .post(`/api/manager/applications/${applicationId}/finalize`)
+      .set('Authorization', `Bearer ${cityCommittee.accessToken}`)
+      .send({
         finalStatus: FinalStatus.passed,
         finalLevel: Level.school,
-        finalNote: 'E2E committee confirms non-AI application flow.',
+        finalNote: 'City Committee confirms the result after reviewing advisory warnings.',
         overrideAggregation: false,
         notifyStudent: true,
       })

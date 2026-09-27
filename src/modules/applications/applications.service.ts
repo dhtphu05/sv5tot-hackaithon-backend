@@ -744,6 +744,18 @@ export class ApplicationsService {
       },
       'Application not found',
     );
+    if (
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers or admins may reopen supplements for City applications',
+      );
+    }
 
     await prisma.$transaction(async (tx) => {
       await tx.application.update({
@@ -826,7 +838,14 @@ export class ApplicationsService {
     application: SubmitApplicationContext,
     latestPrecheckResultJson?: Prisma.JsonValue,
   ) {
-    const criteria = buildSubmitCriteria(application.evidences, latestPrecheckResultJson);
+    const cityIndividual =
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city;
+    const criteria = buildSubmitCriteria(
+      application.evidences,
+      latestPrecheckResultJson,
+      !cityIndividual,
+    );
     const tasks = [];
 
     for (const criterion of criteria) {
@@ -1030,6 +1049,7 @@ function assertDraftWriteSucceeded(updateCount: number): void {
 function buildSubmitCriteria(
   evidences: Array<{ criterion: Criterion }>,
   latestPrecheckResultJson?: Prisma.JsonValue,
+  includePriority = true,
 ): Criterion[] {
   const criteria: Criterion[] = [
     Criterion.ethics,
@@ -1039,8 +1059,9 @@ function buildSubmitCriteria(
     Criterion.integration,
   ];
   if (
-    evidences.some((evidence) => evidence.criterion === Criterion.priority) ||
-    hasPriorityPrecheckResult(latestPrecheckResultJson)
+    includePriority &&
+    (evidences.some((evidence) => evidence.criterion === Criterion.priority) ||
+      hasPriorityPrecheckResult(latestPrecheckResultJson))
   ) {
     criteria.push(Criterion.priority);
   }

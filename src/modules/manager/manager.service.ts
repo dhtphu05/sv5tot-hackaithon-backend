@@ -1,5 +1,6 @@
 // Owns management dashboards, workload views, review assignment, and manual aggregation.
 import {
+  ApplicationType,
   ApplicationStatus,
   Criterion,
   FinalStatus,
@@ -851,6 +852,18 @@ export class ManagerService {
     } else {
       assertSameWorkspace(user, task, 'Review task not found');
     }
+    if (
+      task.application &&
+      isCityIndividualApplication(task.application) &&
+      !cityManager &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers or admins may assign City review tasks',
+      );
+    }
     if (!officer || !officer.isActive) {
       throw new AppError(404, ErrorCodes.OFFICER_NOT_FOUND, 'Officer not found');
     }
@@ -969,6 +982,17 @@ export class ManagerService {
     input: AggregateApplicationInput,
   ) {
     const application = await this.getApplicationForAggregation(user, applicationId);
+    if (
+      isCityIndividualApplication(application) &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers or admins may aggregate City applications',
+      );
+    }
     const aggregation = buildAggregation(application);
     const updated = await prisma.$transaction(async (tx) => {
       const saved = await tx.application.update({
@@ -1018,6 +1042,16 @@ export class ManagerService {
     ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager, committee, or admin can finalize results');
     }
+    if (user.role === Role.manager || user.role === Role.committee) {
+      const application = await this.getApplicationForAggregation(user, applicationId);
+      if (isCityIndividualApplication(application)) {
+        throw new AppError(
+          403,
+          ErrorCodes.FORBIDDEN,
+          'Only City Managers, City Committee, or admins may finalize City applications',
+        );
+      }
+    }
     if (
       (input.finalStatus === FinalStatus.passed ||
         input.finalStatus === FinalStatus.partially_passed) &&
@@ -1062,10 +1096,17 @@ export class ManagerService {
     }
     const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
     if (!overrideRecommendation) {
-      const allReviewTasksAccepted =
+      const cityHumanReviewComplete =
+        isCityIndividualApplication(aggregation.application) &&
         aggregation.reviewProgress.totalTasks > 0 &&
-        aggregation.reviewProgress.accepted === aggregation.reviewProgress.totalTasks &&
+        aggregation.reviewProgress.accepted + aggregation.reviewProgress.rejected ===
+          aggregation.reviewProgress.totalTasks &&
         aggregation.resolutionSummary.open === 0;
+      const allReviewTasksAccepted =
+        (aggregation.reviewProgress.totalTasks > 0 &&
+          aggregation.reviewProgress.accepted === aggregation.reviewProgress.totalTasks &&
+          aggregation.resolutionSummary.open === 0) ||
+        cityHumanReviewComplete;
       try {
         assertFinalizeMatchesCascade(input, freshCascade);
       } catch (error) {
@@ -1099,6 +1140,31 @@ export class ManagerService {
 
     return prisma.$transaction(async (tx) => {
       const before = await tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+      const cityIndividual = isCityIndividualApplication(aggregation.application);
+      const finalizationData = {
+        status,
+        finalStatus: input.finalStatus,
+        finalLevel: input.finalStatus === FinalStatus.failed ? null : input.finalLevel,
+        finalNote: input.finalNote,
+        finalizedById: user.id,
+      };
+      if (cityIndividual) {
+        const finalization = await tx.application.updateMany({
+          where: {
+            id: applicationId,
+            finalStatus: FinalStatus.pending,
+            finalizedAt: null,
+          },
+          data: { ...finalizationData, finalizedAt: new Date() },
+        });
+        if (finalization.count !== 1) {
+          throw new AppError(
+            409,
+            ErrorCodes.FINAL_RESULT_ALREADY_EXISTS,
+            'Final result already exists. Reopen the final result before finalizing again.',
+          );
+        }
+      }
       const cascadeReview = await tx.cascadeReview.create({
         data: {
           applicationId,
@@ -1116,17 +1182,12 @@ export class ManagerService {
           }),
         },
       });
-      const updated = await tx.application.update({
-        where: { id: applicationId },
-        data: {
-          status,
-          finalStatus: input.finalStatus,
-          finalLevel: input.finalStatus === FinalStatus.failed ? null : input.finalLevel,
-          finalNote: input.finalNote,
-          finalizedAt: new Date(),
-          finalizedById: user.id,
-        },
-      });
+      const updated = cityIndividual
+        ? await tx.application.findUniqueOrThrow({ where: { id: applicationId } })
+        : await tx.application.update({
+            where: { id: applicationId },
+            data: { ...finalizationData, finalizedAt: new Date() },
+          });
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
@@ -1253,6 +1314,18 @@ export class ManagerService {
     }
     assertReviewWorkspaceAccess(user, reviewResource(application), 'Application not found');
     if (
+      isCityIndividualApplication(application) &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.city_committee &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers, City Committee, or admins may reopen City results',
+      );
+    }
+    if (
       application.status !== ApplicationStatus.completed &&
       application.status !== ApplicationStatus.rejected
     ) {
@@ -1322,6 +1395,16 @@ function reviewResource(resource: {
     workspaceType: resource.workspace?.type,
     workspaceIsActive: resource.workspace?.isActive,
   };
+}
+
+function isCityIndividualApplication(application: {
+  applicationType?: ApplicationType;
+  targetLevel: Level | null;
+}) {
+  return (
+    application.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city
+  );
 }
 
 export function buildAggregation(application: ApplicationDetail) {

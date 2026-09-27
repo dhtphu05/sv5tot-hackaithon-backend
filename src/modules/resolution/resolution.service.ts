@@ -1,11 +1,13 @@
 // Owns committee resolution cases and final dispute decisions.
 import {
   ApprovedEvidenceApprovalSource,
+  ApplicationType,
   ApplicationStatus,
   Criterion,
   EvidenceStatus,
   FinalStatus,
   KnowledgeDecision,
+  Level,
   NotificationType,
   ResolutionStatus,
   ReviewDecision,
@@ -288,6 +290,7 @@ export class ResolutionService {
           tx,
           resolutionCase.applicationId,
           input.decision,
+          resolutionCase.application,
         );
 
         const knowledgeBaseItem =
@@ -514,6 +517,18 @@ export class ResolutionService {
       },
       'Resolution case not found',
     );
+    if (
+      isCityIndividualApplication(resolutionCase.application) &&
+      (user.role === Role.officer ||
+        user.role === Role.manager ||
+        user.role === Role.committee)
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'This role cannot access City individual resolution cases',
+      );
+    }
     if (canManageResolution(user)) return;
     if (user.role !== Role.officer && user.role !== Role.city_officer) {
       throw new AppError(
@@ -544,6 +559,20 @@ async function buildListWhere(
 ): Promise<Prisma.ResolutionCaseWhereInput> {
   const filters: Prisma.ResolutionCaseWhereInput[] = [];
   filters.push(reviewWorkspaceFilterFor(user));
+  if (
+    user.role === Role.officer ||
+    user.role === Role.manager ||
+    user.role === Role.committee
+  ) {
+    filters.push({
+      application: {
+        isNot: {
+          applicationType: ApplicationType.individual,
+          targetLevel: Level.city,
+        },
+      },
+    });
+  }
   const statusFilter = statusWhere(query.status);
   if (statusFilter) filters.push(statusFilter);
   if (query.applicationId) filters.push({ applicationId: query.applicationId });
@@ -821,6 +850,7 @@ async function applyApplicationStatus(
   tx: Prisma.TransactionClient,
   applicationId: string,
   decision: ResolutionFinalDecision,
+  application: { applicationType: ApplicationType; targetLevel: Level },
 ) {
   const baseData: Prisma.ApplicationUpdateInput = {
     finalizedAt: null,
@@ -877,6 +907,13 @@ async function applyApplicationStatus(
     ) &&
     tasks.some((task) => task.status === ReviewTaskStatus.rejected)
   ) {
+    if (isCityIndividualApplication(application)) {
+      await tx.application.update({
+        where: { id: applicationId },
+        data: { ...baseData, status: ApplicationStatus.under_review },
+      });
+      return ApplicationStatus.under_review;
+    }
     await tx.application.update({
       where: { id: applicationId },
       data: {
@@ -1165,6 +1202,16 @@ function parseCommitteeDecision(value: string | null) {
   } catch {
     return null;
   }
+}
+
+function isCityIndividualApplication(application: {
+  applicationType: ApplicationType;
+  targetLevel: Level;
+}) {
+  return (
+    application.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city
+  );
 }
 
 function anonymizeEvidenceName(name: string): string {

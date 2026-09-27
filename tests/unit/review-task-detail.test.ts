@@ -7,6 +7,7 @@ import {
   IndexingStatus,
   Level,
   MetricType,
+  ReviewDecision,
   ReviewTaskStatus,
   Role,
   WorkspaceType,
@@ -19,6 +20,8 @@ const prismaMock = vi.hoisted(() => ({
   auditLog: { findMany: vi.fn() },
   eventRegistry: { findMany: vi.fn() },
   knowledgeBaseItem: { findMany: vi.fn() },
+  reviewTask: { updateMany: vi.fn() },
+  $transaction: vi.fn(),
 }));
 
 vi.mock('../../src/infrastructure/database/prisma', () => ({
@@ -29,19 +32,6 @@ import { ReviewService } from '../../src/modules/review/review.service';
 
 const now = new Date('2026-07-05T00:00:00.000Z');
 const workspaceId = '11111111-1111-1111-1111-111111111111';
-
-const managerUser: AuthenticatedUser = {
-  id: 'manager-1',
-  email: 'manager@5tot.test',
-  fullName: 'Manager',
-  role: Role.manager,
-  studentCode: null,
-  className: null,
-  faculty: null,
-  avatarUrl: null,
-  workspaceId,
-  workspace: null,
-};
 
 const assignedOfficerId = 'officer-assigned';
 
@@ -76,7 +66,7 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
     };
     const service = new ReviewService(reviewRepository as any, {} as any, {} as any);
 
-    const detail = await service.getTaskDetail(managerUser, 'task-1');
+    const detail = await service.getTaskDetail(cityManagerUser(), 'task-1');
 
     expect(prismaMock.eventRegistry.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -106,7 +96,7 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
     };
     const service = new ReviewService(reviewRepository as any, {} as any, {} as any);
 
-    const detail = await service.getTaskDetail(managerUser, 'task-1');
+    const detail = await service.getTaskDetail(cityManagerUser(), 'task-1');
 
     expect(prismaMock.eventRegistry.findMany).not.toHaveBeenCalled();
     expect(detail.evidences[0].event).toBeNull();
@@ -131,6 +121,7 @@ describe('ReviewService demo officer permissions', () => {
             matchedEventId: null,
             assignedOfficerId,
             criterion: Criterion.ethics,
+            targetLevel: Level.school,
           }),
         ],
         total: 1,
@@ -165,6 +156,7 @@ describe('ReviewService demo officer permissions', () => {
             matchedEventId: null,
             assignedOfficerId,
             criterion: Criterion.ethics,
+            targetLevel: Level.school,
           }),
         ],
         total: 1,
@@ -196,6 +188,7 @@ describe('ReviewService demo officer permissions', () => {
             matchedEventId: null,
             assignedOfficerId,
             criterion: Criterion.ethics,
+            targetLevel: Level.school,
           }),
         ],
         total: 1,
@@ -262,7 +255,10 @@ describe('City Officer access to School review tasks', () => {
       criterion: Criterion.ethics,
     });
     const assignmentService = { canOfficerHandleCriterion: vi.fn().mockResolvedValue(false) };
-    const service = new ReviewService({ findDetail: vi.fn().mockResolvedValue(task) } as any, assignmentService as any);
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(task) } as any,
+      assignmentService as any,
+    );
 
     await expect(service.getTaskDetail(cityOfficerUser(), 'task-1')).rejects.toMatchObject({
       statusCode: 403,
@@ -293,12 +289,187 @@ describe('City Officer access to School review tasks', () => {
   });
 });
 
+describe('individual City review task permissions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prismaMock.auditLog.findMany.mockResolvedValue([]);
+    prismaMock.knowledgeBaseItem.findMany.mockResolvedValue([]);
+  });
+
+  it('lets City Managers view City tasks for coordination without criterion decision access', async () => {
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as never,
+      {} as never,
+    );
+
+    const result = await service.getTaskDetail(cityManagerUser(), 'task-1');
+
+    expect(result.task.permissions).toMatchObject({
+      canView: true,
+      canAct: false,
+      canClaim: false,
+    });
+    await expect(
+      service.decideTask(cityManagerUser(), 'task-1', {
+        decision: 'accepted',
+        officerSuggestedLevel: Level.city,
+        evidenceDecisions: [],
+        evidenceAssessments: [],
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+    await expect(service.claimTask(cityManagerUser(), 'task-1')).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    expect(prismaMock.reviewTask.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([Role.officer, Role.manager, Role.committee])(
+    'denies legacy %s access to an individual City review task',
+    async (role) => {
+      const legacyUser = {
+        ...cityManagerUser(),
+        id: 'legacy-user',
+        role,
+        workspaceId,
+        workspace: null,
+      } as AuthenticatedUser;
+      const service = new ReviewService(
+        { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as never,
+        { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
+      );
+
+      await expect(service.getTaskDetail(legacyUser, 'task-1')).rejects.toMatchObject({
+        statusCode: 403,
+      });
+    },
+  );
+
+  it('keeps City Committee read-only access to a City resolution task', async () => {
+    const service = new ReviewService(
+      {
+        findDetail: vi
+          .fn()
+          .mockResolvedValue(
+            buildTask({ matchedEventId: null, status: ReviewTaskStatus.resolution_needed }),
+          ),
+      } as never,
+      {} as never,
+    );
+
+    const result = await service.getTaskDetail(cityCommitteeUser(), 'task-1');
+
+    expect(result.task.permissions).toMatchObject({
+      canView: true,
+      canAct: false,
+      canClaim: false,
+    });
+  });
+
+  it('allows the assigned specialized City Officer to act on a claimable review task', async () => {
+    const service = new ReviewService(
+      {
+        findDetail: vi
+          .fn()
+          .mockResolvedValue(
+            buildTask({ matchedEventId: null, assignedOfficerId: 'city-officer' }),
+          ),
+      } as never,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
+    );
+
+    const result = await service.getTaskDetail(cityOfficerUser(), 'task-1');
+
+    expect(result.task.permissions).toMatchObject({ canView: true, canAct: true, canClaim: false });
+  });
+
+  it.each([Role.student, Role.data_uploader])(
+    'denies %s access to an individual City task',
+    async (role) => {
+      const user = {
+        ...cityManagerUser(),
+        id: 'non-review-user',
+        role,
+        workspaceId,
+        workspace: null,
+      } as AuthenticatedUser;
+      const service = new ReviewService(
+        { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as never,
+        {} as never,
+      );
+
+      await expect(service.getTaskDetail(user, 'task-1')).rejects.toMatchObject({
+        statusCode: 403,
+      });
+    },
+  );
+
+  it('preserves the existing global admin review bypass', async () => {
+    const admin: AuthenticatedUser = {
+      ...cityManagerUser(),
+      id: 'admin',
+      email: 'admin@5tot.test',
+      role: Role.admin,
+      workspaceId: null,
+      workspace: null,
+    };
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as never,
+      {} as never,
+    );
+
+    const result = await service.getTaskDetail(admin, 'task-1');
+
+    expect(result.task.permissions).toMatchObject({ canView: true, canAct: true });
+  });
+
+  it('uses updatedAt as a compare-and-swap token for admin overrides of final City tasks', async () => {
+    const admin: AuthenticatedUser = {
+      ...cityManagerUser(),
+      id: 'admin',
+      email: 'admin@5tot.test',
+      role: Role.admin,
+      workspaceId: null,
+      workspace: null,
+    };
+    const task = {
+      ...buildTask({ matchedEventId: null, status: ReviewTaskStatus.accepted }),
+      decision: ReviewDecision.accepted,
+    };
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    prismaMock.$transaction.mockImplementation((callback: (transaction: unknown) => unknown) =>
+      callback({ reviewTask: { updateMany } }),
+    );
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(task) } as never,
+      {} as never,
+    );
+
+    await expect(
+      service.decideTask(admin, 'task-1', {
+        decision: ReviewDecision.rejected,
+        officerNote: 'Admin correction after final review',
+        evidenceDecisions: [],
+        evidenceAssessments: [],
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'task-1', updatedAt: now }),
+        data: expect.objectContaining({ updatedAt: expect.any(Date) }),
+      }),
+    );
+  });
+});
+
 function buildTask(input: {
   matchedEventId: string | null;
   normalizedFieldsJson?: Record<string, unknown>;
   assignedOfficerId?: string | null;
   criterion?: Criterion;
   status?: ReviewTaskStatus;
+  targetLevel?: Level;
 }) {
   return {
     id: 'task-1',
@@ -325,7 +496,7 @@ function buildTask(input: {
       id: 'app-1',
       workspaceId,
       schoolYear: '2025-2026',
-      targetLevel: Level.city,
+      targetLevel: input.targetLevel ?? Level.city,
       applicationType: ApplicationType.individual,
       status: ApplicationStatus.under_review,
       student: {
@@ -422,4 +593,29 @@ function cityOfficerUser(): AuthenticatedUser {
       shortName: 'Da Nang',
     },
   };
+}
+
+function cityManagerUser(): AuthenticatedUser {
+  return {
+    id: 'city-manager',
+    email: 'manager@danang.city',
+    fullName: 'City Manager',
+    role: Role.city_manager,
+    studentCode: null,
+    className: null,
+    faculty: null,
+    avatarUrl: null,
+    workspaceId: 'city-workspace',
+    workspace: {
+      id: 'city-workspace',
+      code: 'DANANG_CITY',
+      type: WorkspaceType.CITY,
+      name: 'Da Nang',
+      shortName: 'Da Nang',
+    },
+  };
+}
+
+function cityCommitteeUser(): AuthenticatedUser {
+  return { ...cityManagerUser(), id: 'city-committee', role: Role.city_committee };
 }
