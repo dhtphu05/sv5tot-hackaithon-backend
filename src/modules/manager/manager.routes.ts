@@ -18,6 +18,8 @@ import {
 } from '../collective/collective.validation';
 import {
   aggregateApplication,
+  archiveApplication,
+  cancelApplication,
   createCityReviewSeason,
   getCityReviewSeason,
   getManagerSubmissionDeadline,
@@ -33,23 +35,29 @@ import {
   listManagerResults,
   listManagerApplications,
   reopenFinalApplication,
+  reopenCancelledApplication,
+  unarchiveApplication,
   grantSubmissionWindowException,
   revokeSubmissionWindowException,
   updateCityReviewSeason,
 } from './manager.controller';
 import {
   aggregateApplicationSchema,
+  archiveApplicationSchema,
   assignReviewTaskSchema,
   committeeInboxQuerySchema,
   finalizeApplicationSchema,
+  cancelApplicationSchema,
   listManagerApplicationsQuerySchema,
   listManagerResultsQuerySchema,
   reopenFinalSchema,
+  reopenCancelledApplicationSchema,
   cityReviewSeasonCreateSchema,
   cityReviewSeasonParamsSchema,
   cityReviewSeasonUpdateSchema,
   revokeSubmissionWindowExceptionSchema,
   submissionWindowExceptionSchema,
+  unarchiveApplicationSchema,
 } from './manager.validation';
 
 export const managerRouter = Router();
@@ -94,6 +102,34 @@ managerRouter.delete(
   requireRole(Role.city_manager, Role.admin),
   validate({ body: revokeSubmissionWindowExceptionSchema }),
   asyncHandler(revokeSubmissionWindowException),
+);
+managerRouter.post(
+  '/applications/:id/cancel',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ body: cancelApplicationSchema }),
+  asyncHandler(cancelApplication),
+);
+managerRouter.post(
+  '/applications/:id/reopen-cancelled',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ body: reopenCancelledApplicationSchema }),
+  asyncHandler(reopenCancelledApplication),
+);
+managerRouter.post(
+  '/applications/:id/archive',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ body: archiveApplicationSchema }),
+  asyncHandler(archiveApplication),
+);
+managerRouter.post(
+  '/applications/:id/unarchive',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ body: unarchiveApplicationSchema }),
+  asyncHandler(unarchiveApplication),
 );
 
 function requireCityManagerForPendingEligibility(req: Request, _res: Response, next: NextFunction) {

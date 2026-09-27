@@ -174,6 +174,20 @@ export const reopenFinalSchema = z.object({
     .default(ApplicationStatus.under_review),
 });
 
+export const cancelApplicationSchema = z.object({
+  reason: z.string().trim().min(1).max(2000),
+});
+
+export const reopenCancelledApplicationSchema = z.object({
+  reason: z.string().trim().min(1).max(2000),
+});
+
+export const archiveApplicationSchema = z.object({
+  reason: z.string().trim().max(1000).optional(),
+});
+
+export const unarchiveApplicationSchema = z.object({}).strict();
+
 export type ListManagerApplicationsQuery = z.infer<typeof listManagerApplicationsQuerySchema>;
 export type ListManagerResultsQuery = z.infer<typeof listManagerResultsQuerySchema>;
 export type CommitteeInboxQuery = z.infer<typeof committeeInboxQuerySchema>;
@@ -181,6 +195,9 @@ export type AssignReviewTaskInput = z.infer<typeof assignReviewTaskSchema>;
 export type AggregateApplicationInput = z.infer<typeof aggregateApplicationSchema>;
 export type FinalizeApplicationInput = z.infer<typeof finalizeApplicationSchema>;
 export type ReopenFinalInput = z.infer<typeof reopenFinalSchema>;
+export type CancelApplicationInput = z.infer<typeof cancelApplicationSchema>;
+export type ReopenCancelledApplicationInput = z.infer<typeof reopenCancelledApplicationSchema>;
+export type ArchiveApplicationInput = z.infer<typeof archiveApplicationSchema>;
 export type CityReviewSeasonCreateInput = z.infer<typeof cityReviewSeasonCreateSchema>;
 export type CityReviewSeasonUpdateInput = z.infer<typeof cityReviewSeasonUpdateSchema>;
 export type SubmissionWindowExceptionInput = z.infer<typeof submissionWindowExceptionSchema>;

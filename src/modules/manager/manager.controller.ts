@@ -3,9 +3,43 @@ import type { Request, Response } from 'express';
 import { sendSuccess } from '../../shared/responses/api-response';
 import { ManagerService } from './manager.service';
 import { CityReviewSeasonsService } from './city-review-seasons.service';
+import { ApplicationLifecycleService } from '../applications/application-lifecycle.service';
 
 const service = new ManagerService();
 const cityReviewSeasonsService = new CityReviewSeasonsService();
+const applicationLifecycleService = new ApplicationLifecycleService();
+
+export async function cancelApplication(req: Request, res: Response): Promise<void> {
+  const data = await applicationLifecycleService.cancel(
+    req.user!,
+    String(req.params.id),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function reopenCancelledApplication(req: Request, res: Response): Promise<void> {
+  const data = await applicationLifecycleService.reopenCancelled(
+    req.user!,
+    String(req.params.id),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function archiveApplication(req: Request, res: Response): Promise<void> {
+  const data = await applicationLifecycleService.archive(
+    req.user!,
+    String(req.params.id),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function unarchiveApplication(req: Request, res: Response): Promise<void> {
+  const data = await applicationLifecycleService.unarchive(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
 
 export async function getCityReviewSeason(req: Request, res: Response): Promise<void> {
   const data = await cityReviewSeasonsService.getSeason(req.user!, String(req.params.schoolYear));
