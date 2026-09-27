@@ -67,7 +67,7 @@ export class CityAnalyticsService {
     const [yearGroups, schools, officers] = await Promise.all([
       prisma.application.groupBy({
         by: ['schoolYear'],
-        where: cityApplicationWhere(),
+        where: cityApplicationWhere({}, 'all'),
         orderBy: { schoolYear: 'desc' },
       }),
       prisma.workspace.findMany({
@@ -89,10 +89,13 @@ export class CityAnalyticsService {
 
     const availableSchoolYears = yearGroups.map((item) => item.schoolYear);
     const schoolYear = query.schoolYear ?? availableSchoolYears[0] ?? null;
-    const filterWhere = cityApplicationWhere({ ...query, schoolYear: schoolYear ?? undefined });
-    const rows = schoolYear
-      ? ((await prisma.application.findMany({
-          where: filterWhere,
+    const filters = { ...query, schoolYear: schoolYear ?? undefined };
+    let rows: ApplicationRow[] = [];
+    let cancelledCount = 0;
+    if (schoolYear) {
+      const [activeRows, cancelled] = await Promise.all([
+        prisma.application.findMany({
+          where: cityApplicationWhere(filters),
           select: {
             id: true,
             workspaceId: true,
@@ -106,21 +109,25 @@ export class CityAnalyticsService {
             reviewTasks: { select: { criterion: true, status: true, assignedOfficerId: true } },
             resolutionCases: { select: { status: true } },
           },
-        })) as ApplicationRow[])
-      : [];
+        }),
+        prisma.application.count({ where: cityApplicationWhere(filters, 'cancelled') }),
+      ]);
+      rows = activeRows as ApplicationRow[];
+      cancelledCount = cancelled;
+    }
 
     return summarize(rows, {
       schoolYear,
       workspaceId: query.workspaceId ?? null,
       status: query.status ?? null,
-    }, availableSchoolYears, schools, officers);
+    }, availableSchoolYears, schools, officers, cancelledCount);
   }
 
   async listApplications(user: AuthenticatedUser, query: CityAnalyticsApplicationsQuery) {
     authorizeCityAnalytics(user);
     const yearGroups = await prisma.application.groupBy({
       by: ['schoolYear'],
-      where: cityApplicationWhere(),
+      where: cityApplicationWhere({}, 'all'),
       orderBy: { schoolYear: 'desc' },
     });
     const schoolYear = query.schoolYear ?? yearGroups[0]?.schoolYear;
@@ -249,11 +256,16 @@ function cityApplicationWhere(filters: {
   schoolYear?: string;
   workspaceId?: string;
   status?: ApplicationStatus;
-} = {}): Prisma.ApplicationWhereInput {
+} = {}, lifecycle: 'active' | 'cancelled' | 'all' = 'active'): Prisma.ApplicationWhereInput {
   return {
     applicationType: ApplicationType.individual,
     targetLevel: Level.city,
     workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+    ...(lifecycle === 'active'
+      ? { cancelledAt: null }
+      : lifecycle === 'cancelled'
+        ? { cancelledAt: { not: null } }
+        : {}),
     ...(filters.schoolYear ? { schoolYear: filters.schoolYear } : {}),
     ...(filters.workspaceId ? { workspaceId: filters.workspaceId } : {}),
     ...(filters.status ? { status: filters.status } : {}),
@@ -266,6 +278,7 @@ function summarize(
   availableSchoolYears: string[],
   schools: Array<{ id: string; code: string; name: string }>,
   officers: Array<{ id: string; fullName: string }>,
+  cancelledCount: number,
 ) {
   const applications = {
     created: rows.length,
@@ -408,6 +421,7 @@ function summarize(
   return {
     filters,
     availableSchoolYears,
+    cancelledCount,
     filterOptions: { schools: schools.map(({ id, code, name }) => ({ workspaceId: id, code, name })) },
     applications,
     criteria,

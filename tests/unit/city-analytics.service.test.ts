@@ -359,6 +359,26 @@ describe('CityAnalyticsService', () => {
     });
   });
 
+  it('excludes cancelled applications from official metrics and reports their count separately', async () => {
+    prismaMock.application.count.mockResolvedValue(2);
+    prismaMock.application.findMany.mockResolvedValue([
+      makeApplication({ id: 'active', status: ApplicationStatus.under_review, submittedAt }),
+    ] as never);
+    const service = new CityAnalyticsService();
+
+    const summary = await service.getSummary(cityManager, { schoolYear: '2025-2026' });
+
+    expect(summary.cancelledCount).toBe(2);
+    expect(summary.applications.created).toBe(1);
+    expect(prismaMock.application.findMany.mock.calls[0][0].where).toMatchObject({ cancelledAt: null });
+    expect(prismaMock.application.findMany.mock.calls[0][0].where).not.toHaveProperty('archivedAt');
+    expect(prismaMock.application.count.mock.calls[0][0].where).toMatchObject({
+      cancelledAt: { not: null },
+      schoolYear: '2025-2026',
+    });
+    expect(prismaMock.application.groupBy.mock.calls[0][0].where).not.toHaveProperty('cancelledAt');
+  });
+
   it('paginates and scopes drill-down by the selected human criterion result', async () => {
     prismaMock.application.count.mockResolvedValue(21);
     const service = new CityAnalyticsService();
@@ -378,6 +398,7 @@ describe('CityAnalyticsService', () => {
     const listQuery = prismaMock.application.findMany.mock.calls[0][0];
     expect(listQuery).toMatchObject({ skip: 10, take: 10 });
     expect(listQuery.where).toMatchObject({
+      cancelledAt: null,
       applicationType: ApplicationType.individual,
       targetLevel: Level.city,
       workspaceId: schoolAId,
