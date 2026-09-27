@@ -180,7 +180,7 @@ function configureSuccessfulTransaction(updateCount = 1) {
     assignedOfficer: { id: 'officer-a', fullName: 'Officer A' },
   };
   const tx = {
-    $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-a', studentId: 'student-a' }]),
+    $queryRaw: citySubmissionQueryMock(),
     application: {
       findUnique: vi.fn().mockResolvedValue({ workspaceId: 'school-a' }),
       update: vi.fn().mockResolvedValue({}),
@@ -193,6 +193,30 @@ function configureSuccessfulTransaction(updateCount = 1) {
   mocks.prisma.$transaction.mockImplementation(async (callback) => callback(tx));
   mocks.notifications.create.mockResolvedValue({ id: 'notification-a' });
   return tx;
+}
+
+function citySubmissionQueryMock() {
+  return vi.fn(async (parts: TemplateStringsArray) => {
+    const sql = parts.join('');
+    if (sql.includes('FROM "CityReviewSeason"')) {
+      return [{
+        id: 'city-season-a',
+        schoolYear: '2025-2026',
+        submissionOpensAt: new Date('2000-01-01T00:00:00.000Z'),
+        submissionClosesAt: new Date('2099-01-01T00:00:00.000Z'),
+        reviewDeadlineAt: null,
+        supplementDeadlineAt: new Date('2099-02-01T00:00:00.000Z'),
+        finalizationDeadlineAt: null,
+        version: 1,
+        createdAt: new Date('2026-08-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-08-01T00:00:00.000Z'),
+      }];
+    }
+    if (sql.includes('FROM "CitySubmissionWindowException"')) return [];
+    if (sql.includes('FROM "Application"')) return [{ id: 'application-a' }];
+    if (sql.includes('FROM "User"')) return [{ id: 'student-a' }];
+    return [];
+  });
 }
 
 describe('ApplicationsService City submission eligibility gate', () => {
@@ -236,6 +260,44 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(mocks.emailOutbox.enqueue).not.toHaveBeenCalled();
     expect(original.status).toBe(ApplicationStatus.ready_to_submit);
     expect(original.submittedAt).toBeNull();
+  });
+
+  it('blocks a City submission before precheck persistence or review side effects when the window is not open', async () => {
+    const { service: eligibility } = eligibilityService({ parentWorkspaceId: null, recipients: [] });
+    const transaction = {
+      $queryRaw: vi.fn()
+        .mockResolvedValueOnce([{
+          schoolYear: '2025-2026',
+          submissionOpensAt: new Date('2026-10-01T00:00:00.000Z'),
+          submissionClosesAt: new Date('2026-11-01T00:00:00.000Z'),
+        }])
+        .mockResolvedValueOnce([]),
+    };
+    mocks.prisma.$transaction.mockImplementation(async (callback) => callback(transaction));
+
+    await expect(
+      buildService(eligibility).submit(student, 'application-a', { allowSubmitWithWarnings: true }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CITY_SUBMISSION_NOT_OPEN' });
+
+    expect(mocks.prisma.precheckResult.findFirst).not.toHaveBeenCalled();
+    expect(mocks.prisma.application.update).not.toHaveBeenCalled();
+    expect(mocks.notifications.create).not.toHaveBeenCalled();
+    expect(mocks.emailOutbox.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('keeps Award eligibility rejection ahead of submission window and exception checks', async () => {
+    const { service: eligibility, repository } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [],
+    });
+
+    await expect(
+      buildService(eligibility).submit(student, 'application-a', { allowSubmitWithWarnings: true }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CITY_SUBMISSION_NOT_ELIGIBLE' });
+    expect(repository.findConfirmedUniversityRecipients).toHaveBeenCalledOnce();
+    expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+    expect(mocks.prisma.precheckResult.findFirst).not.toHaveBeenCalled();
+    expect(mocks.notifications.create).not.toHaveBeenCalled();
   });
 
   it('blocks NEEDS_VERIFICATION with a distinct message before creating ReviewTasks', async () => {
@@ -391,7 +453,7 @@ describe('ApplicationsService City submission eligibility gate', () => {
     });
     const createdTasks: Array<Record<string, unknown>> = [];
     const tx = {
-      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-a' }]),
+      $queryRaw: citySubmissionQueryMock(),
       application: {
         findUnique: vi.fn().mockResolvedValue({ workspaceId: 'school-a' }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -716,10 +778,9 @@ describe('ApplicationsService City submission eligibility gate', () => {
     });
 
     expect(tx.$queryRaw).toHaveBeenCalled();
-    expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
-    expect((tx.$queryRaw.mock.calls[1][0] as TemplateStringsArray).join('')).toContain(
-      'FOR NO KEY UPDATE',
-    );
+    expect(tx.$queryRaw.mock.calls.some(([query]) =>
+      (query as TemplateStringsArray).join('').includes('FOR NO KEY UPDATE'),
+    )).toBe(true);
     expect(repository.findStudentIdentity).toHaveBeenLastCalledWith('student-a', tx);
     expect(tx.application.updateMany).not.toHaveBeenCalled();
     expect(tx.application.update).not.toHaveBeenCalled();

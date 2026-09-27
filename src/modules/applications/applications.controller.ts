@@ -3,9 +3,16 @@ import type { Request, Response } from 'express';
 import { sendSuccess } from '../../shared/responses/api-response';
 import { ApplicationsService } from './applications.service';
 import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
+import { CityReviewSeasonsService } from '../manager/city-review-seasons.service';
 
 const applicationsService = new ApplicationsService();
 const citySubmissionEligibilityService = new CitySubmissionEligibilityService();
+const cityReviewSeasonsService = new CityReviewSeasonsService();
+
+export async function getApplicationSubmissionDeadline(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.getStudentDeadline(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
 
 export async function getApplicationEligibility(req: Request, res: Response): Promise<void> {
   const data = await citySubmissionEligibilityService.getEligibility(

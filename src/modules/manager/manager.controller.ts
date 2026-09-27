@@ -2,8 +2,52 @@
 import type { Request, Response } from 'express';
 import { sendSuccess } from '../../shared/responses/api-response';
 import { ManagerService } from './manager.service';
+import { CityReviewSeasonsService } from './city-review-seasons.service';
 
 const service = new ManagerService();
+const cityReviewSeasonsService = new CityReviewSeasonsService();
+
+export async function getCityReviewSeason(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.getSeason(req.user!, String(req.params.schoolYear));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function createCityReviewSeason(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.createSeason(req.user!, req.body);
+  sendSuccess(res, data, { requestId: req.requestId }, 201);
+}
+
+export async function updateCityReviewSeason(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.updateSeason(
+    req.user!,
+    String(req.params.schoolYear),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function getManagerSubmissionDeadline(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.getManagerDeadline(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function grantSubmissionWindowException(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.grantException(
+    req.user!,
+    String(req.params.id),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function revokeSubmissionWindowException(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.revokeException(
+    req.user!,
+    String(req.params.id),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
 
 export async function listManagerApplications(req: Request, res: Response): Promise<void> {
   const data = await service.listApplications(req.user!, req.query as never);

@@ -34,6 +34,7 @@ import { findProcessingEvidence, isApplicationPrecheckStale } from './applicatio
 import { ApplicationsRepository } from './applications.repository';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
+import { CityReviewSeasonsService } from '../manager/city-review-seasons.service';
 import type {
   AutosaveDraftInput,
   GetCurrentApplicationQuery,
@@ -59,6 +60,12 @@ function requiresInitialCityEligibility(
     application.targetLevel === Level.city &&
     (application.status !== ApplicationStatus.supplement_required || application.submittedAt === null)
   );
+}
+
+function isIndividualCityApplication(
+  application: Pick<Application, 'applicationType' | 'targetLevel'>,
+): boolean {
+  return application.applicationType === ApplicationType.individual && application.targetLevel === Level.city;
 }
 
 type SubmitApplicationContext = Prisma.ApplicationGetPayload<{
@@ -339,6 +346,24 @@ export class ApplicationsService {
       await this.assertCitySubmissionEligible(user, application.id);
     }
 
+    const isCitySubmissionWindowed = isIndividualCityApplication(application);
+    const isInitialCityWindowSubmission =
+      isCitySubmissionWindowed &&
+      (application.status !== ApplicationStatus.supplement_required || application.submittedAt === null);
+    const isCitySupplementResubmit =
+      isCitySubmissionWindowed &&
+      application.status === ApplicationStatus.supplement_required &&
+      application.submittedAt !== null;
+    if (isInitialCityWindowSubmission) {
+      await prisma.$transaction((tx) =>
+        CityReviewSeasonsService.assertInitialSubmissionWindowOpen(tx, application),
+      );
+    } else if (isCitySupplementResubmit) {
+      await prisma.$transaction((tx) =>
+        CityReviewSeasonsService.assertSupplementResubmissionBeforeDeadline(tx, application),
+      );
+    }
+
     // A saved source file remains valid evidence for City review while OCR is running.
     const processingEvidence = isInitialCitySubmission ? undefined : findProcessingEvidence(application);
     if (processingEvidence) {
@@ -416,7 +441,7 @@ export class ApplicationsService {
       submissionState.targetLevel !== application.targetLevel ||
       submissionState.currentDraftVersion !== application.currentDraftVersion ||
       submissionState.submittedAt?.getTime() !== application.submittedAt?.getTime() ||
-      (isInitialCitySubmission &&
+      (isCitySubmissionWindowed &&
         submissionState.updatedAt.getTime() !== application.updatedAt.getTime()) ||
       !editableApplicationStatuses.includes(submissionState.status as never)
     ) {
@@ -441,7 +466,7 @@ export class ApplicationsService {
         let effectivePrecheckResultJson = precheckResultJson;
         let persistedPrecheck: Awaited<ReturnType<PrecheckService['persistPreparedInTransaction']>> | null = null;
 
-        if (isInitialCitySubmission) {
+        if (isCitySubmissionWindowed) {
           const lockedApplication = await tx.$queryRaw<Array<{ id: string }>>`
             SELECT "id"
             FROM "Application"
@@ -476,12 +501,23 @@ export class ApplicationsService {
             throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
           }
 
-          const eligibility = await this.citySubmissionEligibilityService.getEligibilityForSubmission(
-            tx,
-            user,
-            application.id,
-          );
-          this.assertCityEligibilityResultEligible(eligibility);
+          if (isInitialCitySubmission) {
+            const eligibility = await this.citySubmissionEligibilityService.getEligibilityForSubmission(
+              tx,
+              user,
+              application.id,
+            );
+            this.assertCityEligibilityResultEligible(eligibility);
+          }
+
+          if (isInitialCityWindowSubmission) {
+            await CityReviewSeasonsService.assertInitialSubmissionWindowOpen(tx, application);
+          } else if (isSupplementResubmit) {
+            await CityReviewSeasonsService.assertSupplementResubmissionBeforeDeadline(
+              tx,
+              application,
+            );
+          }
 
           if (preparedPrecheck) {
             persistedPrecheck = await this.precheckService.persistPreparedInTransaction(
