@@ -1622,7 +1622,12 @@ export class ReviewService {
       where: { applicationId },
     });
 
-    // 5 main criteria + any criteria with evidences
+    const cityIndividual =
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city;
+
+    // Individual City review is fixed to the five official criteria; elsewhere, preserve
+    // legacy behavior by ensuring any additional criteria that have evidence.
     const criteriaToEnsure = new Set<Criterion>([
       Criterion.ethics,
       Criterion.academic,
@@ -1630,8 +1635,10 @@ export class ReviewService {
       Criterion.volunteer,
       Criterion.integration,
     ]);
-    for (const ev of evidences) {
-      criteriaToEnsure.add(ev.criterion);
+    if (!cityIndividual) {
+      for (const ev of evidences) {
+        criteriaToEnsure.add(ev.criterion);
+      }
     }
 
     // Existing tasks to prevent duplicate (idempotency check)

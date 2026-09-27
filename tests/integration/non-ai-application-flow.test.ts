@@ -361,6 +361,23 @@ describe('non-AI individual application end-to-end flow', () => {
       .send({ mode: 'missing_only' })
       .expect(200);
     expect(ensuredTasks.body.data.ensuredCount).toBe(0);
+    expect(ensuredTasks.body.data.createdTaskIds).toEqual([]);
+
+    const repeatedEnsure = await request(app)
+      .post(`/api/review/applications/${applicationId}/tasks/ensure`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ mode: 'missing_only' })
+      .expect(200);
+    expect(repeatedEnsure.body.data).toEqual({ ensuredCount: 0, createdTaskIds: [] });
+
+    const tasksAfterRepeatedEnsure = await prisma.reviewTask.findMany({
+      where: { applicationId },
+      select: { criterion: true },
+    });
+    expect(tasksAfterRepeatedEnsure).toHaveLength(criteria.length);
+    expect(new Set(tasksAfterRepeatedEnsure.map((task) => task.criterion))).toEqual(
+      new Set(criteria),
+    );
 
     await prisma.evidence.updateMany({
       where: { id: { in: Object.values(evidenceIds) } },
