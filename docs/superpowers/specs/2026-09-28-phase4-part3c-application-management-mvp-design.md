@@ -44,15 +44,16 @@ Inspection was read-only on backend `main` at the SHA above.
 | Manager results/dashboard | `manager.service.ts:277-484` groups application/final/task/resolution states and workload; `:486-612` builds result and committee inbox lists. These application/task aggregates must not treat cancelled City items as current workflow/results. Archive remains included in official result and analytics totals. |
 | Exports | `src/modules/exports/exports.routes.ts:22-49` exposes applications JSON/CSV, review-task CSV, and review-result export. `exports.service.ts:190-253` creates official review-result rows; `:255-289` creates application-management rows. Official result export has no cancellation exclusion today. Add a mandatory exclusion there; management export defaults to active/non-cancelled and may opt into cancelled rows explicitly. |
 | Audit/notification | `src/modules/applications/application.helpers.ts:72-110` writes application audit records using a transaction client; `AuditLog` in `schema.prisma:1308-1344` already has actor, action, application, before/after JSON, and note. `NotificationType.application_updated` and `.review_updated` already exist (`schema.prisma:180-191`); `NotificationsService.create` accepts a transaction (`src/modules/notifications/notifications.service.ts:10-51`). No new notification enum or subsystem is needed. |
-| Deadline/season dependency | On both inspected `main` branches there is no submission-season model, deadline-exception route, or deadline-exception UI. Backend `ReviewTask.dueDate` and `SupplementRequest.deadline` are supplement/review deadlines only. Frontend `docs/CODEBASE_CONTEXT.md:226` also records no season-management surface. The Part 3B exception flow therefore cannot be named or extended from these checked-out sources; see “Implementation-plan confirmations.” |
+| Deadline/season dependency | Part 3B is present on both synced `main` branches (backend `73cdeed`, frontend `4689f0e`). Backend defines `CityReviewSeason` and `CitySubmissionWindowException` in `prisma/schema.prisma:495-526`, with additive migration `prisma/migrations/20260927120000_city_review_seasons_and_submission_exceptions/migration.sql`. `manager.routes.ts:58-96` exposes season and manager deadline/exception APIs; `applications.routes.ts:132` exposes the student deadline read. `CityReviewSeasonsService` is the server authority for opening/closing, per-application extensions, and supplement resubmission deadlines. Frontend reuses `CityDeadlineStatusCard`, `CityReviewSeasonAdministration`, and `CitySubmissionDeadlineExceptionPanel`. Part 3C must preserve and extend these flows where cancellation applies; it must not add duplicate season models, deadline APIs, or UI. |
 
 ### Frontend
 
 Inspection was read-only on frontend `main` at the SHA above.
 
 - `src/routes/app.manager.results.tsx` is the existing paginated/searchable result list. It calls `useManagerResults` and links to the detail route. It currently has final-status/result filters but no cancellation or archive filters.
-- `src/routes/app.manager.results.$applicationId.tsx` is the existing detail/decision console. It renders lifecycle-adjacent workflow data through `HeaderCard`, `CriterionDecisionBoard`, `ResolutionSection`, and `AuditSection`; `DecisionPanel` and `ReopenFinalDialog` already provide finalization/reopen interactions and reason entry.
+- `src/routes/app.manager.results.$applicationId.tsx` is the existing detail/decision console. It renders lifecycle-adjacent workflow data through `HeaderCard`, `CriterionDecisionBoard`, `ResolutionSection`, and `AuditSection`; `DecisionPanel` and `ReopenFinalDialog` already provide finalization/reopen interactions and reason entry. It also renders `CitySubmissionDeadlineExceptionPanel` for the existing City Manager/admin initial-City-draft flow; Part 3C must keep this panel and its server APIs working.
 - `src/features/manager/api/manager.ts` contains the result-list/detail/finalize/reopen API calls; `src/features/manager/hooks/useManager.ts` owns React Query keys, invalidation, and user feedback. Extend these rather than introducing a new management API client.
+- Part 3B season administration is already embedded in `CityAnalyticsDashboard` through `CityReviewSeasonAdministration`. Student deadline display is implemented by `CityDeadlineStatusCard` in `StudentApplicationWorkspaceV2`; the API and query hooks are in `src/features/manager/api/city-season.ts`, `src/features/manager/hooks/useCitySeason.ts`, and `src/features/application/hooks/useApplication.ts`. The student card uses the server-provided active-exception state. Do not duplicate these components or introduce alternate client-side deadline calculations.
 - The detail page already shows the assigned officer for each criterion and the audit timeline. `src/components/audit/AuditTimeline.tsx` is also an existing generic timeline component. Add lifecycle and immutable final-history display to the existing management detail.
 - Existing route-level role checks include `city_manager`, `city_committee`, and `admin` for results. Lifecycle controls must be narrower: only `city_manager` and `admin` for City individual applications.
 
@@ -222,7 +223,7 @@ Reuse `/app/manager/results` and `/app/manager/results/$applicationId`; do not a
 ### Detail
 
 - Add lifecycle badge/reason/actor/time to the existing header. Keep the underlying workflow status visible.
-- Keep the existing five-criterion progress, assigned reviewer, supplement, Resolution, deadline information when its source flow exists, and current final panel.
+- Keep the existing five-criterion progress, assigned reviewer, supplement, Resolution, Part 3B deadline information, and current final panel. Cancellation guards must also cover deadline-exception grant/revoke mutations while preserving their existing season checks and authorization.
 - Add a “Lịch sử quyết định cuối” section using the history DTO and keep the audit timeline in the existing detail. Do not merge final snapshots into a mutable audit-only representation.
 - Add an “Quản lý hồ sơ” action section only for `city_manager` and `admin` on City individual applications. Reuse existing assignment and reopen-final controls.
 - Cancel dialog requires a reason, explains that workflow stops and data is retained, and has the exact final-result warning when a current final exists: “Kết quả hiện tại sẽ được chuyển vào lịch sử và không còn được tính là kết quả chính thức hiện hành.” No Delete control exists.
@@ -277,7 +278,7 @@ All lifecycle mutations and every application-bound workflow write use the same 
 2. Completed + passed → cancel → exact prior final in history; current final pending/null; status remains completed; City analytics no longer counts pass or denominator; official review-result JSON/CSV omits it; reopen to under-review → finalize again → new result is current, old history remains.
 3. Completed application → archive → absent from default manager list but present in official analytics/results export; unarchive restores default list visibility.
 4. Under-review application → archive → 409 and no archive fields/audit.
-5. Canceled application → finalize, task decision, aggregate, Resolution mutation, assignment, deadline-exception mutation if available, and student supplement resubmit → 409; no state, audit, notification, or outbox side effect.
+5. Canceled application → finalize, task decision, aggregate, Resolution mutation, assignment, deadline-exception grant/revoke, and student supplement resubmit → 409; no state, audit, notification, or outbox side effect.
 6. Existing active final → reopen-final → previous final is recorded before current fields reset; authorization remains unchanged.
 7. Reopen canceled final never restores historical final; status is under_review or supplement_required; archived canceled record is unarchived atomically.
 8. Cancel/reopen/archive/unarchive matrix for city_manager/admin succeeds in City scope; city_committee, city_officer, student, uploader, and legacy manager/committee are denied. City Manager cannot access inactive or non-School workspace applications; admin remains global only through existing admin behavior.
@@ -294,11 +295,11 @@ All lifecycle mutations and every application-bound workflow write use the same 
 
 14. Cancelled rows do not affect City final results, progress 0/5–5/5, school breakdown, supplement/resolution totals, manager result queues, queue counts, or active reviewer workload; `cancelledCount` is separate. Archived non-cancelled rows still count.
 15. Official result exports always omit canceled rows even with explicit lifecycle query; management export defaults active and includes canceled only with explicit filter.
-16. Regression coverage: initial submit/eligibility gate; exactly five City tasks; PASS/FAIL and partially-passed finalization; supplement and selective task reset; Resolution; reopen-final; season/deadline behavior; deadline exception once its Part 3B source is present; City Analytics; existing role/workspace scope.
+16. Regression coverage: initial submit/eligibility gate; exactly five City tasks; PASS/FAIL and partially-passed finalization; supplement and selective task reset; Resolution; reopen-final; existing Part 3B season configuration, server-authoritative submission exception, and supplement-deadline behavior; City Analytics; existing role/workspace scope.
 
 ## 18. Rollout
 
-1. Confirm the implementation base includes the intended Part 3B deadline/season behavior, or explicitly defer its UI integration as described below.
+1. The synced implementation base already includes Part 3B. Reuse its schema, migration, routes, service, tests, and frontend components; add only cancellation-specific guards and visibility behavior required by this spec.
 2. Apply the additive Prisma migration before deploying backend code. Existing data receives null lifecycle fields and no backfill.
 3. Deploy backend guards, lifecycle endpoints, history writes, query/export exclusions, and cancellation-aware queue/workload filters. Verify official results exclude cancellations before exposing the UI actions.
 4. Deploy frontend list filters, status/history display, dialogs, and query invalidation. Old clients remain compatible and cannot bypass backend cancellation guards.
@@ -311,7 +312,7 @@ All lifecycle mutations and every application-bound workflow write use the same 
 - Backfill of final decisions that were reopened before this feature existed. The new table intentionally records only supersedes from deployment onward.
 - A separate history API or reporting subsystem; the existing manager detail response is sufficient for one application.
 - Background OCR cancellation. Already queued extraction may complete as advisory evidence metadata, but it cannot restart or mutate adjudication after cancellation.
-- Creating or redesigning submission-season/deadline-exception infrastructure. Part 3C only reuses the existing Part 3B flow once it exists on the implementation base.
+- Creating or redesigning submission-season/deadline-exception infrastructure. Part 3C reuses the merged Part 3B flow and must not duplicate its model, APIs, deadline rules, or UI.
 
 ## 20. Acceptance criteria
 
@@ -325,5 +326,5 @@ All lifecycle mutations and every application-bound workflow write use the same 
 
 ## 21. Implementation-plan confirmations
 
-1. **Part 3B base:** Neither inspected `main` contains a deadline-exception route/model or season-management surface; only supplement/review due dates exist. Should the Part 3B implementation land on backend/frontend `main` before Part 3C implementation, as assumed here, or should its UI integration be deferred until a later patch? This spec does not invent a substitute.
+1. **Part 3B base (verified):** Backend `main` contains Part 3B at `73cdeed704323ebd5a6b4affc6b79441a7b6a107`; frontend `main` contains it at `4689f0e29a6781b87842098e8ff1b7694ea02101`. The model, migration, manager/student endpoints, supplement deadline enforcement, tests, and season/deadline UI are present. This is not an open dependency; Part 3C must reuse them without duplication.
 2. **Unsubmitted drafts:** This design does not let managers cancel unsubmitted student drafts; cancellation begins after submission, or for an application that already has a current final. Confirm if managers must also be able to cancel unsubmitted drafts before implementation planning.
