@@ -1,5 +1,6 @@
 // Owns management dashboards, workload views, review assignment, and manual aggregation.
 import {
+  ApplicationType,
   ApplicationStatus,
   Criterion,
   FinalStatus,
@@ -24,6 +25,7 @@ import { computeActiveCascadeSnapshot } from '../cascade/cascade.service';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { toJsonValue } from '../rules/criteria.loader';
 import { buildReviewProgress } from '../review/review-progress.service';
+import { CitySubmissionEligibilityService } from '../applications/city-submission-eligibility.service';
 import type {
   AggregateApplicationInput,
   AssignReviewTaskInput,
@@ -79,9 +81,16 @@ const applicationDetailInclude = {
 type ApplicationDetail = Prisma.ApplicationGetPayload<{ include: typeof applicationDetailInclude }>;
 
 export class ManagerService {
-  constructor(private readonly emailOutboxService = new EmailOutboxService()) {}
+  constructor(
+    private readonly emailOutboxService = new EmailOutboxService(),
+    private readonly eligibilityService = new CitySubmissionEligibilityService(),
+  ) {}
 
   async listApplications(user: AuthenticatedUser, query: ListManagerApplicationsQuery) {
+    if (query.eligibilityVerification === 'pending') {
+      return this.listPendingEligibilityVerifications(user, query);
+    }
+
     const where: Prisma.ApplicationWhereInput = {
       ...reviewWorkspaceFilterFor(user),
       ...(query.status ? { status: query.status } : {}),
@@ -111,6 +120,151 @@ export class ManagerService {
 
     return {
       items: applications.map(toApplicationSummaryItem),
+      pagination: {
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalPages: Math.ceil(total / query.limit),
+      },
+    };
+  }
+
+  async getEligibilityVerificationDetail(user: AuthenticatedUser, applicationId: string) {
+    return this.eligibilityService.getManagerVerificationDetail(user, applicationId);
+  }
+
+  private async listPendingEligibilityVerifications(
+    user: AuthenticatedUser,
+    query: ListManagerApplicationsQuery,
+  ) {
+    if (user.role !== Role.city_manager) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only a City Manager can list eligibility verification cases');
+    }
+    if (query.targetLevel && query.targetLevel !== Level.city) {
+      return {
+        items: [],
+        pagination: { page: query.page, limit: query.limit, total: 0, totalPages: 0 },
+      };
+    }
+
+    const preSubmitStatuses: ApplicationStatus[] = [
+      ApplicationStatus.draft,
+      ApplicationStatus.prechecked,
+      ApplicationStatus.ready_to_submit,
+      ApplicationStatus.supplement_required,
+    ];
+    if (query.status && !preSubmitStatuses.includes(query.status)) {
+      return {
+        items: [],
+        pagination: { page: query.page, limit: query.limit, total: 0, totalPages: 0 },
+      };
+    }
+
+    const where: Prisma.ApplicationWhereInput = {
+      ...reviewWorkspaceFilterFor(user),
+      applicationType: 'individual',
+      targetLevel: Level.city,
+      submittedAt: null,
+      status: query.status ?? { in: preSubmitStatuses },
+      ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
+      ...(query.faculty ? { student: { faculty: query.faculty } } : {}),
+      ...(query.q
+        ? {
+            OR: [
+              { student: { fullName: { contains: query.q, mode: 'insensitive' } } },
+              { student: { studentCode: { contains: query.q, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
+    };
+    const batchSize = 20;
+    const pageStart = (query.page - 1) * query.limit;
+    const pageEnd = pageStart + query.limit;
+    const skippableErrorCodes = new Set<string>([
+      ErrorCodes.APPLICATION_NOT_FOUND,
+      ErrorCodes.NOT_FOUND,
+      ErrorCodes.INVALID_APPLICATION_CONTEXT,
+      ErrorCodes.UNSUPPORTED_WORKSPACE_HIERARCHY,
+    ]);
+    const items: Array<{
+      id: string;
+      schoolYear: string;
+      student: { fullName: string; studentCode: string | null; className: string | null };
+      school: { code: string; name: string };
+      autoStatus: 'NEEDS_VERIFICATION';
+      effectiveStatus: 'NEEDS_VERIFICATION';
+      reasons: string[];
+    }> = [];
+    let candidateCursor: string | undefined;
+    let total = 0;
+
+    while (true) {
+      const applications = await prisma.application.findMany({
+        where: candidateCursor ? { ...where, id: { gt: candidateCursor } } : where,
+        select: {
+          id: true,
+          studentId: true,
+          workspaceId: true,
+          schoolYear: true,
+          applicationType: true,
+          targetLevel: true,
+          status: true,
+          submittedAt: true,
+          student: {
+            select: { workspaceId: true, fullName: true, studentCode: true, className: true },
+          },
+          workspace: { select: { code: true, name: true, type: true, isActive: true } },
+        },
+        orderBy: [{ id: 'asc' }],
+        take: batchSize,
+      });
+      if (applications.length === 0) break;
+
+      const pendingBatch = await Promise.all(
+        applications.map(async (application) => {
+          try {
+            const eligibility = await this.eligibilityService.getManagerVerificationStatus(
+              user,
+              application,
+            );
+            if (
+              eligibility.autoStatus !== 'NEEDS_VERIFICATION' ||
+              eligibility.effectiveStatus !== 'NEEDS_VERIFICATION'
+            ) {
+              return null;
+            }
+            return {
+              id: application.id,
+              schoolYear: application.schoolYear,
+              student: {
+                fullName: application.student.fullName,
+                studentCode: application.student.studentCode,
+                className: application.student.className,
+              },
+              school: { code: application.workspace.code, name: application.workspace.name },
+              autoStatus: 'NEEDS_VERIFICATION' as const,
+              effectiveStatus: 'NEEDS_VERIFICATION' as const,
+              reasons: eligibility.reasons,
+            };
+          } catch (error) {
+            if (error instanceof AppError && skippableErrorCodes.has(error.code)) return null;
+            throw error;
+          }
+        }),
+      );
+
+      for (const item of pendingBatch) {
+        if (!item) continue;
+        if (total >= pageStart && total < pageEnd) items.push(item);
+        total += 1;
+      }
+
+      candidateCursor = applications[applications.length - 1].id;
+      if (applications.length < batchSize) break;
+    }
+
+    return {
+      items,
       pagination: {
         page: query.page,
         limit: query.limit,
@@ -698,6 +852,18 @@ export class ManagerService {
     } else {
       assertSameWorkspace(user, task, 'Review task not found');
     }
+    if (
+      task.application &&
+      isCityIndividualApplication(task.application) &&
+      !cityManager &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers or admins may assign City review tasks',
+      );
+    }
     if (!officer || !officer.isActive) {
       throw new AppError(404, ErrorCodes.OFFICER_NOT_FOUND, 'Officer not found');
     }
@@ -816,6 +982,17 @@ export class ManagerService {
     input: AggregateApplicationInput,
   ) {
     const application = await this.getApplicationForAggregation(user, applicationId);
+    if (
+      isCityIndividualApplication(application) &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers or admins may aggregate City applications',
+      );
+    }
     const aggregation = buildAggregation(application);
     const updated = await prisma.$transaction(async (tx) => {
       const saved = await tx.application.update({
@@ -865,6 +1042,16 @@ export class ManagerService {
     ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager, committee, or admin can finalize results');
     }
+    if (user.role === Role.manager || user.role === Role.committee) {
+      const application = await this.getApplicationForAggregation(user, applicationId);
+      if (isCityIndividualApplication(application)) {
+        throw new AppError(
+          403,
+          ErrorCodes.FORBIDDEN,
+          'Only City Managers, City Committee, or admins may finalize City applications',
+        );
+      }
+    }
     if (
       (input.finalStatus === FinalStatus.passed ||
         input.finalStatus === FinalStatus.partially_passed) &&
@@ -909,10 +1096,17 @@ export class ManagerService {
     }
     const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
     if (!overrideRecommendation) {
-      const allReviewTasksAccepted =
+      const cityHumanReviewComplete =
+        isCityIndividualApplication(applicationForCascade) &&
         aggregation.reviewProgress.totalTasks > 0 &&
-        aggregation.reviewProgress.accepted === aggregation.reviewProgress.totalTasks &&
+        aggregation.reviewProgress.accepted + aggregation.reviewProgress.rejected ===
+          aggregation.reviewProgress.totalTasks &&
         aggregation.resolutionSummary.open === 0;
+      const allReviewTasksAccepted =
+        (aggregation.reviewProgress.totalTasks > 0 &&
+          aggregation.reviewProgress.accepted === aggregation.reviewProgress.totalTasks &&
+          aggregation.resolutionSummary.open === 0) ||
+        cityHumanReviewComplete;
       try {
         assertFinalizeMatchesCascade(input, freshCascade);
       } catch (error) {
@@ -946,6 +1140,31 @@ export class ManagerService {
 
     return prisma.$transaction(async (tx) => {
       const before = await tx.application.findUniqueOrThrow({ where: { id: applicationId } });
+      const cityIndividual = isCityIndividualApplication(applicationForCascade);
+      const finalizationData = {
+        status,
+        finalStatus: input.finalStatus,
+        finalLevel: input.finalStatus === FinalStatus.failed ? null : input.finalLevel,
+        finalNote: input.finalNote,
+        finalizedById: user.id,
+      };
+      if (cityIndividual) {
+        const finalization = await tx.application.updateMany({
+          where: {
+            id: applicationId,
+            finalStatus: FinalStatus.pending,
+            finalizedAt: null,
+          },
+          data: { ...finalizationData, finalizedAt: new Date() },
+        });
+        if (finalization.count !== 1) {
+          throw new AppError(
+            409,
+            ErrorCodes.FINAL_RESULT_ALREADY_EXISTS,
+            'Final result already exists. Reopen the final result before finalizing again.',
+          );
+        }
+      }
       const cascadeReview = await tx.cascadeReview.create({
         data: {
           applicationId,
@@ -963,17 +1182,12 @@ export class ManagerService {
           }),
         },
       });
-      const updated = await tx.application.update({
-        where: { id: applicationId },
-        data: {
-          status,
-          finalStatus: input.finalStatus,
-          finalLevel: input.finalStatus === FinalStatus.failed ? null : input.finalLevel,
-          finalNote: input.finalNote,
-          finalizedAt: new Date(),
-          finalizedById: user.id,
-        },
-      });
+      const updated = cityIndividual
+        ? await tx.application.findUniqueOrThrow({ where: { id: applicationId } })
+        : await tx.application.update({
+            where: { id: applicationId },
+            data: { ...finalizationData, finalizedAt: new Date() },
+          });
       await createApplicationAudit(tx, {
         actorId: user.id,
         actorRole: user.role,
@@ -1100,6 +1314,18 @@ export class ManagerService {
     }
     assertReviewWorkspaceAccess(user, reviewResource(application), 'Application not found');
     if (
+      isCityIndividualApplication(application) &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.city_committee &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers, City Committee, or admins may reopen City results',
+      );
+    }
+    if (
       application.status !== ApplicationStatus.completed &&
       application.status !== ApplicationStatus.rejected
     ) {
@@ -1169,6 +1395,16 @@ function reviewResource(resource: {
     workspaceType: resource.workspace?.type,
     workspaceIsActive: resource.workspace?.isActive,
   };
+}
+
+function isCityIndividualApplication(application: {
+  applicationType?: ApplicationType;
+  targetLevel: Level | null;
+}) {
+  return (
+    application.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city
+  );
 }
 
 export function buildAggregation(application: ApplicationDetail) {

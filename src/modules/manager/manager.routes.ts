@@ -1,9 +1,11 @@
 import { Role } from '@prisma/client';
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import { requireAuth } from '../../middlewares/auth.middleware';
 import { requireRole } from '../../middlewares/require-role.middleware';
 import { validate } from '../../middlewares/validate.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
+import { AppError } from '../../shared/errors/app-error';
+import { ErrorCodes } from '../../shared/errors/error-codes';
 import {
   finalizeCollective,
   getCollectiveDetail,
@@ -20,6 +22,7 @@ import {
   finalizeApplication,
   getApplicationAggregation,
   getApplicationSummary,
+  getEligibilityVerificationDetail,
   getCommitteeInbox,
   getManagerDashboardSummary,
   getManagerResultDetail,
@@ -39,6 +42,20 @@ import {
 } from './manager.validation';
 
 export const managerRouter = Router();
+
+function requireCityManagerForPendingEligibility(req: Request, _res: Response, next: NextFunction) {
+  if (req.query.eligibilityVerification && req.user?.role !== Role.city_manager) {
+    next(
+      new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only a City Manager can list eligibility verification cases',
+      ),
+    );
+    return;
+  }
+  next();
+}
 
 managerRouter.get(
   '/collective-profiles',
@@ -72,6 +89,7 @@ managerRouter.get(
   requireAuth,
   requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: listManagerApplicationsQuerySchema }),
+  requireCityManagerForPendingEligibility,
   asyncHandler(listManagerApplications),
 );
 managerRouter.get(
@@ -125,6 +143,12 @@ managerRouter.patch(
   requireRole(Role.manager, Role.city_manager, Role.admin),
   validate({ body: assignReviewTaskSchema }),
   asyncHandler(assignManagerReviewTask),
+);
+managerRouter.get(
+  '/applications/:id/eligibility-verification',
+  requireAuth,
+  requireRole(Role.city_manager),
+  asyncHandler(getEligibilityVerificationDetail),
 );
 managerRouter.get(
   '/applications/:id/summary',

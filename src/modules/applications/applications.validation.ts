@@ -1,4 +1,4 @@
-import { Level } from '@prisma/client';
+import { ApplicationEligibilityVerificationDecision, Level } from '@prisma/client';
 import { z } from 'zod';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -74,6 +74,11 @@ export const submitApplicationSchema = z.object({
   studentNote: z.string().max(1000).optional(),
 });
 
+export const eligibilityVerificationSchema = z.object({
+  decision: z.nativeEnum(ApplicationEligibilityVerificationDecision),
+  reason: z.string().trim().min(1).max(1000),
+});
+
 export type GetCurrentApplicationQuery = z.infer<typeof getCurrentApplicationQuerySchema>;
 export type AssistantContextStreamQuery = z.infer<typeof assistantContextStreamQuerySchema>;
 export type StartApplicationInput = z.infer<typeof startApplicationSchema>;
@@ -82,3 +87,4 @@ export type AutosaveDraftInput = z.infer<typeof autosaveDraftSchema>;
 export type TimelineQuery = z.infer<typeof timelineQuerySchema>;
 export type ReopenSupplementInput = z.infer<typeof reopenSupplementSchema>;
 export type SubmitApplicationInput = z.infer<typeof submitApplicationSchema>;
+export type EligibilityVerificationInput = z.infer<typeof eligibilityVerificationSchema>;

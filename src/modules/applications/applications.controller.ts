@@ -15,6 +15,15 @@ export async function getApplicationEligibility(req: Request, res: Response): Pr
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function verifyApplicationEligibility(req: Request, res: Response): Promise<void> {
+  const data = await citySubmissionEligibilityService.verifyEligibility(
+    req.user!,
+    String(req.params.id),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function getCurrentApplication(req: Request, res: Response): Promise<void> {
   const data = await applicationsService.getCurrent(req.user!, req.query as never);
   sendSuccess(res, data, { requestId: req.requestId });

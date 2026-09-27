@@ -14,7 +14,7 @@ import {
   type Application,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-import { auditActions } from '../../shared/constants/application';
+import { auditActions, editableApplicationStatuses } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -22,7 +22,7 @@ import { normalizeSchoolYear } from '../../shared/utils/school-year';
 import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
 import { assertReviewWorkspaceAccess } from '../../shared/utils/review-workspace-scope';
 import { NotificationsService } from '../notifications/notifications.service';
-import { PrecheckService } from '../precheck/precheck.service';
+import { PrecheckService, type PreparedPrecheckRun } from '../precheck/precheck.service';
 import { ReviewAssignmentService } from '../review/review-assignment.service';
 import {
   assertApplicationEditable,
@@ -33,6 +33,7 @@ import {
 import { findProcessingEvidence, isApplicationPrecheckStale } from './application-freshness';
 import { ApplicationsRepository } from './applications.repository';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
+import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
 import type {
   AutosaveDraftInput,
   GetCurrentApplicationQuery,
@@ -44,6 +45,21 @@ import type {
 } from './applications.validation';
 
 export { hasActiveEvidenceProcessing } from './application-freshness';
+
+function requiresInitialCityEligibility(
+  user: AuthenticatedUser,
+  application: Pick<
+    Application,
+    'applicationType' | 'targetLevel' | 'status' | 'submittedAt'
+  >,
+): boolean {
+  return (
+    user.role === Role.student &&
+    application.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city &&
+    (application.status !== ApplicationStatus.supplement_required || application.submittedAt === null)
+  );
+}
 
 type SubmitApplicationContext = Prisma.ApplicationGetPayload<{
   include: {
@@ -62,6 +78,7 @@ export class ApplicationsService {
     private readonly reviewAssignmentService = new ReviewAssignmentService(),
     private readonly emailOutboxService = new EmailOutboxService(),
     private readonly precheckService = new PrecheckService(),
+    private readonly citySubmissionEligibilityService = new CitySubmissionEligibilityService(),
   ) {}
 
   async getCurrent(user: AuthenticatedUser, query: GetCurrentApplicationQuery) {
@@ -154,13 +171,18 @@ export class ApplicationsService {
     await prisma.$transaction(async (tx) => {
       const newVersion = application.currentDraftVersion + 1;
 
-      await tx.application.update({
-        where: { id: application.id },
+      const updateResult = await tx.application.updateMany({
+        where: {
+          id: application.id,
+          status: { in: [...editableApplicationStatuses] },
+          currentDraftVersion: application.currentDraftVersion,
+        },
         data: {
           targetLevel: input.targetLevel,
           currentDraftVersion: newVersion,
         },
       });
+      assertDraftWriteSucceeded(updateResult.count);
 
       await tx.applicationDraftSnapshot.create({
         data: {
@@ -198,13 +220,18 @@ export class ApplicationsService {
     const savedAt = new Date();
 
     await prisma.$transaction(async (tx) => {
-      await tx.application.update({
-        where: { id: application.id },
+      const updateResult = await tx.application.updateMany({
+        where: {
+          id: application.id,
+          status: { in: [...editableApplicationStatuses] },
+          currentDraftVersion: application.currentDraftVersion,
+        },
         data: {
           ...(input.targetLevel ? { targetLevel: input.targetLevel } : {}),
           currentDraftVersion: newVersion,
         },
       });
+      assertDraftWriteSucceeded(updateResult.count);
 
       await tx.applicationDraftSnapshot.create({
         data: {
@@ -307,7 +334,13 @@ export class ApplicationsService {
       );
     }
 
-    const processingEvidence = findProcessingEvidence(application);
+    const isInitialCitySubmission = requiresInitialCityEligibility(user, application);
+    if (isInitialCitySubmission) {
+      await this.assertCitySubmissionEligible(user, application.id);
+    }
+
+    // A saved source file remains valid evidence for City review while OCR is running.
+    const processingEvidence = isInitialCitySubmission ? undefined : findProcessingEvidence(application);
     if (processingEvidence) {
       throw new AppError(
         409,
@@ -326,17 +359,33 @@ export class ApplicationsService {
       where: { applicationId: application.id },
       orderBy: { createdAt: 'desc' },
     });
+    let preparedPrecheck: PreparedPrecheckRun | null = null;
     if (isApplicationPrecheckStale(application, latestPrecheck?.createdAt)) {
-      await this.precheckService.run(user, application.id, { level: application.targetLevel });
-      latestPrecheck = await prisma.precheckResult.findFirst({
-        where: { applicationId: application.id },
-        orderBy: { createdAt: 'desc' },
-      });
+      if (isInitialCitySubmission) {
+        preparedPrecheck = await this.precheckService.prepareForSubmission(user, application.id, {
+          level: application.targetLevel,
+        });
+      } else {
+        await this.precheckService.run(user, application.id, { level: application.targetLevel });
+        latestPrecheck = await prisma.precheckResult.findFirst({
+          where: { applicationId: application.id },
+          orderBy: { createdAt: 'desc' },
+        });
+      }
     }
-    const missingItems = latestPrecheck?.missingItemsJson ?? null;
-    const submitWarnings = buildSubmitWarningsFromPrecheck(latestPrecheck?.resultJson, missingItems);
+    const precheckResultJson = preparedPrecheck
+      ? (preparedPrecheck.result as unknown as Prisma.JsonValue)
+      : latestPrecheck?.resultJson;
+    const missingItems = preparedPrecheck
+      ? (preparedPrecheck.result.missingItems as unknown as Prisma.JsonValue)
+      : (latestPrecheck?.missingItemsJson ?? null);
+    const submitWarnings = buildSubmitWarningsFromPrecheck(precheckResultJson, missingItems);
 
-    if (submitWarnings.length > 0 && !input.allowSubmitWithWarnings) {
+    if (
+      submitWarnings.length > 0 &&
+      !input.allowSubmitWithWarnings &&
+      !isInitialCitySubmission
+    ) {
       throw new AppError(
         409,
         ErrorCodes.APPLICATION_NOT_READY,
@@ -350,25 +399,134 @@ export class ApplicationsService {
       );
     }
 
+    const submissionState = await prisma.application.findUnique({
+      where: { id: application.id },
+      select: {
+        applicationType: true,
+        targetLevel: true,
+        status: true,
+        submittedAt: true,
+        currentDraftVersion: true,
+        updatedAt: true,
+      },
+    });
+    if (
+      !submissionState ||
+      submissionState.applicationType !== application.applicationType ||
+      submissionState.targetLevel !== application.targetLevel ||
+      submissionState.currentDraftVersion !== application.currentDraftVersion ||
+      submissionState.submittedAt?.getTime() !== application.submittedAt?.getTime() ||
+      (isInitialCitySubmission &&
+        submissionState.updatedAt.getTime() !== application.updatedAt.getTime()) ||
+      !editableApplicationStatuses.includes(submissionState.status as never)
+    ) {
+      throw new AppError(
+        409,
+        ErrorCodes.APPLICATION_LOCKED,
+        'Application changed while submission was being prepared. Refresh and try again.',
+      );
+    }
+
     const existingTasks = application.reviewTasks;
-    const isSupplementResubmit = application.status === ApplicationStatus.supplement_required;
+    const isSupplementResubmit =
+      submissionState.status === ApplicationStatus.supplement_required &&
+      submissionState.submittedAt !== null;
     const supplementTasks = existingTasks.filter(
       (task) => task.status === ReviewTaskStatus.supplement_required,
     );
     const supplementCriteria = Array.from(new Set(supplementTasks.map((task) => task.criterion)));
     const result = await prisma.$transaction(
       async (tx) => {
+        let effectiveSubmissionState = submissionState;
+        let effectivePrecheckResultJson = precheckResultJson;
+        let persistedPrecheck: Awaited<ReturnType<PrecheckService['persistPreparedInTransaction']>> | null = null;
+
+        if (isInitialCitySubmission) {
+          const lockedApplication = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id"
+            FROM "Application"
+            WHERE "id" = ${application.id}::uuid
+              AND "studentId" = ${application.studentId}::uuid
+              AND "workspaceId" = ${application.workspaceId}::uuid
+              AND "schoolYear" = ${application.schoolYear}
+              AND "applicationType" = ${submissionState.applicationType}::"ApplicationType"
+              AND "targetLevel" = ${submissionState.targetLevel}::"Level"
+              AND "status" = ${submissionState.status}::"ApplicationStatus"
+              AND "submittedAt" IS NOT DISTINCT FROM ${submissionState.submittedAt}
+              AND "currentDraftVersion" = ${submissionState.currentDraftVersion}
+              AND "updatedAt" = ${submissionState.updatedAt}
+            FOR UPDATE
+          `;
+          if (lockedApplication.length !== 1) {
+            throw new AppError(
+              409,
+              ErrorCodes.APPLICATION_LOCKED,
+              'Application changed while submission was being prepared. Refresh and try again.',
+            );
+          }
+
+          const lockedStudent = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id"
+            FROM "User"
+            WHERE "id" = ${application.studentId}::uuid
+              AND "workspaceId" = ${application.workspaceId}::uuid
+            FOR NO KEY UPDATE
+          `;
+          if (lockedStudent.length !== 1) {
+            throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+          }
+
+          const eligibility = await this.citySubmissionEligibilityService.getEligibilityForSubmission(
+            tx,
+            user,
+            application.id,
+          );
+          this.assertCityEligibilityResultEligible(eligibility);
+
+          if (preparedPrecheck) {
+            persistedPrecheck = await this.precheckService.persistPreparedInTransaction(
+              tx,
+              user,
+              preparedPrecheck,
+            );
+            effectiveSubmissionState = {
+              ...effectiveSubmissionState,
+              status: persistedPrecheck.application.status,
+              updatedAt: persistedPrecheck.application.updatedAt,
+            };
+            effectivePrecheckResultJson = persistedPrecheck.precheckResult.resultJson;
+          }
+
+          if (submitWarnings.length > 0 && !input.allowSubmitWithWarnings) {
+            return {
+              reviewTasks: [],
+              blockedByWarnings: true,
+              readinessScore:
+                persistedPrecheck?.application.readinessScore ?? application.readinessScore,
+              latestPrecheck: persistedPrecheck?.precheckResult ?? latestPrecheck,
+            };
+          }
+        }
+
         const submittedAt = new Date();
         const newVersion = application.currentDraftVersion + 1;
 
-        await tx.application.update({
-          where: { id: application.id },
+        const updateResult = await tx.application.updateMany({
+          where: {
+            id: application.id,
+            status: effectiveSubmissionState.status,
+            targetLevel: effectiveSubmissionState.targetLevel,
+            currentDraftVersion: effectiveSubmissionState.currentDraftVersion,
+            submittedAt: effectiveSubmissionState.submittedAt,
+            updatedAt: effectiveSubmissionState.updatedAt,
+          },
           data: {
             status: ApplicationStatus.under_review,
             submittedAt: application.submittedAt ?? submittedAt,
             currentDraftVersion: newVersion,
           },
         });
+        assertDraftWriteSucceeded(updateResult.count);
 
         if (isSupplementResubmit && supplementTasks.length > 0) {
           const taskEvidenceLinks = supplementTasks.flatMap((task) =>
@@ -439,7 +597,7 @@ export class ApplicationsService {
                 include: { assignedOfficer: true },
                 orderBy: { criterion: 'asc' },
               })
-            : await this.createReviewTasksForSubmit(tx, application, latestPrecheck?.resultJson);
+            : await this.createReviewTasksForSubmit(tx, application, effectivePrecheckResultJson);
 
         await createApplicationAudit(tx, {
           actorId: user.id,
@@ -450,7 +608,7 @@ export class ApplicationsService {
           targetType: 'application',
           targetId: application.id,
           applicationId: application.id,
-          beforeStateJson: { status: application.status },
+          beforeStateJson: { status: effectiveSubmissionState.status },
           afterStateJson: {
             status: ApplicationStatus.under_review,
             submittedAt: submittedAt.toISOString(),
@@ -468,7 +626,7 @@ export class ApplicationsService {
           targetType: 'application',
           targetId: application.id,
           applicationId: application.id,
-          beforeStateJson: { status: application.status },
+          beforeStateJson: { status: effectiveSubmissionState.status },
           afterStateJson: { status: ApplicationStatus.under_review },
         });
 
@@ -514,10 +672,36 @@ export class ApplicationsService {
         tx,
       );
 
-      return reviewTasks;
+      return {
+        reviewTasks,
+        blockedByWarnings: false,
+        readinessScore:
+          persistedPrecheck?.application.readinessScore ?? application.readinessScore,
+        latestPrecheck: persistedPrecheck?.precheckResult ?? latestPrecheck,
+      };
       },
-      { maxWait: 10_000, timeout: 30_000 },
+      {
+        maxWait: 10_000,
+        timeout: 30_000,
+        ...(isInitialCitySubmission
+          ? { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }
+          : {}),
+      },
     );
+
+    if (result.blockedByWarnings) {
+      throw new AppError(
+        409,
+        ErrorCodes.APPLICATION_NOT_READY,
+        'Application has precheck warnings. Pass allowSubmitWithWarnings=true to submit anyway.',
+        {
+          readinessScore: result.readinessScore,
+          latestPrecheck: result.latestPrecheck,
+          missingItems,
+          warnings: submitWarnings,
+        },
+      );
+    }
 
     return {
       application: {
@@ -525,7 +709,7 @@ export class ApplicationsService {
         status: ApplicationStatus.under_review,
         submittedAt: application.submittedAt ?? new Date(),
       },
-      reviewTasks: result.map(toSubmitTaskDto),
+      reviewTasks: result.reviewTasks.map(toSubmitTaskDto),
       warnings: submitWarnings,
       message: 'Hồ sơ đã được nộp và chuyển sang trạng thái đang xét duyệt.',
     };
@@ -560,6 +744,18 @@ export class ApplicationsService {
       },
       'Application not found',
     );
+    if (
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city &&
+      user.role !== Role.city_manager &&
+      user.role !== Role.admin
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers or admins may reopen supplements for City applications',
+      );
+    }
 
     await prisma.$transaction(async (tx) => {
       await tx.application.update({
@@ -642,7 +838,14 @@ export class ApplicationsService {
     application: SubmitApplicationContext,
     latestPrecheckResultJson?: Prisma.JsonValue,
   ) {
-    const criteria = buildSubmitCriteria(application.evidences, latestPrecheckResultJson);
+    const cityIndividual =
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city;
+    const criteria = buildSubmitCriteria(
+      application.evidences,
+      latestPrecheckResultJson,
+      !cityIndividual,
+    );
     const tasks = [];
 
     for (const criterion of criteria) {
@@ -725,6 +928,35 @@ export class ApplicationsService {
     return application;
   }
 
+  private async assertCitySubmissionEligible(user: AuthenticatedUser, applicationId: string) {
+    const eligibility = await this.citySubmissionEligibilityService.getEligibility(
+      user,
+      applicationId,
+    );
+    this.assertCityEligibilityResultEligible(eligibility);
+  }
+
+  private assertCityEligibilityResultEligible(
+    eligibility: Awaited<ReturnType<CitySubmissionEligibilityService['getEligibility']>>,
+  ) {
+    if (eligibility.status === 'NOT_ELIGIBLE') {
+      throw new AppError(
+        409,
+        ErrorCodes.CITY_SUBMISSION_NOT_ELIGIBLE,
+        'Hồ sơ chưa đáp ứng điều kiện tiên quyết để nộp xét cấp Thành phố.',
+        { route: eligibility.route, reasons: eligibility.reasons },
+      );
+    }
+    if (eligibility.status === 'NEEDS_VERIFICATION') {
+      throw new AppError(
+        409,
+        ErrorCodes.CITY_SUBMISSION_NEEDS_VERIFICATION,
+        'Hệ thống chưa thể tự động xác minh thông tin của bạn với danh sách công nhận. Hồ sơ cần được kiểm tra lại.',
+        { route: eligibility.route, reasons: eligibility.reasons },
+      );
+    }
+  }
+
   private async getApplicationForResponse(applicationId: string) {
     const application = await this.applicationsRepository.findById(applicationId);
     if (!application) {
@@ -804,9 +1036,20 @@ export class ApplicationsService {
   }
 }
 
+function assertDraftWriteSucceeded(updateCount: number): void {
+  if (updateCount === 1) return;
+
+  throw new AppError(
+    409,
+    ErrorCodes.APPLICATION_LOCKED,
+    'Application changed before this operation completed. Refresh and try again.',
+  );
+}
+
 function buildSubmitCriteria(
   evidences: Array<{ criterion: Criterion }>,
   latestPrecheckResultJson?: Prisma.JsonValue,
+  includePriority = true,
 ): Criterion[] {
   const criteria: Criterion[] = [
     Criterion.ethics,
@@ -816,8 +1059,9 @@ function buildSubmitCriteria(
     Criterion.integration,
   ];
   if (
-    evidences.some((evidence) => evidence.criterion === Criterion.priority) ||
-    hasPriorityPrecheckResult(latestPrecheckResultJson)
+    includePriority &&
+    (evidences.some((evidence) => evidence.criterion === Criterion.priority) ||
+      hasPriorityPrecheckResult(latestPrecheckResultJson))
   ) {
     criteria.push(Criterion.priority);
   }

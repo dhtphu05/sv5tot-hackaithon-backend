@@ -1447,9 +1447,26 @@ export const openApiDocument = {
     '/api/manager/applications': {
       get: {
         tags: ['Manager'],
-        summary: 'List submitted applications with review progress',
+        summary: 'List manager applications or City Manager eligibility verification cases',
         security: bearerSecurity,
+        parameters: [{
+          in: 'query',
+          name: 'eligibilityVerification',
+          description: 'City Manager only: list unsubmitted City applications needing manual eligibility verification.',
+          required: false,
+          schema: { type: 'string', enum: ['pending'] },
+        }],
         responses: { '200': jsonResponse('Paginated manager applications') },
+      },
+    },
+    '/api/manager/applications/{id}/eligibility-verification': {
+      get: {
+        tags: ['Manager'],
+        summary: 'Get City Manager eligibility verification context',
+        description: 'City Manager only. Returns a scoped student identity and confirmed Award candidate rows that exactly match the student name and class signals.',
+        security: bearerSecurity,
+        parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }],
+        responses: { '200': jsonResponse('Eligibility status and minimal verification context') },
       },
     },
     '/api/manager/workloads': {

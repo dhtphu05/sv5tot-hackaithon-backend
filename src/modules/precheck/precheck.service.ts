@@ -5,6 +5,8 @@ import {
   EvidenceStatus,
   EvidenceSourceType,
   IndexingStatus,
+  Level,
+  type Prisma,
   Role,
   ReviewTaskStatus,
   type Application,
@@ -32,6 +34,7 @@ import {
 } from '../criteria-completion/criteria-requirement.parser';
 import { coreCriteria } from '../rules/criteria.constants';
 import { loadCriteriaRules, toJsonValue } from '../rules/criteria.loader';
+import { isEvidenceDateOutsideSchoolYear } from '../rules/school-year-evidence';
 import type { RuleContext } from '../rules/rules.types';
 import type {
   PrecheckCriterionResultDto,
@@ -46,6 +49,19 @@ export class PrecheckService {
   constructor(private readonly precheckRepository = new PrecheckRepository()) {}
 
   async run(user: AuthenticatedUser, applicationId: string, input: RunPrecheckInput) {
+    const prepared = await this.prepareForSubmission(user, applicationId, input);
+    const persisted = await prisma.$transaction((tx) =>
+      this.persistPreparedInTransaction(tx, user, prepared),
+    );
+
+    return toPrecheckResponse(prepared, persisted.precheckResult.createdAt);
+  }
+
+  async prepareForSubmission(
+    user: AuthenticatedUser,
+    applicationId: string,
+    input: RunPrecheckInput,
+  ): Promise<PreparedPrecheckRun> {
     const application = await this.getApplication(applicationId);
     assertPrecheckAccess(application, user, false);
     const level = input.level ?? application.targetLevel;
@@ -62,81 +78,75 @@ export class PrecheckService {
       criteriaWarnings: criteria.warnings,
     });
 
-    const created = await prisma.$transaction(async (tx) => {
-      const saved = await tx.precheckResult.create({
-        data: {
-          applicationId: application.id,
-          readinessScore: result.readinessScore,
-          missingItemsJson: toJsonValue(result.missingItems),
-          nextBestAction: result.nextBestAction,
-          resultJson: toJsonValue({
-            ...result,
-            criteriaVersion: criteria,
-            completion,
-            note: 'Kết quả là gợi ý tiền kiểm, không phải quyết định xét duyệt cuối cùng.',
-          }),
-        },
-      });
+    return { application, level, criteria, completion, result };
+  }
 
-      const nextStatus = getNextPrecheckStatus(application.status, result.readyToSubmit);
-      await tx.application.update({
-        where: { id: application.id },
-        data: {
-          readinessScore: result.readinessScore,
-          ...(nextStatus ? { status: nextStatus } : {}),
-        },
-      });
-
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        workspaceId: application.workspaceId,
-        action: auditActions.PRECHECK_COMPLETED,
-        targetType: 'precheck_result',
-        targetId: saved.id,
+  async persistPreparedInTransaction(
+    tx: Prisma.TransactionClient,
+    user: AuthenticatedUser,
+    prepared: PreparedPrecheckRun,
+  ) {
+    const { application, level, criteria, completion, result } = prepared;
+    const saved = await tx.precheckResult.create({
+      data: {
         applicationId: application.id,
-        afterStateJson: {
-          level,
-          readinessScore: result.readinessScore,
-          missingCount: result.missingItems.length,
-          readyToSubmit: result.readyToSubmit,
-          criteriaVersionId: criteria.criteriaVersionId,
-          status: nextStatus ?? application.status,
-        },
-        note: `Precheck ${level}: readinessScore=${result.readinessScore}, missing=${result.missingItems.length}`,
-      });
-
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        workspaceId: application.workspaceId,
-        action: auditActions.APPLICATION_READINESS_UPDATED,
-        targetType: 'application',
-        targetId: application.id,
-        applicationId: application.id,
-        beforeStateJson: { readinessScore: application.readinessScore, status: application.status },
-        afterStateJson: {
-          readinessScore: result.readinessScore,
-          status: nextStatus ?? application.status,
-        },
-      });
-
-      return saved;
+        readinessScore: result.readinessScore,
+        missingItemsJson: toJsonValue(result.missingItems),
+        nextBestAction: result.nextBestAction,
+        resultJson: toJsonValue({
+          ...result,
+          criteriaVersion: criteria,
+          completion,
+          note: 'Kết quả là gợi ý tiền kiểm, không phải quyết định xét duyệt cuối cùng.',
+        }),
+      },
     });
 
-    return {
+    const nextStatus = getNextPrecheckStatus(application.status, result.readyToSubmit);
+    const updatedApplication = await tx.application.update({
+      where: { id: application.id },
+      data: {
+        readinessScore: result.readinessScore,
+        ...(nextStatus ? { status: nextStatus } : {}),
+      },
+      select: { status: true, readinessScore: true, updatedAt: true },
+    });
+
+    await createApplicationAudit(tx, {
+      actorId: user.id,
+      actorRole: user.role,
+      workspaceId: application.workspaceId,
+      action: auditActions.PRECHECK_COMPLETED,
+      targetType: 'precheck_result',
+      targetId: saved.id,
       applicationId: application.id,
-      level,
-      readinessScore: result.readinessScore,
-      readyToSubmit: result.readyToSubmit,
-      criteriaResults: result.criteriaResults,
-      missingItems: result.missingItems,
-      warnings: result.warnings,
-      nextBestAction: result.nextBestAction,
-      nextAction: result.nextAction,
-      humanConfirmationRequired: true,
-      createdAt: created.createdAt,
-    };
+      afterStateJson: {
+        level,
+        readinessScore: result.readinessScore,
+        missingCount: result.missingItems.length,
+        readyToSubmit: result.readyToSubmit,
+        criteriaVersionId: criteria.criteriaVersionId,
+        status: updatedApplication.status,
+      },
+      note: `Precheck ${level}: readinessScore=${result.readinessScore}, missing=${result.missingItems.length}`,
+    });
+
+    await createApplicationAudit(tx, {
+      actorId: user.id,
+      actorRole: user.role,
+      workspaceId: application.workspaceId,
+      action: auditActions.APPLICATION_READINESS_UPDATED,
+      targetType: 'application',
+      targetId: application.id,
+      applicationId: application.id,
+      beforeStateJson: { readinessScore: application.readinessScore, status: application.status },
+      afterStateJson: {
+        readinessScore: result.readinessScore,
+        status: updatedApplication.status,
+      },
+    });
+
+    return { precheckResult: saved, application: updatedApplication };
   }
 
   async getLatest(user: AuthenticatedUser, applicationId: string) {
@@ -193,6 +203,31 @@ export class PrecheckService {
 
 type PrecheckApplication = Awaited<ReturnType<PrecheckRepository['findApplicationContext']>> & {};
 
+export type PreparedPrecheckRun = {
+  application: NonNullable<PrecheckApplication>;
+  level: NonNullable<PrecheckApplication>['targetLevel'];
+  criteria: Awaited<ReturnType<typeof loadCriteriaRules>>;
+  completion: CriterionCompletionDto[];
+  result: ReturnType<typeof buildPrecheckFromCompletion>;
+};
+
+function toPrecheckResponse(prepared: PreparedPrecheckRun, createdAt: Date) {
+  const { application, level, result } = prepared;
+  return {
+    applicationId: application.id,
+    level,
+    readinessScore: result.readinessScore,
+    readyToSubmit: result.readyToSubmit,
+    criteriaResults: result.criteriaResults,
+    missingItems: result.missingItems,
+    warnings: result.warnings,
+    nextBestAction: result.nextBestAction,
+    nextAction: result.nextAction,
+    humanConfirmationRequired: true as const,
+    createdAt,
+  };
+}
+
 function buildCompletionSnapshot(
   application: NonNullable<PrecheckApplication>,
   criteriaRules: RuleContext['criteriaRules'],
@@ -224,12 +259,28 @@ export function buildPrecheckFromCompletion(input: {
 }): Omit<PrecheckResponseDto, 'createdAt'> {
   const failedEvidenceAction = buildFailedEvidenceAction(input.application);
   const supplementAction = buildSupplementAction(input.application);
-  const criteriaResults = input.completion.map(buildCriterionPrecheckResult);
+  const outsideSchoolYearCriteria =
+    input.level === Level.city
+      ? new Set(
+          input.application.evidences
+            .filter((evidence) =>
+              isEvidenceDateOutsideSchoolYear(evidence, input.application.schoolYear),
+            )
+            .map((evidence) => evidence.criterion),
+        )
+      : new Set<Criterion>();
+  const criteriaResults = input.completion.map((item) => {
+    const result = buildCriterionPrecheckResult(item);
+    return outsideSchoolYearCriteria.has(item.criterion)
+      ? { ...result, warnings: [...new Set([...result.warnings, 'OUTSIDE_SCHOOL_YEAR'])] }
+      : result;
+  });
   const missingItems = criteriaResults.flatMap((item) => item.missingRequirements);
   const warnings = [
     ...input.criteriaWarnings,
     ...criteriaResults.flatMap((item) => item.warnings),
     ...(failedEvidenceAction ? [failedEvidenceAction.shortReason] : []),
+    ...(outsideSchoolYearCriteria.size > 0 ? ['OUTSIDE_SCHOOL_YEAR'] : []),
   ];
   const completionAction = criteriaResults
     .flatMap((item) => (item.nextAction ? [item.nextAction] : []))

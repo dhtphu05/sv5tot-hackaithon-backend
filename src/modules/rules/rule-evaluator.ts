@@ -2,10 +2,12 @@ import {
   Criterion,
   EvidenceSourceType,
   IndexingStatus,
+  Level,
   MetricType,
   type ApplicationMetric,
 } from '@prisma/client';
 import { coreCriteria } from './criteria.constants';
+import { isEvidenceDateOutsideSchoolYear } from './school-year-evidence';
 import type {
   CriteriaRuleConfig,
   CriterionResult,
@@ -75,13 +77,29 @@ function evaluateCriterion(
 
   const parts = rules.map((rule) => evaluateRule(rule, context));
   const blockingParts = parts.filter((part) => !isOptionalRule(part));
-  const status = mergeStatuses(blockingParts.length > 0 ? blockingParts : parts);
+  let status = mergeStatuses(blockingParts.length > 0 ? blockingParts : parts);
   const requiredItems = unique(parts.flatMap((part) => part.requiredItems));
   const matchedItems = unique(parts.flatMap((part) => part.matchedItems));
   const missingItems = unique(parts.flatMap((part) => part.missingItems));
+  const outsideSchoolYear = context.targetLevel === Level.city && context.evidences.some(
+    (evidence) =>
+      evidence.criterion === criterion &&
+      isEvidenceDateOutsideSchoolYear(evidence, context.schoolYear),
+  );
+  const academicProgramTypeUnknown =
+    context.targetLevel === Level.city &&
+    criterion === Criterion.academic &&
+    isCityAcademicThresholdAmbiguous(context);
+  if (context.targetLevel === Level.city && status === 'missing') status = 'human_review_required';
+  if (academicProgramTypeUnknown) status = 'human_review_required';
   const warnings = unique([
     ...(context.criteriaWarnings ?? []),
     ...parts.flatMap((part) => part.warnings),
+    ...(outsideSchoolYear ? ['OUTSIDE_SCHOOL_YEAR'] : []),
+    ...(academicProgramTypeUnknown ? ['ACADEMIC_PROGRAM_TYPE_UNKNOWN'] : []),
+    ...(context.targetLevel === Level.city && status === 'human_review_required'
+      ? ['CITY_CRITERIA_NEEDS_REVIEW']
+      : []),
   ]);
   const evidenceRefs = unique(parts.flatMap((part) => part.evidenceRefs));
   const metricRefs = unique(parts.flatMap((part) => part.metricRefs));
@@ -98,6 +116,15 @@ function evaluateCriterion(
     evidenceRefs,
     metricRefs,
   };
+}
+
+function isCityAcademicThresholdAmbiguous(context: RuleContext): boolean {
+  const rawGpa = context.metrics.find((metric) => metric.metricType === MetricType.gpa);
+  if (!rawGpa) return false;
+  if (rawGpa.scale !== 4 && rawGpa.scale !== 10) return true;
+
+  const gpa = getMetricValue(context.metrics, MetricType.gpa);
+  return Boolean(gpa && gpa.value >= 3 && gpa.value < 3.2);
 }
 
 function evaluateRule(rule: CriteriaRuleConfig, context: RuleContext): PartialRuleResult {

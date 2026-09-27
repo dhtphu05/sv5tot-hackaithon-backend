@@ -10,6 +10,11 @@ export async function listManagerApplications(req: Request, res: Response): Prom
   sendSuccess(res, { items: data.items }, { requestId: req.requestId, pagination: data.pagination });
 }
 
+export async function getEligibilityVerificationDetail(req: Request, res: Response): Promise<void> {
+  const data = await service.getEligibilityVerificationDetail(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function getManagerWorkloads(req: Request, res: Response): Promise<void> {
   const data = await service.getWorkloads(req.user!);
   sendSuccess(res, data, { requestId: req.requestId });

@@ -13,6 +13,7 @@ import { rateLimitMiddleware } from './middlewares/rate-limit.middleware';
 import { requestIdMiddleware } from './middlewares/request-id.middleware';
 import { aiRouter } from './modules/ai/ai.routes';
 import { applicationsRouter } from './modules/applications/applications.routes';
+import { analyticsRouter } from './modules/analytics/city-analytics.routes';
 import { auditRouter } from './modules/audit/audit.routes';
 import { authRouter } from './modules/auth/auth.routes';
 import { cascadeRouter } from './modules/cascade/cascade.routes';
@@ -75,6 +76,7 @@ export function createApp() {
   app.use('/api/me', meRouter);
   app.use('/api/users', usersRouter);
   app.use('/api/applications', applicationsRouter);
+  app.use('/api/analytics', analyticsRouter);
   app.use('/api', requirementResponsesRouter);
   app.use('/api', metricsRouter);
   app.use('/api', evidencesRouter);

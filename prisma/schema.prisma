@@ -43,6 +43,11 @@ enum AwardRecipientMatchStatus {
   CONFLICT
 }
 
+enum ApplicationEligibilityVerificationDecision {
+  APPROVED
+  REJECTED
+}
+
 enum Criterion {
   ethics
   academic
@@ -385,6 +390,7 @@ model User {
   assignedReviewTasks      ReviewTask[]
   finalizedApplications    Application[]                    @relation("ApplicationFinalizedBy")
   createdSupplementRequests SupplementRequest[]              @relation("SupplementRequestCreatedBy")
+  eligibilityVerifications  ApplicationEligibilityVerification[] @relation("EligibilityVerificationDecidedBy")
 
   @@unique([workspaceId, studentCode])
   @@index([role])
@@ -453,6 +459,7 @@ model Application {
   notifications        Notification[]
   auditLogs            AuditLog[]
   supplementRequests   SupplementRequest[]
+  eligibilityVerification ApplicationEligibilityVerification?
 
   @@unique([studentId, schoolYear, applicationType])
   @@unique([workspaceId, studentId, schoolYear, applicationType])
@@ -464,6 +471,22 @@ model Application {
   @@index([finalStatus, finalLevel])
   @@index([finalizedById])
   @@index([studentId, schoolYear])
+}
+
+model ApplicationEligibilityVerification {
+  id            String                                    @id @default(uuid()) @db.Uuid
+  applicationId String                                    @unique @db.Uuid
+  decision      ApplicationEligibilityVerificationDecision
+  reason        String
+  verificationBasisHash String?                           @db.VarChar(64)
+  decidedById   String                                    @db.Uuid
+  decidedAt     DateTime                                  @default(now())
+  createdAt     DateTime                                  @default(now())
+  updatedAt     DateTime                                  @updatedAt
+  application   Application                               @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  decidedBy     User                                      @relation("EligibilityVerificationDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict)
+
+  @@index([decidedById])
 }
 
 model ApplicationDraftSnapshot {

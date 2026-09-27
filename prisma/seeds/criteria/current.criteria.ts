@@ -40,7 +40,7 @@ const citySource = {
   sourceDocumentName: 'Tiêu chuẩn xét chọn Sinh viên 5 tốt cấp Thành phố Đà Nẵng',
   sourceDocumentNumber: null,
   sourceIssuedAt: null,
-  sourcePeriodLabel: 'Tiêu chuẩn cấp Thành phố Đà Nẵng năm 2022',
+  sourcePeriodLabel: 'Nguồn 2021–2022; áp dụng rehearsal năm học 2025–2026',
   sourceOrganization: 'Hội Sinh viên Việt Nam thành phố Đà Nẵng',
   sourceFileName: 'Tieu chuan xet sinh vien 5 tot cap Thanh Pho Da Nang 2022 (2).pdf',
 } as const;
@@ -296,7 +296,7 @@ export const currentCriteriaSeedConfigs: SeedCriteriaConfig[] = [
     scope: Level.city,
     workspaceCode: null,
     title: 'Bộ tiêu chí Sinh viên 5 tốt cấp Thành phố Đà Nẵng',
-    description: 'Cấu hình hiện hành cho cấp Thành phố Đà Nẵng.',
+    description: 'Cấu hình advisory theo tài liệu 2021–2022, dùng rehearsal năm học 2025–2026.',
     ...citySource,
     rules: [
       rule({
@@ -339,13 +339,24 @@ export const currentCriteriaSeedConfigs: SeedCriteriaConfig[] = [
         ruleKey: 'academic.gpa_by_program_and_achievement',
         title: 'Học tập cấp Thành phố',
         requirement: all([
+          manualReview(
+            'academic_program_type_unknown',
+            'Hệ đại học/cao đẳng chưa được xác định trong hồ sơ; cán bộ cần chọn ngưỡng GPA phù hợp.',
+          ),
           anyOf([
             threshold('gpa', 3.2, { scale: 4, label: 'Sinh viên đại học GPA từ 3.2/4.0' }),
             threshold('gpa', 8, { scale: 10, label: 'Sinh viên đại học GPA từ 8.0/10' }),
             threshold('gpa', 3, { scale: 4, label: 'Sinh viên cao đẳng GPA từ 3.0/4.0' }),
             threshold('gpa', 7.5, { scale: 10, label: 'Sinh viên cao đẳng GPA từ 7.5/10' }),
           ]),
-          evidenceCategory('academic_achievement', 'Ít nhất một thành tích học thuật được quy định'),
+          anyOf([
+            evidenceCategory('student_research_faculty', 'Nghiên cứu khoa học cấp Khoa trở lên'),
+            evidenceCategory('specialist_journal_article', 'Bài báo trên tạp chí chuyên ngành'),
+            evidenceCategory('specialist_conference_paper', 'Báo cáo hội nghị chuyên ngành cấp Khoa trở lên'),
+            evidenceCategory('creative_product_patent_or_publication', 'Sản phẩm sáng tạo có bằng/quyền công bố hoặc giải thưởng cấp Đại học trở lên'),
+            evidenceCategory('academic_competition_team', 'Thành viên đội thi học thuật cấp Đại học trở lên'),
+            evidenceCategory('innovation_competition_prize', 'Giải thưởng đổi mới/sáng tạo cấp Đại học trở lên'),
+          ]),
         ]),
         mandatory: true,
         studentFriendlyText: 'Cần đạt ngưỡng GPA theo hệ đào tạo và có ít nhất một thành tích học thuật bổ sung.',
@@ -357,8 +368,8 @@ export const currentCriteriaSeedConfigs: SeedCriteriaConfig[] = [
         ruleKey: 'physical.any_one_city_branch',
         title: 'Thể lực cấp Thành phố',
         requirement: anyOf([
-          certificate('healthy_youth_school', 'Thanh niên khỏe từ cấp Trường trở lên', Level.school),
-          award('sports_activity_faculty', 'Tham gia và đạt giải hoạt động thể thao từ cấp Khoa trở lên', Level.university),
+          certificate('healthy_youth_school', 'Thanh niên khỏe từ cấp Đại học trở lên', Level.university),
+          award('sports_activity_faculty', 'Tham gia và đạt giải hoạt động thể thao từ cấp Khoa trở lên'),
         ]),
         mandatory: true,
         studentFriendlyText: 'Cần ít nhất một minh chứng thể lực phù hợp cấp Thành phố.',
@@ -371,7 +382,7 @@ export const currentCriteriaSeedConfigs: SeedCriteriaConfig[] = [
         title: 'Tình nguyện cấp Thành phố',
         requirement: all([
           activity('volunteer_days', 'Ít nhất 5 ngày tình nguyện tích lũy', { minimumDays: 5 }),
-          award('volunteer_commendation', 'Khen thưởng tình nguyện từ cấp Khoa trở lên', Level.university),
+          award('volunteer_commendation', 'Khen thưởng tình nguyện từ cấp Khoa trở lên'),
         ]),
         mandatory: true,
         studentFriendlyText: 'Cần đồng thời ít nhất 5 ngày tình nguyện và khen thưởng tình nguyện phù hợp.',
@@ -385,7 +396,7 @@ export const currentCriteriaSeedConfigs: SeedCriteriaConfig[] = [
         requirement: all([
           anyOf([
             certificate('social_practice_skill_course', 'Hoàn thành một khóa kỹ năng thực hành xã hội'),
-            award('youth_union_student_association_commendation', 'Khen thưởng Đoàn/Hội từ cấp Khoa trở lên', Level.university),
+            award('youth_union_student_association_commendation', 'Khen thưởng Đoàn/Hội từ cấp Khoa trở lên'),
           ]),
           anyOf([
             language('B1/C hoặc tương đương', { minimumLevel: 'B1' }),
@@ -395,7 +406,7 @@ export const currentCriteriaSeedConfigs: SeedCriteriaConfig[] = [
             language('Điểm trung bình ngoại ngữ từ 3.0/4.0', { minimumScore: 3, scale: 4 }),
             language('Điểm trung bình ngoại ngữ từ 7.5/10', { minimumScore: 7.5, scale: 10 }),
             certificate('international_exchange_or_integration', 'Hoạt động giao lưu quốc tế hoặc hội nhập từ cấp Khoa trở lên'),
-            award('knowledge_or_language_competition', 'Giải ba trở lên cuộc thi kiến thức hoặc ngoại ngữ từ cấp Khoa trở lên', Level.university),
+            award('knowledge_or_language_competition', 'Giải Ba trở lên cuộc thi kiến thức hoặc ngoại ngữ từ cấp Khoa trở lên'),
           ]),
         ]),
         mandatory: true,

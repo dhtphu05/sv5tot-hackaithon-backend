@@ -13,6 +13,7 @@ import {
   startCurrentApplication,
   submitApplication,
   updateApplicationTargetLevel,
+  verifyApplicationEligibility,
 } from './applications.controller';
 import {
   evaluateApplicationCriteria,
@@ -41,6 +42,7 @@ import {
 import {
   autosaveDraftSchema,
   assistantContextStreamQuerySchema,
+  eligibilityVerificationSchema,
   getCurrentApplicationQuerySchema,
   reopenSupplementSchema,
   startApplicationSchema,
@@ -124,6 +126,13 @@ applicationsRouter.get(
   requireAuth,
   requireRole(Role.student),
   asyncHandler(getApplicationEligibility),
+);
+applicationsRouter.post(
+  '/:id/eligibility-verification',
+  requireAuth,
+  requireRole(Role.city_manager),
+  validate({ body: eligibilityVerificationSchema }),
+  asyncHandler(verifyApplicationEligibility),
 );
 applicationsRouter.get(
   '/:id/criteria-completion',

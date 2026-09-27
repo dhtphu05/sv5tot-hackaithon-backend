@@ -2,6 +2,7 @@
 import {
   ApprovedEvidenceApprovalSource,
   ApplicationStatus,
+  ApplicationType,
   Criterion,
   EvidenceStatus,
   FinalStatus,
@@ -45,6 +46,7 @@ type RequirementStatus = 'passed' | 'failed' | 'missing' | 'needs_review';
 type RiskLevel = 'low' | 'medium' | 'high';
 type ReviewTaskPermissionReason =
   | 'manager_full_access'
+  | 'manager_coordination_view'
   | 'committee_resolution_view'
   | 'assigned_to_you'
   | 'claimable_by_specialization'
@@ -652,26 +654,53 @@ export class ReviewService {
 
     const result = await prisma.$transaction(async (tx) => {
       const status = mapDecisionToStatus(effectiveDecision);
-      const saved = await tx.reviewTask.update({
-        where: { id: task.id },
-        data: {
-          status,
-          decision: effectiveDecision,
-          officerNote,
-          officerSuggestedLevel: input.officerSuggestedLevel ?? null,
-          levelAssessmentJson: {
-            ...(input.levelAssessmentJson ?? {}),
-            evidenceAssessments: input.evidenceAssessments,
-            submittedAt: new Date().toISOString(),
-          } as Prisma.InputJsonValue,
-          decisionReason: officerNote,
-          supplementRequestJson:
-            effectiveDecision === ReviewDecision.supplement_required
-              ? ((input.supplementRequestJson ?? { note: officerNote }) as Prisma.InputJsonValue)
-              : undefined,
-        },
-        include: { application: { include: { student: true } }, assignedOfficer: true },
-      });
+      const taskUpdate = {
+        status,
+        decision: effectiveDecision,
+        officerNote,
+        officerSuggestedLevel: input.officerSuggestedLevel ?? null,
+        levelAssessmentJson: {
+          ...(input.levelAssessmentJson ?? {}),
+          evidenceAssessments: input.evidenceAssessments,
+          submittedAt: new Date().toISOString(),
+        } as Prisma.InputJsonValue,
+        decisionReason: officerNote,
+        supplementRequestJson:
+          effectiveDecision === ReviewDecision.supplement_required
+            ? ((input.supplementRequestJson ?? { note: officerNote }) as Prisma.InputJsonValue)
+            : undefined,
+      };
+      let saved: Awaited<ReturnType<typeof tx.reviewTask.update>>;
+      if (isCityIndividualReviewTask(application)) {
+        const updatedAt = new Date(Math.max(Date.now(), task.updatedAt.getTime() + 1));
+        const claim = await tx.reviewTask.updateMany({
+          where: {
+            id: task.id,
+            status: task.status,
+            decision: task.decision,
+            assignedOfficerId: task.assignedOfficerId,
+            updatedAt: task.updatedAt,
+          },
+          data: { ...taskUpdate, updatedAt },
+        });
+        if (claim.count !== 1) {
+          throw new AppError(
+            409,
+            ErrorCodes.REVIEW_TASK_ALREADY_DECIDED,
+            'Review task changed before this decision was saved. Refresh and try again.',
+          );
+        }
+        saved = await tx.reviewTask.findUniqueOrThrow({
+          where: { id: task.id },
+          include: { application: { include: { student: true } }, assignedOfficer: true },
+        });
+      } else {
+        saved = await tx.reviewTask.update({
+          where: { id: task.id },
+          data: taskUpdate,
+          include: { application: { include: { student: true } }, assignedOfficer: true },
+        });
+      }
 
       // Update specific or all linked evidences based on decision status
       const evidenceIds = task.evidences.map((e) => e.evidenceId);
@@ -954,7 +983,10 @@ export class ReviewService {
         );
       }
 
-      const applicationOutcome = await syncApplicationReviewOutcome(tx, applicationId);
+      const applicationOutcome = await syncApplicationReviewOutcome(tx, applicationId, {
+        applicationType: application.applicationType,
+        targetLevel: application.targetLevel,
+      });
 
       // Audit application status changes
       await createApplicationAudit(tx, {
@@ -1245,7 +1277,11 @@ export class ReviewService {
       assignedOfficerId: string | null;
       status: ReviewTaskStatus;
       criterion: Criterion;
-      application: { student: { faculty: string | null } } | null;
+      application: {
+        applicationType?: ApplicationType;
+        targetLevel?: Level;
+        student: { faculty: string | null };
+      } | null;
       collectiveProfile: { representative: { faculty: string | null } } | null;
     },
     decision: boolean,
@@ -1261,12 +1297,40 @@ export class ReviewService {
       assignedOfficerId: string | null;
       status: ReviewTaskStatus;
       criterion: Criterion;
-      application: { student: { faculty: string | null } } | null;
+      application: {
+        applicationType?: ApplicationType;
+        targetLevel?: Level;
+        student: { faculty: string | null };
+      } | null;
       collectiveProfile: { representative: { faculty: string | null } } | null;
     },
     permissionCache?: OfficerCriterionAccessCache,
   ): Promise<ReviewTaskPermissions> {
     const final = isFinalReviewTaskStatus(task.status);
+    const cityIndividual = isCityIndividualReviewTask(task.application);
+
+    if (
+      cityIndividual &&
+      (user.role === Role.officer || user.role === Role.manager || user.role === Role.committee)
+    ) {
+      return buildTaskPermissions({
+        canView: false,
+        canAct: false,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: 'role_not_allowed',
+      });
+    }
+
+    if (cityIndividual && user.role === Role.city_manager) {
+      return buildTaskPermissions({
+        canView: true,
+        canAct: false,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: 'manager_coordination_view',
+      });
+    }
 
     if (user.role === Role.manager || user.role === Role.city_manager || user.role === Role.admin) {
       return buildTaskPermissions({
@@ -1558,7 +1622,12 @@ export class ReviewService {
       where: { applicationId },
     });
 
-    // 5 main criteria + any criteria with evidences
+    const cityIndividual =
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city;
+
+    // Individual City review is fixed to the five official criteria; elsewhere, preserve
+    // legacy behavior by ensuring any additional criteria that have evidence.
     const criteriaToEnsure = new Set<Criterion>([
       Criterion.ethics,
       Criterion.academic,
@@ -1566,8 +1635,10 @@ export class ReviewService {
       Criterion.volunteer,
       Criterion.integration,
     ]);
-    for (const ev of evidences) {
-      criteriaToEnsure.add(ev.criterion);
+    if (!cityIndividual) {
+      for (const ev of evidences) {
+        criteriaToEnsure.add(ev.criterion);
+      }
     }
 
     // Existing tasks to prevent duplicate (idempotency check)
@@ -1655,7 +1726,7 @@ export class ReviewService {
         applicationId,
         afterStateJson: { count: createdTasks.length, mode: input.mode || 'missing_only' },
       });
-    });
+    }, { maxWait: 10_000, timeout: 30_000 });
 
     return {
       ensuredCount: criteriaToCreate.length,
@@ -1742,7 +1813,11 @@ function getEffectiveTaskDecision(
   return decision;
 }
 
-async function syncApplicationReviewOutcome(tx: Prisma.TransactionClient, applicationId: string) {
+async function syncApplicationReviewOutcome(
+  tx: Prisma.TransactionClient,
+  applicationId: string,
+  application: { applicationType: ApplicationType; targetLevel: Level },
+) {
   const tasks = await tx.reviewTask.findMany({
     where: { applicationId },
     select: { status: true, officerSuggestedLevel: true },
@@ -1804,6 +1879,13 @@ async function syncApplicationReviewOutcome(tx: Prisma.TransactionClient, applic
         task.status === ReviewTaskStatus.accepted || task.status === ReviewTaskStatus.rejected,
     )
   ) {
+    if (isCityIndividualReviewTask(application)) {
+      return tx.application.update({
+        where: { id: applicationId },
+        data: { ...baseData, status: ApplicationStatus.under_review },
+        select: { status: true, finalStatus: true, finalLevel: true },
+      });
+    }
     return tx.application.update({
       where: { id: applicationId },
       data: {
@@ -1818,6 +1900,16 @@ async function syncApplicationReviewOutcome(tx: Prisma.TransactionClient, applic
   }
 
   return null;
+}
+
+function isCityIndividualReviewTask(application: {
+  applicationType?: ApplicationType;
+  targetLevel?: Level;
+} | null) {
+  return (
+    application?.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city
+  );
 }
 
 function decisionAuditAction(decision: ReviewDecision): string {
@@ -2032,6 +2124,7 @@ function buildAvailableActions(
 function taskPermissionReasonLabel(reason: ReviewTaskPermissionReason) {
   const labels: Record<ReviewTaskPermissionReason, string> = {
     manager_full_access: 'Hội đồng/Cấp quản lý được xem và xử lý task này.',
+    manager_coordination_view: 'City Manager theo dõi task để điều phối.',
     committee_resolution_view: 'Task đang ở trạng thái hội ý, được xem ở chế độ theo dõi.',
     assigned_to_you: 'Task được giao cho bạn.',
     claimable_by_specialization: 'Task chưa phân công và thuộc tiêu chí bạn phụ trách.',

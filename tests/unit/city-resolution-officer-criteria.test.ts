@@ -29,7 +29,13 @@ const user = {
   faculty: null,
   avatarUrl: null,
   workspaceId: cityId,
-  workspace: { id: cityId, type: WorkspaceType.CITY, code: 'CITY', name: 'Da Nang', shortName: 'DN' },
+  workspace: {
+    id: cityId,
+    type: WorkspaceType.CITY,
+    code: 'CITY',
+    name: 'Da Nang',
+    shortName: 'DN',
+  },
 };
 
 beforeEach(() => {
@@ -55,7 +61,9 @@ describe('City Officer resolution criterion scope', () => {
     await new ResolutionService().listCases(user, { page: 1, limit: 10 } as never);
 
     expect(prismaMock.officerSpecialization.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ officerId: user.id, isActive: true }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ officerId: user.id, isActive: true }),
+      }),
     );
     expect(prismaMock.resolutionCase.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -86,6 +94,7 @@ describe('City Officer resolution criterion scope', () => {
       evidenceId: 'evidence-1',
       reviewTaskId: 'task-1',
       createdBy: user.id,
+      application: { applicationType: 'individual', targetLevel: 'city' },
       evidence: { id: 'evidence-1', criterion: 'arts' },
     });
     prismaMock.reviewTask.findFirst.mockResolvedValue({
@@ -110,6 +119,7 @@ describe('City Officer resolution criterion scope', () => {
       evidenceId: 'evidence-2',
       reviewTaskId: 'task-2',
       createdBy: 'student-2',
+      application: { applicationType: 'individual', targetLevel: 'city' },
       evidence: { id: 'evidence-2', criterion: 'volunteer' },
     });
     prismaMock.reviewTask.findFirst.mockResolvedValue({

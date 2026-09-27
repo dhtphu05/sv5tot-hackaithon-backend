@@ -1,4 +1,11 @@
-import { Role, WorkspaceType } from '@prisma/client';
+import {
+  ApplicationStatus,
+  ApplicationType,
+  FinalStatus,
+  ReviewTaskStatus,
+  Role,
+  WorkspaceType,
+} from '@prisma/client';
 import type { NextFunction, Request, Response, Router } from 'express';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -48,7 +55,9 @@ beforeEach(() => {
   vi.mocked(prisma.reviewTask.findFirst).mockResolvedValue(null as never);
   vi.mocked(prisma.reviewTaskEvidence.findMany).mockResolvedValue([] as never);
   vi.mocked(prisma.evidence.findMany).mockResolvedValue([] as never);
-  vi.mocked(prisma.officerSpecialization.findMany).mockResolvedValue([{ criterion: 'volunteer' }] as never);
+  vi.mocked(prisma.officerSpecialization.findMany).mockResolvedValue([
+    { criterion: 'volunteer' },
+  ] as never);
   vi.mocked(prisma.knowledgeBaseItem.findMany).mockResolvedValue([] as never);
   vi.mocked(prisma.precheckResult.findFirst).mockResolvedValue(null as never);
   vi.mocked(prisma.cascadeReview.findFirst).mockResolvedValue(null as never);
@@ -72,15 +81,54 @@ describe('City resolution authorization', () => {
 
     await service.listCases(legacyUser(Role.manager), { page: 1, limit: 10 } as never);
     expect(prisma.resolutionCase.findMany).toHaveBeenLastCalledWith(
-      expect.objectContaining({ where: { AND: [{ workspaceId: schoolId }] } }),
+      expect.objectContaining({
+        where: {
+          AND: [
+            { workspaceId: schoolId },
+            {
+              application: {
+                isNot: { applicationType: 'individual', targetLevel: 'city' },
+              },
+            },
+          ],
+        },
+      }),
     );
   });
 
-  it('lets a City Officer list their escalated cases across active Schools', async () => {
-    await new ResolutionService().listMyEscalatedCases(
-      cityUser(Role.city_officer),
-      { page: 1, limit: 10 } as never,
+  it('keeps legacy school officers out of City resolution lists and details', async () => {
+    const service = new ResolutionService();
+    const schoolOfficer = legacyUser(Role.officer);
+    await service.listCases(schoolOfficer, { page: 1, limit: 10 } as never);
+
+    expect(prisma.resolutionCase.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          AND: expect.arrayContaining([
+            {
+              application: {
+                isNot: { applicationType: ApplicationType.individual, targetLevel: 'city' },
+              },
+            },
+          ]),
+        }),
+      }),
     );
+
+    const caseRecord = resolutionCase(WorkspaceType.SCHOOL, true);
+    caseRecord.createdBy = schoolOfficer.id;
+    vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
+    await expect(service.getCaseDetail(schoolOfficer, 'case-1')).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    expect(prisma.reviewTask.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('lets a City Officer list their escalated cases across active Schools', async () => {
+    await new ResolutionService().listMyEscalatedCases(cityUser(Role.city_officer), {
+      page: 1,
+      limit: 10,
+    } as never);
 
     expect(prisma.resolutionCase.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -180,6 +228,28 @@ describe('City resolution authorization', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
+  it.each([Role.manager, Role.committee])(
+    'denies legacy %s from resolving an individual City resolution case',
+    async (role) => {
+      const caseRecord = resolutionCase(WorkspaceType.SCHOOL, true);
+      caseRecord.application = {
+        ...(caseRecord.application as Record<string, unknown>),
+        applicationType: 'individual',
+        targetLevel: 'city',
+      };
+      vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
+
+      await expect(
+        new ResolutionService().resolveCase(legacyUser(role), 'case-1', {
+          decision: 'closed_no_action',
+          note: 'Reviewed',
+          evidenceDecisions: [],
+        } as never),
+      ).rejects.toMatchObject({ statusCode: 403 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
+
   it('scopes resolution watchers to the source School and active City workspace', async () => {
     const caseRecord = {
       ...resolutionCase(WorkspaceType.SCHOOL, true),
@@ -224,9 +294,9 @@ describe('City resolution authorization', () => {
         ),
       },
     };
-    vi.mocked(prisma.$transaction).mockImplementation(
-      ((callback: (transaction: unknown) => Promise<unknown>) => callback(tx)) as never,
-    );
+    vi.mocked(prisma.$transaction).mockImplementation(((
+      callback: (transaction: unknown) => Promise<unknown>,
+    ) => callback(tx)) as never);
 
     await new ResolutionService().resolveCase(cityUser(Role.city_manager), 'case-1', {
       decision: 'closed_no_action',
@@ -253,7 +323,11 @@ describe('City resolution authorization', () => {
 
   it('lets City Manager and Committee resolve active School cases, but rejects inactive Schools before writes', async () => {
     const service = new ResolutionService();
-    const decision = { decision: 'closed_no_action', note: 'Reviewed', evidenceDecisions: [] } as never;
+    const decision = {
+      decision: 'closed_no_action',
+      note: 'Reviewed',
+      evidenceDecisions: [],
+    } as never;
     vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(
       resolutionCase(WorkspaceType.SCHOOL, true) as never,
     );
@@ -266,7 +340,9 @@ describe('City resolution authorization', () => {
     vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(
       resolutionCase(WorkspaceType.SCHOOL, false) as never,
     );
-    await expect(service.resolveCase(cityUser(Role.city_committee), 'case-1', decision)).rejects.toMatchObject({
+    await expect(
+      service.resolveCase(cityUser(Role.city_committee), 'case-1', decision),
+    ).rejects.toMatchObject({
       statusCode: 404,
     });
     expect(prisma.$transaction).not.toHaveBeenCalled();
@@ -310,15 +386,17 @@ describe('City resolution authorization', () => {
       reviewTask: { findMany: vi.fn().mockResolvedValue([]) },
       knowledgeBaseItem: { create: createKnowledgeItem },
       notification: {
-        create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
-          Promise.resolve({ ...data, id: 'notification', createdAt: new Date(), readAt: null }),
-        ),
+        create: vi
+          .fn()
+          .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+            Promise.resolve({ ...data, id: 'notification', createdAt: new Date(), readAt: null }),
+          ),
       },
       user: { findMany: vi.fn().mockResolvedValue([]) },
     };
-    vi.mocked(prisma.$transaction).mockImplementation(
-      ((callback: (transaction: unknown) => Promise<unknown>) => callback(tx)) as never,
-    );
+    vi.mocked(prisma.$transaction).mockImplementation(((
+      callback: (transaction: unknown) => Promise<unknown>,
+    ) => callback(tx)) as never);
 
     await new ResolutionService().resolveCase(cityUser(Role.city_manager), 'case-1', {
       decision: 'closed_no_action',
@@ -329,6 +407,67 @@ describe('City resolution authorization', () => {
 
     expect(createKnowledgeItem).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ workspaceId: cityId }) }),
+    );
+  });
+
+  it('keeps a City application unfinalized after resolution closes its last mixed review task', async () => {
+    const caseRecord = resolutionCase(WorkspaceType.SCHOOL, true);
+    vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
+    const updateApplication = vi.fn().mockResolvedValue({ status: ApplicationStatus.under_review });
+    const tx = {
+      resolutionCase: {
+        update: vi.fn().mockResolvedValue({ ...caseRecord, status: 'resolved' }),
+        count: vi.fn().mockResolvedValue(0),
+        findUnique: vi.fn().mockResolvedValue({ ...caseRecord, status: 'resolved' }),
+      },
+      auditLog: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'opened-audit' }),
+        create: vi.fn().mockResolvedValue({ id: 'audit' }),
+      },
+      application: {
+        findUnique: vi.fn().mockResolvedValue({ workspaceId: schoolId }),
+        update: updateApplication,
+      },
+      reviewTask: {
+        findMany: vi
+          .fn()
+          .mockResolvedValue([
+            { status: ReviewTaskStatus.accepted },
+            { status: ReviewTaskStatus.rejected },
+          ]),
+      },
+      user: { findMany: vi.fn().mockResolvedValue([]) },
+      notification: {
+        create: vi.fn().mockResolvedValue({
+          id: 'notification-1',
+          createdAt: new Date(),
+          readAt: null,
+        }),
+      },
+    };
+    vi.mocked(prisma.$transaction).mockImplementation(((
+      callback: (transaction: unknown) => Promise<unknown>,
+    ) => callback(tx)) as never);
+
+    await new ResolutionService().resolveCase(cityUser(Role.city_committee), 'case-1', {
+      decision: 'closed_no_action',
+      note: 'Resolution reviewed by City Committee',
+      evidenceDecisions: [],
+    } as never);
+
+    expect(updateApplication).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: ApplicationStatus.under_review,
+          finalStatus: FinalStatus.pending,
+          finalizedAt: null,
+        }),
+      }),
+    );
+    expect(updateApplication).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: ApplicationStatus.rejected }),
+      }),
     );
   });
 
@@ -357,7 +496,9 @@ describe('City audit and export scope', () => {
         }),
       }),
     );
-    expect((auditWhere as { action: { in: string[] } }).action.in).not.toContain('WORKSPACE_UPDATED');
+    expect((auditWhere as { action: { in: string[] } }).action.in).not.toContain(
+      'WORKSPACE_UPDATED',
+    );
 
     await new ExportsService().exportApplicationsJson(cityUser(Role.city_committee), {} as never);
     expect(prisma.application.findMany).toHaveBeenLastCalledWith(
@@ -366,7 +507,9 @@ describe('City audit and export scope', () => {
       }),
     );
 
-    await new ExportsService().exportReviewResults(cityUser(Role.city_manager), { format: 'json' } as never);
+    await new ExportsService().exportReviewResults(cityUser(Role.city_manager), {
+      format: 'json',
+    } as never);
     expect(prisma.application.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         where: { workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } } },
@@ -441,7 +584,9 @@ describe('City audit and export scope', () => {
       originalName: 'city-results.csv',
       workspace: { type: WorkspaceType.CITY, isActive: true },
     } as never);
-    await expect(service.getDownloadFile(cityUser(Role.city_manager), 'city-export')).resolves.toMatchObject({
+    await expect(
+      service.getDownloadFile(cityUser(Role.city_manager), 'city-export'),
+    ).resolves.toMatchObject({
       file: { id: 'city-export' },
     });
   });
@@ -503,6 +648,7 @@ function resolutionCase(
     application: {
       id: 'application-1',
       workspaceId: schoolId,
+      applicationType: ApplicationType.individual,
       targetLevel: 'city',
       status: 'resolution_needed',
       student: {
@@ -516,13 +662,7 @@ function resolutionCase(
   };
 }
 
-function expectAllowed(
-  router: Router,
-  method: string,
-  path: string,
-  role: Role,
-  allowed: boolean,
-) {
+function expectAllowed(router: Router, method: string, path: string, role: Role, allowed: boolean) {
   const route = (router as unknown as { stack: RouteLayer[] }).stack.find(
     (layer) => layer.route?.path === path && layer.route.methods?.[method],
   );

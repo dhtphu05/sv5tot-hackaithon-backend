@@ -1,19 +1,71 @@
-import { WorkspaceType, type Application } from '@prisma/client';
+import { createHash } from 'node:crypto';
+import {
+  ApplicationEligibilityVerificationDecision,
+  ApplicationStatus,
+  ApplicationType,
+  Level,
+  Role,
+  WorkspaceType,
+  type Prisma,
+  type Application,
+} from '@prisma/client';
 import { normalizeText } from '../decision-imports/decision-ocr-table-normalizer';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace, requireUserWorkspace } from '../../shared/utils/workspace-scope';
 import { assertApplicationOwner } from './application.helpers';
-import { CitySubmissionEligibilityRepository } from './city-submission-eligibility.repository';
+import { assertReviewWorkspaceAccess } from '../../shared/utils/review-workspace-scope';
+import {
+  CitySubmissionEligibilityRepository,
+  type SaveEligibilityVerificationInput,
+} from './city-submission-eligibility.repository';
 
 type EligibilityApplication = Pick<Application, 'id' | 'studentId' | 'workspaceId' | 'schoolYear'>;
+type EligibilityIdentity = Pick<AuthenticatedUser, 'studentCode' | 'fullName' | 'className'>;
+type VerificationApplication = {
+  id: string;
+  studentId: string;
+  workspaceId: string;
+  schoolYear: string;
+  applicationType: ApplicationType;
+  targetLevel: Level;
+  status: ApplicationStatus;
+  submittedAt: Date | null;
+  workspace: { type: WorkspaceType; isActive: boolean };
+};
+type ManagerEligibilityApplication = Pick<
+  Application,
+  'id' | 'studentId' | 'workspaceId' | 'schoolYear' | 'applicationType' | 'targetLevel' | 'status' | 'submittedAt'
+> & {
+  student: EligibilityIdentity & { workspaceId: string | null };
+  workspace: { code: string; name: string; type: WorkspaceType; isActive: boolean };
+};
+type ManagerVerificationApplication = ManagerEligibilityApplication & {
+  eligibilityVerification: {
+    decision: ApplicationEligibilityVerificationDecision;
+    verificationBasisHash: string | null;
+    decidedAt: Date;
+  } | null;
+};
 
 type WorkspaceContext = {
   id: string;
   type: WorkspaceType;
   parentWorkspaceId: string | null;
   parentWorkspace: { id: string; type: WorkspaceType } | null;
+};
+
+type EligibilityCalculation = {
+  result: CitySubmissionEligibility;
+  verificationBasisHash: string | null;
+  candidates: VerificationBasisRecipient[];
+};
+
+type VerificationBasisRecipient = {
+  studentCode: string;
+  fullName: string;
+  className: string | null;
 };
 
 export type CitySubmissionEligibility = {
@@ -26,7 +78,20 @@ export type CitySubmissionEligibility = {
     | 'MISSING_IDENTITY_CONTEXT'
     | 'IDENTITY_MATCH_REQUIRES_VERIFICATION'
     | 'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH'
+    | 'MANUAL_VERIFICATION_APPROVED'
+    | 'MANUAL_VERIFICATION_REJECTED'
   >;
+};
+
+export type EligibilityVerificationInput = {
+  decision: ApplicationEligibilityVerificationDecision;
+  reason: string;
+};
+
+export type ManagerEligibilityStatus = {
+  autoStatus: CitySubmissionEligibility['status'];
+  effectiveStatus: CitySubmissionEligibility['status'];
+  reasons: CitySubmissionEligibility['reasons'];
 };
 
 export class CitySubmissionEligibilityService {
@@ -46,8 +111,285 @@ export class CitySubmissionEligibilityService {
     assertSameWorkspace(user, application, 'Application not found');
     assertApplicationOwner(application, user);
 
-    const workspaceId = requireUserWorkspace(user);
-    const workspace = await this.repository.findWorkspaceContext(workspaceId);
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      user,
+      requireUserWorkspace(user),
+    );
+
+    return this.applyCurrentManualVerification(automatic);
+  }
+
+  async getManagerVerificationStatus(
+    user: AuthenticatedUser,
+    application: ManagerEligibilityApplication,
+  ): Promise<ManagerEligibilityStatus> {
+    this.assertCityManager(user);
+    this.assertManagerApplicationScope(user, application);
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      application.student,
+      application.workspaceId,
+    );
+    const effective = await this.applyCurrentManualVerification(automatic);
+    return {
+      autoStatus: automatic.result.status,
+      effectiveStatus: effective.status,
+      reasons: effective.reasons,
+    };
+  }
+
+  async getManagerVerificationDetail(user: AuthenticatedUser, applicationId: string) {
+    this.assertCityManager(user);
+    const application = (await this.repository.findApplicationForManagerVerification(
+      applicationId,
+    )) as ManagerVerificationApplication | null;
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    this.assertManagerApplicationScope(user, application);
+
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      application.student,
+      application.workspaceId,
+    );
+    const effective = this.applyManualVerification(automatic, application.eligibilityVerification);
+    const candidates = automatic.result.status === 'NEEDS_VERIFICATION'
+      ? automatic.candidates.map((candidate) => ({
+          ...candidate,
+          institution: { code: application.workspace.code, name: application.workspace.name },
+        }))
+      : [];
+
+    return {
+      applicationId: application.id,
+      schoolYear: application.schoolYear,
+      route: automatic.result.route,
+      autoStatus: automatic.result.status,
+      effectiveStatus: effective.status,
+      reasons: effective.reasons,
+      student: {
+        fullName: application.student.fullName,
+        studentCode: application.student.studentCode,
+        className: application.student.className,
+      },
+      school: { code: application.workspace.code, name: application.workspace.name },
+      existingDecision: application.eligibilityVerification
+        ? {
+            decision: application.eligibilityVerification.decision,
+            decidedAt: application.eligibilityVerification.decidedAt.toISOString(),
+          }
+        : null,
+      candidates,
+    };
+  }
+
+  async getEligibilityForSubmission(
+    tx: Prisma.TransactionClient,
+    user: AuthenticatedUser,
+    applicationId: string,
+  ): Promise<CitySubmissionEligibility> {
+    const application = await this.repository.findApplication(applicationId, tx);
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    assertApplicationOwner(application, user);
+    const identity = await this.repository.findStudentIdentity(application.studentId, tx);
+    if (!identity || identity.workspaceId !== application.workspaceId) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    const schoolLock = await this.repository.lockSchoolWorkspaceForEligibility(application.workspaceId, tx);
+    if (schoolLock.length === 0) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      identity,
+      application.workspaceId,
+      tx,
+    );
+    return this.applyCurrentManualVerification(automatic, tx);
+  }
+
+  private async applyCurrentManualVerification(
+    automatic: EligibilityCalculation,
+    tx?: Prisma.TransactionClient,
+  ): Promise<CitySubmissionEligibility> {
+    if (automatic.result.status !== 'NEEDS_VERIFICATION') return automatic.result;
+
+    const verification = tx
+      ? await this.repository.findManualVerification(automatic.result.applicationId, tx)
+      : await this.repository.findManualVerification(automatic.result.applicationId);
+    return this.applyManualVerification(automatic, verification);
+  }
+
+  private applyManualVerification(
+    automatic: EligibilityCalculation,
+    verification: {
+      decision: ApplicationEligibilityVerificationDecision;
+      verificationBasisHash: string | null;
+    } | null,
+  ): CitySubmissionEligibility {
+    if (automatic.result.status !== 'NEEDS_VERIFICATION') return automatic.result;
+    if (
+      !verification ||
+      !automatic.verificationBasisHash ||
+      verification.verificationBasisHash !== automatic.verificationBasisHash
+    ) {
+      return automatic.result;
+    }
+
+    return {
+      ...automatic.result,
+      status: verification.decision === ApplicationEligibilityVerificationDecision.APPROVED
+        ? 'ELIGIBLE'
+        : 'NOT_ELIGIBLE',
+      reasons: [
+        verification.decision === ApplicationEligibilityVerificationDecision.APPROVED
+          ? 'MANUAL_VERIFICATION_APPROVED'
+          : 'MANUAL_VERIFICATION_REJECTED',
+      ],
+    };
+  }
+
+  private assertCityManager(user: AuthenticatedUser): void {
+    if (user.role !== Role.city_manager) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only a City Manager can read eligibility verification');
+    }
+  }
+
+  private assertManagerApplicationScope(
+    user: AuthenticatedUser,
+    application: ManagerEligibilityApplication,
+  ): void {
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: application.workspaceId,
+        workspaceType: application.workspace.type,
+        workspaceIsActive: application.workspace.isActive,
+      },
+      'Application not found',
+    );
+    const allowedStatuses: ApplicationStatus[] = [
+      ApplicationStatus.draft,
+      ApplicationStatus.prechecked,
+      ApplicationStatus.ready_to_submit,
+      ApplicationStatus.supplement_required,
+    ];
+    if (
+      application.student.workspaceId !== application.workspaceId ||
+      application.applicationType !== ApplicationType.individual ||
+      application.targetLevel !== Level.city ||
+      application.submittedAt !== null ||
+      !allowedStatuses.includes(application.status)
+    ) {
+      throw new AppError(404, ErrorCodes.NOT_FOUND, 'City application not found');
+    }
+  }
+
+  async verifyEligibility(
+    user: AuthenticatedUser,
+    applicationId: string,
+    input: EligibilityVerificationInput,
+  ) {
+    if (user.role !== Role.city_manager) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only a City Manager can verify eligibility');
+    }
+
+    const application = (await this.repository.findApplicationForVerification(
+      applicationId,
+    )) as VerificationApplication | null;
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    assertReviewWorkspaceAccess(
+      user,
+      {
+        workspaceId: application.workspaceId,
+        workspaceType: application.workspace?.type,
+        workspaceIsActive: application.workspace?.isActive,
+      },
+      'Application not found',
+    );
+
+    if (
+      application.applicationType !== ApplicationType.individual ||
+      application.targetLevel !== Level.city
+    ) {
+      throw new AppError(404, ErrorCodes.NOT_FOUND, 'City application not found');
+    }
+
+    if (
+      application.submittedAt !== null ||
+      (application.status !== ApplicationStatus.draft &&
+        application.status !== ApplicationStatus.prechecked &&
+        application.status !== ApplicationStatus.ready_to_submit &&
+        application.status !== ApplicationStatus.supplement_required)
+    ) {
+      throw new AppError(
+        409,
+        ErrorCodes.APPLICATION_LOCKED,
+        'Eligibility can only be verified before the initial submission',
+      );
+    }
+
+    if (!input.reason.trim()) {
+      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'Verification reason is required');
+    }
+
+    const identity = await this.repository.findStudentIdentity(application.studentId);
+    if (!identity || identity.workspaceId !== application.workspaceId) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+
+    const automatic = await this.calculateAutomaticEligibility(
+      application,
+      identity,
+      application.workspaceId,
+    );
+    if (automatic.result.status !== 'NEEDS_VERIFICATION') {
+      throw new AppError(
+        409,
+        ErrorCodes.ELIGIBILITY_VERIFICATION_NOT_REQUIRED,
+        'Manual verification is available only when automatic eligibility needs verification',
+        { status: automatic.result.status },
+      );
+    }
+
+    if (!automatic.verificationBasisHash) {
+      throw new AppError(
+        409,
+        ErrorCodes.ELIGIBILITY_VERIFICATION_NOT_REQUIRED,
+        'Manual verification requires a current eligibility basis',
+      );
+    }
+
+    const saveInput: SaveEligibilityVerificationInput = {
+      applicationId: application.id,
+      decision: input.decision,
+      reason: input.reason.trim(),
+      verificationBasisHash: automatic.verificationBasisHash,
+      actorId: user.id,
+      actorRole: user.role,
+    };
+    return this.repository.saveVerification(saveInput);
+  }
+
+  private async calculateAutomaticEligibility(
+    application: EligibilityApplication,
+    identity: EligibilityIdentity,
+    workspaceId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<EligibilityCalculation> {
+    const workspace = tx
+      ? await this.repository.findWorkspaceContext(workspaceId, tx)
+      : await this.repository.findWorkspaceContext(workspaceId);
     if (!workspace || workspace.type !== WorkspaceType.SCHOOL) {
       throw new AppError(
         409,
@@ -57,7 +399,7 @@ export class CitySubmissionEligibilityService {
     }
 
     if (workspace.parentWorkspaceId === null) {
-      return directCityResult(application);
+      return { result: directCityResult(application), verificationBasisHash: null, candidates: [] };
     }
 
     if (
@@ -71,31 +413,70 @@ export class CitySubmissionEligibilityService {
       );
     }
 
-    return this.getUdnEligibility(user, application, workspace, workspace.parentWorkspace.id);
+    return this.getUdnEligibility(
+      identity,
+      application,
+      workspace,
+      workspace.parentWorkspace.id,
+      tx,
+    );
   }
 
   private async getUdnEligibility(
-    user: AuthenticatedUser,
+    identity: EligibilityIdentity,
     application: EligibilityApplication,
     school: WorkspaceContext,
     universityWorkspaceId: string,
-  ): Promise<CitySubmissionEligibility> {
-    const recipients = await this.repository.findConfirmedUniversityRecipients({
+    tx?: Prisma.TransactionClient,
+  ): Promise<EligibilityCalculation> {
+    if (tx) {
+      const lockAcquired = await this.repository.lockUniversityAwardScope(
+        {
+          issuerWorkspaceId: universityWorkspaceId,
+          institutionWorkspaceId: school.id,
+          schoolYear: application.schoolYear,
+        },
+        tx,
+      );
+      if (!lockAcquired) {
+        throw new AppError(
+          409,
+          ErrorCodes.INVALID_APPLICATION_CONTEXT,
+          'University workspace is missing from the application hierarchy',
+        );
+      }
+    }
+
+    const lookup = {
       issuerWorkspaceId: universityWorkspaceId,
       institutionWorkspaceId: school.id,
       schoolYear: application.schoolYear,
+    };
+    const recipients = tx
+      ? await this.repository.findConfirmedUniversityRecipients(lookup, tx)
+      : await this.repository.findConfirmedUniversityRecipients(lookup);
+    const verificationBasisHash = createVerificationBasisHash({
+      application,
+      school,
+      universityWorkspaceId,
+      identity,
+      recipients,
     });
 
-    const studentCode = normalizeStudentCode(user.studentCode);
+    const studentCode = normalizeStudentCode(identity.studentCode);
     if (
       studentCode &&
       recipients.some((recipient) => normalizeStudentCode(recipient.studentCode) === studentCode)
     ) {
-      return udnResult(application, 'ELIGIBLE', []);
+      return {
+        result: udnResult(application, 'ELIGIBLE', []),
+        verificationBasisHash,
+        candidates: [],
+      };
     }
 
-    const fullName = normalizeText(user.fullName);
-    const className = normalizeText(user.className ?? '');
+    const fullName = normalizeText(identity.fullName);
+    const className = normalizeText(identity.className ?? '');
     const identityMatches = fullName && className
       ? recipients.filter(
           (recipient) =>
@@ -105,25 +486,81 @@ export class CitySubmissionEligibilityService {
       : [];
 
     if (identityMatches.length > 1) {
-      return udnResult(application, 'NEEDS_VERIFICATION', [
-        'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH',
-      ]);
+      return {
+        result: udnResult(application, 'NEEDS_VERIFICATION', [
+          'AMBIGUOUS_UNIVERSITY_SYSTEM_AWARD_MATCH',
+        ]),
+        verificationBasisHash,
+        candidates: identityMatches,
+      };
     }
 
     if (identityMatches.length === 1) {
-      return udnResult(application, 'NEEDS_VERIFICATION', [
-        'IDENTITY_MATCH_REQUIRES_VERIFICATION',
-      ]);
+      return {
+        result: udnResult(application, 'NEEDS_VERIFICATION', [
+          'IDENTITY_MATCH_REQUIRES_VERIFICATION',
+        ]),
+        verificationBasisHash,
+        candidates: identityMatches,
+      };
     }
 
     if (!studentCode && (!fullName || !className)) {
-      return udnResult(application, 'NOT_ELIGIBLE', ['MISSING_IDENTITY_CONTEXT']);
+      return {
+        result: udnResult(application, 'NOT_ELIGIBLE', ['MISSING_IDENTITY_CONTEXT']),
+        verificationBasisHash,
+        candidates: [],
+      };
     }
 
     const reasons: CitySubmissionEligibility['reasons'] = ['MISSING_UNIVERSITY_SYSTEM_AWARD'];
     if (!fullName || !className) reasons.push('MISSING_IDENTITY_CONTEXT');
-    return udnResult(application, 'NOT_ELIGIBLE', reasons);
+    return {
+      result: udnResult(application, 'NOT_ELIGIBLE', reasons),
+      verificationBasisHash,
+      candidates: [],
+    };
   }
+}
+
+function createVerificationBasisHash(input: {
+  application: EligibilityApplication;
+  school: WorkspaceContext;
+  universityWorkspaceId: string;
+  identity: EligibilityIdentity;
+  recipients: VerificationBasisRecipient[];
+}): string {
+  const recipients = input.recipients
+    .map((recipient) => ({
+      studentCode: normalizeStudentCode(recipient.studentCode),
+      fullName: normalizeText(recipient.fullName),
+      className: normalizeText(recipient.className ?? ''),
+    }))
+    .sort((left, right) => {
+      const leftKey = JSON.stringify(left);
+      const rightKey = JSON.stringify(right);
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
+  const basis = {
+    applicationId: input.application.id,
+    schoolYear: input.application.schoolYear,
+    workspaceId: input.application.workspaceId,
+    route: 'UDN_PREREQUISITE',
+    schoolType: input.school.type,
+    parentWorkspaceId: input.school.parentWorkspaceId,
+    parentWorkspaceType: input.school.parentWorkspace?.type ?? null,
+    universityWorkspaceId: input.universityWorkspaceId,
+    studentId: input.application.studentId,
+    identity: {
+      workspaceId: input.application.workspaceId,
+      studentCode: normalizeStudentCode(input.identity.studentCode),
+      fullName: normalizeText(input.identity.fullName),
+      className: normalizeText(input.identity.className ?? ''),
+    },
+    recipients,
+  };
+
+  return createHash('sha256').update(JSON.stringify(basis)).digest('hex');
 }
 
 function directCityResult(application: EligibilityApplication): CitySubmissionEligibility {
