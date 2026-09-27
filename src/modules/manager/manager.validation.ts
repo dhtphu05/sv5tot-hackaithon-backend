@@ -60,6 +60,9 @@ export const revokeSubmissionWindowExceptionSchema = z.object({
 
 export const listManagerApplicationsQuerySchema = z.object({
   eligibilityVerification: z.enum(['pending']).optional(),
+  workspaceId: z.string().uuid().optional(),
+  lifecycle: z.enum(['active', 'cancelled', 'all']).default('active'),
+  archive: z.enum(['exclude', 'only', 'all']).default('exclude'),
   status: z.nativeEnum(ApplicationStatus).optional(),
   targetLevel: z.nativeEnum(Level).optional(),
   faculty: z.string().trim().min(1).optional(),
@@ -73,12 +76,16 @@ export const listManagerApplicationsQuerySchema = z.object({
 });
 
 export const listManagerResultsQuerySchema = z.object({
+  workspaceId: z.string().uuid().optional(),
+  lifecycle: z.enum(['active', 'cancelled', 'all']).default('active'),
+  archive: z.enum(['exclude', 'only', 'all']).default('exclude'),
   schoolYear: z
     .string()
     .regex(/^\d{4}-\d{4}$/)
     .optional(),
   finalStatus: z.union([z.nativeEnum(FinalStatus), z.literal('unfinalized')]).optional(),
   finalLevel: z.nativeEnum(Level).optional(),
+  status: z.nativeEnum(ApplicationStatus).optional(),
   targetLevel: z.nativeEnum(Level).optional(),
   faculty: z.string().trim().min(1).optional(),
   className: z.string().trim().min(1).optional(),

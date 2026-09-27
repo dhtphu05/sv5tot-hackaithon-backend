@@ -50,6 +50,15 @@ const applicationSummaryInclude = {
 
 const applicationDetailInclude = {
   workspace: { select: { type: true, isActive: true } },
+  cancelledBy: { select: { id: true, fullName: true } },
+  archivedBy: { select: { id: true, fullName: true } },
+  finalDecisionHistory: {
+    orderBy: { supersededAt: 'desc' },
+    include: {
+      finalizedBy: { select: { id: true, fullName: true } },
+      supersededBy: { select: { id: true, fullName: true } },
+    },
+  },
   student: true,
   metrics: true,
   requirementResponses: true,
@@ -98,6 +107,8 @@ export class ManagerService {
 
     const where: Prisma.ApplicationWhereInput = {
       ...reviewWorkspaceFilterFor(user),
+      ...applicationLifecycleListFilters(query.lifecycle, query.archive),
+      ...(query.workspaceId ? { workspaceId: query.workspaceId } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.targetLevel ? { targetLevel: query.targetLevel } : {}),
       ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
@@ -167,6 +178,8 @@ export class ManagerService {
 
     const where: Prisma.ApplicationWhereInput = {
       ...reviewWorkspaceFilterFor(user),
+      ...applicationLifecycleListFilters(query.lifecycle, query.archive),
+      ...(query.workspaceId ? { workspaceId: query.workspaceId } : {}),
       applicationType: 'individual',
       targetLevel: Level.city,
       submittedAt: null,
@@ -665,7 +678,24 @@ export class ManagerService {
         finalizedBy: application.finalizedBy
           ? { id: application.finalizedBy.id, fullName: application.finalizedBy.fullName }
           : null,
+        cancelledAt: application.cancelledAt?.toISOString() ?? null,
+        cancelledBy: application.cancelledBy,
+        cancelReason: application.cancelReason,
+        archivedAt: application.archivedAt?.toISOString() ?? null,
+        archivedBy: application.archivedBy,
+        archiveReason: application.archiveReason,
       },
+      finalDecisionHistory: application.finalDecisionHistory.map((item) => ({
+        id: item.id,
+        finalStatus: item.finalStatus,
+        finalLevel: item.finalLevel,
+        finalNote: item.finalNote,
+        finalizedAt: item.finalizedAt?.toISOString() ?? null,
+        finalizedBy: item.finalizedBy,
+        supersededAt: item.supersededAt.toISOString(),
+        supersededBy: item.supersededBy,
+        supersedeReason: item.supersedeReason,
+      })),
       student: pickStudent(application.student),
       metrics: application.metrics.map((metric) => ({
         id: metric.id,
@@ -1714,6 +1744,10 @@ function toApplicationSummaryItem(
     applicationType: application.applicationType,
     targetLevel: application.targetLevel,
     status: application.status,
+    cancelledAt: application.cancelledAt?.toISOString() ?? null,
+    cancelReason: application.cancelReason,
+    archivedAt: application.archivedAt?.toISOString() ?? null,
+    archiveReason: application.archiveReason,
     evidenceCount: application.evidences.length,
     reviewTaskCount: application.reviewTasks.length,
     acceptedTaskCount: count(ReviewTaskStatus.accepted),
@@ -1751,6 +1785,8 @@ type CommitteeNextAction =
 
 function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWhereInput {
   const and: Prisma.ApplicationWhereInput[] = [];
+  if (query.workspaceId) and.push({ workspaceId: query.workspaceId });
+  if (query.status) and.push({ status: query.status });
   if (query.schoolYear) and.push({ schoolYear: query.schoolYear });
   if (query.targetLevel) and.push({ targetLevel: query.targetLevel });
   if (query.finalLevel) and.push({ finalLevel: query.finalLevel });
@@ -1761,6 +1797,9 @@ function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWh
         : { finalStatus: query.finalStatus },
     );
   }
+  const lifecycleFilters = applicationLifecycleListFilters(query.lifecycle, query.archive);
+  if ('cancelledAt' in lifecycleFilters) and.push({ cancelledAt: lifecycleFilters.cancelledAt });
+  if ('archivedAt' in lifecycleFilters) and.push({ archivedAt: lifecycleFilters.archivedAt });
   if (query.faculty) and.push({ student: { faculty: query.faculty } });
   if (query.className) and.push({ student: { className: query.className } });
   if (query.search) {
@@ -1774,6 +1813,18 @@ function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWh
     });
   }
   return and.length ? { AND: and } : {};
+}
+
+function applicationLifecycleListFilters(
+  lifecycle: ListManagerApplicationsQuery['lifecycle'] | ListManagerResultsQuery['lifecycle'] = 'active',
+  archive: ListManagerApplicationsQuery['archive'] | ListManagerResultsQuery['archive'] = 'exclude',
+): Prisma.ApplicationWhereInput {
+  return {
+    ...(lifecycle === 'active' ? { cancelledAt: null } : {}),
+    ...(lifecycle === 'cancelled' ? { cancelledAt: { not: null } } : {}),
+    ...(archive === 'exclude' ? { archivedAt: null } : {}),
+    ...(archive === 'only' ? { archivedAt: { not: null } } : {}),
+  };
 }
 
 function filterResultCandidates<T extends {
@@ -2175,6 +2226,10 @@ function toResultItem(application: {
   readinessScore: number;
   submittedAt: Date | null;
   finalizedAt?: Date | null;
+  cancelledAt?: Date | null;
+  cancelReason?: string | null;
+  archivedAt?: Date | null;
+  archiveReason?: string | null;
   updatedAt: Date;
   createdAt: Date;
   finalizedBy?: { id: string; fullName: string } | null;
@@ -2240,6 +2295,10 @@ function toResultItem(application: {
     readinessScore: application.readinessScore,
     submittedAt: application.submittedAt?.toISOString() ?? null,
     finalizedAt: application.finalizedAt?.toISOString() ?? null,
+    cancelledAt: application.cancelledAt?.toISOString() ?? null,
+    cancelReason: application.cancelReason ?? null,
+    archivedAt: application.archivedAt?.toISOString() ?? null,
+    archiveReason: application.archiveReason ?? null,
     updatedAt: application.updatedAt.toISOString(),
     lastActivityAt: getLastActivityAt(application).toISOString(),
     finalizedBy: application.finalizedBy

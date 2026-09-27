@@ -85,12 +85,22 @@ describe('ManagerService City workspace scope', () => {
       role: Role.city_officer,
       isActive: true,
     });
-    expect(officerQuery.include.assignedReviewTasks.where).toMatchObject({
-      workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
-    });
+    expect(officerQuery.include.assignedReviewTasks.where.AND).toEqual(
+      expect.arrayContaining([
+        { workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } } },
+        {
+          OR: [
+            { applicationId: null },
+            { application: { is: { cancelledAt: null } } },
+          ],
+        },
+      ]),
+    );
     expect(prismaMock.reviewTask.findMany.mock.calls[0][0].where).toMatchObject({
-      workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
-      assignedOfficerId: null,
+      AND: expect.arrayContaining([
+        { workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } } },
+        { assignedOfficerId: null },
+      ]),
     });
   });
 
