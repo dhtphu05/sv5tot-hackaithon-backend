@@ -1,9 +1,9 @@
 # Phase 4 Part 3C — Application Management MVP
 
-**Status:** Design for review
+**Status:** Approved for implementation planning
 **Inspected:** 2026-09-28
-**Backend main:** `d9d1b92dae091f18f1442dc5736fe4f9414f399d`
-**Frontend main:** `3793cfc65f1bf667fd7e8c9bb647dfe90428c5d3`
+**Backend main:** `8260bfd01186623dbc69fb8fe7d0077cb8f067ad`
+**Frontend main:** `4689f0e29a6781b87842098e8ff1b7694ea02101`
 
 ## 1. Goal and scope
 
@@ -44,6 +44,7 @@ Inspection was read-only on backend `main` at the SHA above.
 | Manager results/dashboard | `manager.service.ts:277-484` groups application/final/task/resolution states and workload; `:486-612` builds result and committee inbox lists. These application/task aggregates must not treat cancelled City items as current workflow/results. Archive remains included in official result and analytics totals. |
 | Exports | `src/modules/exports/exports.routes.ts:22-49` exposes applications JSON/CSV, review-task CSV, and review-result export. `exports.service.ts:190-253` creates official review-result rows; `:255-289` creates application-management rows. Official result export has no cancellation exclusion today. Add a mandatory exclusion there; management export defaults to active/non-cancelled and may opt into cancelled rows explicitly. |
 | Audit/notification | `src/modules/applications/application.helpers.ts:72-110` writes application audit records using a transaction client; `AuditLog` in `schema.prisma:1308-1344` already has actor, action, application, before/after JSON, and note. `NotificationType.application_updated` and `.review_updated` already exist (`schema.prisma:180-191`); `NotificationsService.create` accepts a transaction (`src/modules/notifications/notifications.service.ts:10-51`). No new notification enum or subsystem is needed. |
+| Approved Part 3C hardening | `GET /api/manager/applications/:id/aggregation` currently writes `APPLICATION_AGGREGATED` audit data; cancelled applications must remain readable there but must not receive that audit, including when cancellation wins a race. Existing criteria mutation authorization also permits manager/admin writes that can alter student-owned City application content; Part 3C must deny those writes for City individual applications while preserving non-City compatibility and authorized staff verification actions. |
 | Deadline/season dependency | Part 3B is present on both synced `main` branches (backend `73cdeed`, frontend `4689f0e`). Backend defines `CityReviewSeason` and `CitySubmissionWindowException` in `prisma/schema.prisma:495-526`, with additive migration `prisma/migrations/20260927120000_city_review_seasons_and_submission_exceptions/migration.sql`. `manager.routes.ts:58-96` exposes season and manager deadline/exception APIs; `applications.routes.ts:132` exposes the student deadline read. `CityReviewSeasonsService` is the server authority for opening/closing, per-application extensions, and supplement resubmission deadlines. Frontend reuses `CityDeadlineStatusCard`, `CityReviewSeasonAdministration`, and `CitySubmissionDeadlineExceptionPanel`. Part 3C must preserve and extend these flows where cancellation applies; it must not add duplicate season models, deadline APIs, or UI. |
 
 ### Frontend
@@ -327,4 +328,4 @@ All lifecycle mutations and every application-bound workflow write use the same 
 ## 21. Implementation-plan confirmations
 
 1. **Part 3B base (verified):** Backend `main` contains Part 3B at `73cdeed704323ebd5a6b4affc6b79441a7b6a107`; frontend `main` contains it at `4689f0e29a6781b87842098e8ff1b7694ea02101`. The model, migration, manager/student endpoints, supplement deadline enforcement, tests, and season/deadline UI are present. This is not an open dependency; Part 3C must reuse them without duplication.
-2. **Unsubmitted drafts:** This design does not let managers cancel unsubmitted student drafts; cancellation begins after submission, or for an application that already has a current final. Confirm if managers must also be able to cancel unsubmitted drafts before implementation planning.
+2. **Unsubmitted drafts:** Managers cannot cancel unsubmitted drafts. Cancellation begins after submission, or for an application that already has a current final.
