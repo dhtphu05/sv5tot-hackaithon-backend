@@ -20,6 +20,12 @@ const baseApplication = {
   finalNote: null,
   finalizedAt: null,
   finalizedById: null,
+  cancelledAt: null,
+  cancelledById: null,
+  cancelReason: null,
+  archivedAt: null,
+  archivedById: null,
+  archiveReason: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 };
