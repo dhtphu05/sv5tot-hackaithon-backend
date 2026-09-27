@@ -36,6 +36,7 @@ function application() {
 
 function buildService() {
   const tx = {
+    $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-a', cancelledAt: null }]),
     application: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
     applicationDraftSnapshot: { create: vi.fn() },
     auditLog: { create: vi.fn() },

@@ -1,4 +1,5 @@
 import {
+  ApplicationType,
   ApplicationStatus,
   Criterion,
   MetricType,
@@ -6,6 +7,7 @@ import {
   RequirementResponseKind,
   RequirementResponseStatus,
   Role,
+  Level,
   VerificationStatus,
   WorkspaceType,
   type Application,
@@ -20,6 +22,10 @@ import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertReviewWorkspaceAccess, isCityReviewRole } from '../../shared/utils/review-workspace-scope';
 import { assertSameWorkspace } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
+import {
+  assertApplicationNotCancelled,
+  lockApplicationAndAssertNotCancelled,
+} from '../applications/application-lifecycle.policy';
 import { coreCriteria } from '../rules/criteria.constants';
 import { loadCriteriaRules, toJsonValue } from '../rules/criteria.loader';
 import { assertPrecheckAccess } from '../precheck/precheck.service';
@@ -119,6 +125,7 @@ export class CriteriaCompletionService {
     await this.assertLinkedRecords(application, input);
 
     const created = await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -179,6 +186,7 @@ export class CriteriaCompletionService {
     });
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, existing.applicationId);
       const updated = await this.repository.updateResponse(
         existing.id,
         {
@@ -237,6 +245,7 @@ export class CriteriaCompletionService {
     }
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -288,6 +297,7 @@ export class CriteriaCompletionService {
     }
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const metric = await tx.applicationMetric.upsert({
         where: {
           applicationId_metricType: {
@@ -351,6 +361,7 @@ export class CriteriaCompletionService {
   ) {
     const application = await this.getApplication(applicationId);
     assertCriteriaCompletionStaffAccess(application, user);
+    assertApplicationNotCancelled(application);
     if (
       user.role !== Role.officer &&
       user.role !== Role.manager &&
@@ -362,6 +373,7 @@ export class CriteriaCompletionService {
     await this.assertRequirementKey(application, Criterion.ethics, 'no_violation');
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -404,6 +416,7 @@ export class CriteriaCompletionService {
     });
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -455,6 +468,7 @@ export class CriteriaCompletionService {
 
     const normalizedValue = input.scale === 10 ? input.value / 2.5 : input.value;
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const metric = await tx.applicationMetric.upsert({
         where: {
           applicationId_metricType: {
@@ -532,6 +546,7 @@ export class CriteriaCompletionService {
   ) {
     const application = await this.getApplication(applicationId);
     assertCriteriaCompletionStaffAccess(application, user);
+    assertApplicationNotCancelled(application);
     if (
       user.role !== Role.officer &&
       user.role !== Role.manager &&
@@ -543,6 +558,7 @@ export class CriteriaCompletionService {
     await this.assertRequirementKey(application, Criterion.academic, 'no_f_grade');
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -585,6 +601,7 @@ export class CriteriaCompletionService {
     });
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -638,6 +655,7 @@ export class CriteriaCompletionService {
     }
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       if (input.replaceExisting) {
         await this.supersedePhysicalResponses(tx, application.id);
       }
@@ -736,6 +754,7 @@ export class CriteriaCompletionService {
     });
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       if (input.replaceExisting) {
         await this.supersedePhysicalResponses(tx, application.id);
       }
@@ -795,6 +814,7 @@ export class CriteriaCompletionService {
     }
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -869,6 +889,7 @@ export class CriteriaCompletionService {
     });
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -934,6 +955,7 @@ export class CriteriaCompletionService {
           : RequirementResponseStatus.declared;
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -974,6 +996,7 @@ export class CriteriaCompletionService {
     await this.assertCanMutateResponse(user, existing.application, existing.criterion);
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, existing.applicationId);
       await this.repository.deleteResponse(existing.id, tx);
       await createApplicationAudit(tx, {
         actorId: user.id,
@@ -1012,6 +1035,16 @@ export class CriteriaCompletionService {
     criterion: Criterion,
   ) {
     assertSameWorkspace(user, application, 'Application not found');
+    assertApplicationNotCancelled(application);
+    const isCityIndividual =
+      application.applicationType === ApplicationType.individual &&
+      application.targetLevel === Level.city;
+    if (
+      isCityIndividual &&
+      (user.role === Role.admin || user.role === Role.manager)
+    ) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Staff cannot change student-owned City application content');
+    }
     if (user.role === Role.admin || user.role === Role.manager) return;
     if (application.studentId === user.id) {
       if (application.status === ApplicationStatus.supplement_required) {

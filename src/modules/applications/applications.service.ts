@@ -34,6 +34,10 @@ import { findProcessingEvidence, isApplicationPrecheckStale } from './applicatio
 import { ApplicationsRepository } from './applications.repository';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
+import {
+  assertApplicationNotCancelled,
+  lockApplicationAndAssertNotCancelled,
+} from './application-lifecycle.policy';
 import { CityReviewSeasonsService } from '../manager/city-review-seasons.service';
 import type {
   AutosaveDraftInput,
@@ -173,9 +177,11 @@ export class ApplicationsService {
   ) {
     const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
+    assertApplicationNotCancelled(application);
     assertApplicationEditable(application);
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const newVersion = application.currentDraftVersion + 1;
 
       const updateResult = await tx.application.updateMany({
@@ -221,12 +227,14 @@ export class ApplicationsService {
   async autosaveDraft(user: AuthenticatedUser, applicationId: string, input: AutosaveDraftInput) {
     const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
+    assertApplicationNotCancelled(application);
     assertApplicationEditable(application);
 
     const newVersion = application.currentDraftVersion + 1;
     const savedAt = new Date();
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const updateResult = await tx.application.updateMany({
         where: {
           id: application.id,
@@ -324,6 +332,7 @@ export class ApplicationsService {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
     assertApplicationOwner(application, user);
+    assertApplicationNotCancelled(application);
 
     if (
       application.status !== ApplicationStatus.draft &&
@@ -462,6 +471,7 @@ export class ApplicationsService {
     const supplementCriteria = Array.from(new Set(supplementTasks.map((task) => task.criterion)));
     const result = await prisma.$transaction(
       async (tx) => {
+        await lockApplicationAndAssertNotCancelled(tx, application.id);
         let effectiveSubmissionState = submissionState;
         let effectivePrecheckResultJson = precheckResultJson;
         let persistedPrecheck: Awaited<ReturnType<PrecheckService['persistPreparedInTransaction']>> | null = null;
@@ -792,8 +802,10 @@ export class ApplicationsService {
         'Only City Managers or admins may reopen supplements for City applications',
       );
     }
+    assertApplicationNotCancelled(application);
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       await tx.application.update({
         where: { id: application.id },
         data: { status: ApplicationStatus.supplement_required },

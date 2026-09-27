@@ -17,8 +17,14 @@ export class JobsRepository {
     });
   }
 
-  getActiveJobsForTarget(targetId: string, jobType: JobType, workspaceId?: string | null) {
-    return this.db.indexingJob.findMany({
+  getActiveJobsForTarget(
+    targetId: string,
+    jobType: JobType,
+    workspaceId?: string | null,
+    tx?: Prisma.TransactionClient,
+  ) {
+    const client = tx ?? this.db;
+    return client.indexingJob.findMany({
       where: {
         ...(workspaceId ? { workspaceId } : {}),
         targetId,

@@ -34,6 +34,10 @@ import {
   assertApplicationOwner,
   createApplicationAudit,
 } from '../applications/application.helpers';
+import {
+  assertApplicationNotCancelled,
+  lockApplicationAndAssertNotCancelled,
+} from '../applications/application-lifecycle.policy';
 import { AuditService } from '../audit/audit.service';
 import { buildEvidenceAnalysisJobInput, parseEvidenceAnalysisJobInput } from '../jobs/evidence-analysis-job-input';
 import { JobsService } from '../jobs/jobs.service';
@@ -97,6 +101,8 @@ export class EvidencesService {
     ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Role cannot create application evidence');
     }
+    this.assertCityStudentContentWritable(user, application);
+    assertApplicationNotCancelled(application);
     assertApplicationEditable(application);
 
     if (input.sourceType !== EvidenceSourceType.manual_upload) {
@@ -113,6 +119,7 @@ export class EvidencesService {
     const eventId = input.eventId ?? input.metadata?.eventId ?? null;
 
     const evidence = await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, application.id);
       const created = await tx.evidence.create({
         data: {
           applicationId,
@@ -167,6 +174,8 @@ export class EvidencesService {
   async update(user: AuthenticatedUser, evidenceId: string, input: UpdateEvidenceInput) {
     const evidence = await this.getRequiredEvidence(evidenceId);
     assertApplicationOwner(evidence.application!, user);
+    this.assertCityStudentContentWritable(user, evidence.application!);
+    assertApplicationNotCancelled(evidence.application!);
     await this.assertSupplementCriterionScope(
       evidence.application!.id,
       evidence.application!.status,
@@ -194,6 +203,7 @@ export class EvidencesService {
     }
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
       const updated = await tx.evidence.update({
         where: { id: evidence.id },
         data: input,
@@ -251,6 +261,8 @@ export class EvidencesService {
   async delete(user: AuthenticatedUser, evidenceId: string) {
     const evidence = await this.getRequiredEvidence(evidenceId);
     assertApplicationOwner(evidence.application!, user);
+    this.assertCityStudentContentWritable(user, evidence.application!);
+    assertApplicationNotCancelled(evidence.application!);
     assertApplicationEditable(evidence.application!);
 
     if (
@@ -271,6 +283,7 @@ export class EvidencesService {
     }));
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
       await tx.evidenceCard.deleteMany({ where: { evidenceId: evidence.id } });
       await tx.evidenceFile.deleteMany({ where: { evidenceId: evidence.id } });
       await tx.file.deleteMany({
@@ -340,6 +353,8 @@ export class EvidencesService {
         assertApplicationEditable(evidence.application!);
       }
     }
+    this.assertCityStudentContentWritable(user, evidence.application!);
+    assertApplicationNotCancelled(evidence.application!);
 
     // Business rule: Officer/manager có thể upload file bổ sung chỉ khi workflow cho phép.
     const isStaff =
@@ -411,6 +426,7 @@ export class EvidencesService {
     const objectKey = `applications/${applicationId}/evidences/${evidence.id}/${timestamp}-${safeOriginalName}`;
 
     // Upload via StorageService
+    const storageType = env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local;
     await this.storageService.uploadObject({
       key: objectKey,
       buffer: file.buffer,
@@ -418,12 +434,13 @@ export class EvidencesService {
     });
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
       const originalName = body?.displayName || normalizedOriginalName;
       const fileRecord = await tx.file.create({
         data: {
           ownerId: user.id,
           workspaceId: evidence.application!.workspaceId,
-          storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
+          storageType,
           filePath: objectKey,
           publicUrl: null,
           originalName,
@@ -604,14 +621,17 @@ export class EvidencesService {
           nextAction: 'view_evidence',
         },
       };
-    }, { timeout: 20000 });
-
+    }, { timeout: 20000 }).catch(async (error) => {
+      await this.storageService.deleteObject(objectKey, storageType);
+      throw error;
+    });
     return result;
   }
 
   async startIndexing(user: AuthenticatedUser, evidenceId: string, _input: StartIndexingInput) {
     const evidence = await this.getRequiredEvidence(evidenceId);
     this.assertCanViewEvidence(user, evidence);
+    assertApplicationNotCancelled(evidence.application!);
 
     const currentFile = resolveNewestEvidenceFile(evidence.evidenceFiles);
     if (!currentFile) {
@@ -622,18 +642,23 @@ export class EvidencesService {
       evidenceFileId: currentFile.id,
       fileId: currentFile.fileId,
     });
-    const { job, reused } = await this.jobsService.enqueueIndexingJob(
-      evidence.id,
-      JobType.evidence_ocr,
-      evidence.application!.workspaceId,
-      jobInput as Prisma.InputJsonValue,
-    );
-    await prisma.evidence.update({
-      where: { id: evidence.id },
-      data: {
-        status: EvidenceStatus.pending_indexing,
-        indexingStatus: IndexingStatus.pending_indexing,
-      },
+    const { job, reused } = await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
+      const result = await this.jobsService.enqueueIndexingJob(
+        evidence.id,
+        JobType.evidence_ocr,
+        evidence.application!.workspaceId,
+        jobInput as Prisma.InputJsonValue,
+        tx,
+      );
+      await tx.evidence.update({
+        where: { id: evidence.id },
+        data: {
+          status: EvidenceStatus.pending_indexing,
+          indexingStatus: IndexingStatus.pending_indexing,
+        },
+      });
+      return result;
     });
 
     const updatedEvidence = await this.getRequiredEvidence(evidence.id);
@@ -689,6 +714,7 @@ export class EvidencesService {
   ) {
     const evidence = await this.getRequiredEvidence(evidenceId);
     await this.assertCanMutateEvidenceCard(user, evidence);
+    assertApplicationNotCancelled(evidence.application!);
     this.assertCardReadyForStudentAction(evidence, 'edit');
     if (evidence.sourceType === EvidenceSourceType.event_import) {
       throw new AppError(
@@ -707,6 +733,7 @@ export class EvidencesService {
     const changedFields = Object.keys(corrections);
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
       await tx.evidenceCard.update({
         where: { evidenceId: evidence.id },
         data: {
@@ -755,6 +782,7 @@ export class EvidencesService {
   async confirmCard(user: AuthenticatedUser, evidenceId: string, input: ConfirmEvidenceCardInput) {
     const evidence = await this.getRequiredEvidence(evidenceId);
     await this.assertCanMutateEvidenceCard(user, evidence);
+    assertApplicationNotCancelled(evidence.application!);
     this.assertCardReadyForStudentAction(evidence, 'confirm');
     if (evidence.sourceType === EvidenceSourceType.event_import) {
       throw new AppError(
@@ -784,6 +812,7 @@ export class EvidencesService {
     }).effectiveFields;
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
       await tx.evidenceCard.update({
         where: { evidenceId: evidence.id },
         data: {
@@ -1156,6 +1185,23 @@ export class EvidencesService {
       evidence.status === EvidenceStatus.resolution_needed
     ) {
       throw new AppError(403, ErrorCodes.EVIDENCE_CARD_EDIT_NOT_ALLOWED, 'Evidence is locked');
+    }
+  }
+
+  private assertCityStudentContentWritable(
+    user: AuthenticatedUser,
+    application: { applicationType: string; targetLevel: string },
+  ) {
+    if (
+      application.applicationType === 'individual' &&
+      application.targetLevel === 'city' &&
+      (user.role === Role.manager || user.role === Role.admin)
+    ) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Staff cannot change student-owned City application content',
+      );
     }
   }
 

@@ -10,6 +10,7 @@ import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
+import { lockApplicationAndAssertNotCancelled } from '../applications/application-lifecycle.policy';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import type {
   CityReviewSeasonCreateInput,
@@ -404,16 +405,8 @@ async function lockScopedInitialApplication(
   user: AuthenticatedUser,
   applicationId: string,
 ): Promise<ApplicationScopeRecord> {
-  const initial = await findScopedCityApplication(tx, user, applicationId, true);
-  if (initial.submittedAt || !preSubmitStatuses.includes(initial.status as (typeof preSubmitStatuses)[number])) {
-    throw new AppError(409, ErrorCodes.APPLICATION_LOCKED, 'Submission exception requires an unsubmitted City application');
-  }
-  const locked = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT "id" FROM "Application" WHERE "id" = ${applicationId}::uuid FOR UPDATE
-  `;
-  if (locked.length !== 1) {
-    throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
-  }
+  await findScopedCityApplication(tx, user, applicationId, true);
+  await lockApplicationAndAssertNotCancelled(tx, applicationId);
   const current = await findScopedCityApplication(tx, user, applicationId, true);
   if (current.submittedAt || !preSubmitStatuses.includes(current.status as (typeof preSubmitStatuses)[number])) {
     throw new AppError(409, ErrorCodes.APPLICATION_LOCKED, 'Submission exception requires an unsubmitted City application');

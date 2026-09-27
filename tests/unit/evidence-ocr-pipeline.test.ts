@@ -14,6 +14,7 @@ import {
 import { detectEvidenceMissingFields } from '../../src/modules/evidences/evidence-missing-fields.detector';
 import { normalizeEvidenceOcr } from '../../src/modules/evidences/evidence-ocr-normalizer';
 import { EvidencesService } from '../../src/modules/evidences/evidences.service';
+import { buildEvidenceOcrCompletionUpdate } from '../../src/modules/jobs/processors/evidence-ocr.processor';
 import { AppError } from '../../src/shared/errors/app-error';
 
 describe('evidence OCR normalizer', () => {
@@ -87,6 +88,20 @@ describe('evidence OCR normalizer', () => {
 
     expect(normalized.ocrText).toBe('Raw line');
     expect(normalized.warningMessages).toContain('ảnh đầu vào nghiêng');
+  });
+});
+
+describe('OCR completion for cancelled applications', () => {
+  it('keeps OCR extraction metadata but does not update evidence workflow status or event matching', () => {
+    expect(
+      buildEvidenceOcrCompletionUpdate({
+        applicationCancelled: true,
+        indexingStatus: IndexingStatus.needs_manual_review,
+        status: EvidenceStatus.needs_supplement,
+        confidence: 0.4,
+        eventId: 'event-1',
+      }),
+    ).toEqual({ indexingStatus: IndexingStatus.needs_manual_review, confidence: 0.4 });
   });
 });
 

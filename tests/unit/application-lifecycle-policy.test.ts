@@ -49,5 +49,19 @@ describe('application cancellation policy', () => {
 
   it('registers APPLICATION_CANCELLED as the shared error code', () => {
     expect(ErrorCodes.APPLICATION_CANCELLED).toBe('APPLICATION_CANCELLED');
+    });
   });
-});
+
+  it('can lock and report cancellation for advisory OCR processing', async () => {
+    const policy = await loadPolicy();
+    expect(policy).not.toBeNull();
+    if (!policy) return;
+
+    const queryRaw = vi.fn().mockResolvedValue([
+      { id: 'app-1', cancelledAt: new Date('2026-09-28T00:00:00.000Z') },
+    ]);
+    await expect(
+      policy.lockApplicationAndReadCancellationState({ $queryRaw: queryRaw } as never, 'app-1'),
+    ).resolves.toBe(true);
+    expect(queryRaw).toHaveBeenCalledOnce();
+  });

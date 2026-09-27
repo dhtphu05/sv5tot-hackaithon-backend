@@ -490,6 +490,7 @@ describe('CityReviewSeasonsService', () => {
         submittedAt: new Date('2026-09-01T00:00:00Z'),
       }),
     );
+    mocks.$queryRaw.mockResolvedValueOnce([{ id: 'application-a', cancelledAt: null }]);
 
     await expect(
       new CityReviewSeasonsService().grantException(cityManager, 'application-a', {
@@ -498,6 +499,32 @@ describe('CityReviewSeasonsService', () => {
       }),
     ).rejects.toMatchObject({ statusCode: 409 });
     expect(mocks.citySubmissionWindowException.upsert).not.toHaveBeenCalled();
+  });
+
+  it('rejects grant and revoke after cancellation before exception or audit writes', async () => {
+    mocks.$queryRaw.mockResolvedValueOnce([
+      { id: 'application-a', cancelledAt: new Date('2026-09-28T00:00:00.000Z') },
+    ]);
+
+    await expect(
+      new CityReviewSeasonsService().grantException(cityManager, 'application-a', {
+        validUntil: '2026-10-15T00:00:00Z',
+        reason: 'Grant after cancellation',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'APPLICATION_CANCELLED' });
+
+    mocks.$queryRaw.mockResolvedValueOnce([
+      { id: 'application-a', cancelledAt: new Date('2026-09-28T00:00:00.000Z') },
+    ]);
+    await expect(
+      new CityReviewSeasonsService().revokeException(cityManager, 'application-a', {
+        reason: 'Revoke after cancellation',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'APPLICATION_CANCELLED' });
+
+    expect(mocks.citySubmissionWindowException.upsert).not.toHaveBeenCalled();
+    expect(mocks.citySubmissionWindowException.update).not.toHaveBeenCalled();
+    expect(mocks.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('rejects a deadline exception that extends the season close but is already expired', async () => {

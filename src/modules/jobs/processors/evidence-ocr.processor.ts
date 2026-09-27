@@ -19,6 +19,7 @@ import { auditActions } from '../../../shared/constants/application';
 import { buildMissingFields } from '../../../shared/dto/evidence-student-status';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
+import { lockApplicationAndReadCancellationState } from '../../applications/application-lifecycle.policy';
 import {
   createEvidenceAnalysisProvider,
   toFieldConfidenceMap,
@@ -357,6 +358,9 @@ async function processProviderEvidenceAnalysis(input: {
   });
 
   await prisma.$transaction(async (tx) => {
+    const applicationCancelled = input.evidence.applicationId
+      ? await lockApplicationAndReadCancellationState(tx, input.evidence.applicationId)
+      : false;
     await tx.evidenceCard.upsert({
       where: { evidenceId: input.evidence.id },
       update: {
@@ -431,12 +435,13 @@ async function processProviderEvidenceAnalysis(input: {
 
     await tx.evidence.update({
       where: { id: input.evidence.id },
-      data: {
+      data: buildEvidenceOcrCompletionUpdate({
+        applicationCancelled,
         indexingStatus: nextIndexingStatus,
         status: nextEvidenceStatus,
         confidence,
         eventId: matched.eventId ?? input.evidence.eventId,
-      },
+      }),
     });
   });
 
@@ -549,6 +554,23 @@ async function processProviderEvidenceAnalysis(input: {
     warningCodes: scoring.warningCodes,
     jobStatus: JobStatus.completed,
   };
+}
+
+export function buildEvidenceOcrCompletionUpdate(input: {
+  applicationCancelled: boolean;
+  indexingStatus: IndexingStatus;
+  status: EvidenceStatus;
+  confidence: number;
+  eventId: string | null;
+}) {
+  return input.applicationCancelled
+    ? { indexingStatus: input.indexingStatus, confidence: input.confidence }
+    : {
+        indexingStatus: input.indexingStatus,
+        status: input.status,
+        confidence: input.confidence,
+        eventId: input.eventId,
+      };
 }
 
 function createOpenAiOnlyEvidenceProvider(jobInput: EvidenceAnalysisJobInput): EvidenceAnalysisProvider {

@@ -7,6 +7,7 @@ import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { assertSameWorkspace } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { lockApplicationAndReadCancellationState } from '../applications/application-lifecycle.policy';
 import { mapEvidenceUxStatus } from '../evidences/evidence-ux-status.mapper';
 import { parseEvidenceAnalysisJobInput } from './evidence-analysis-job-input';
 import { JobsRepository } from './jobs.repository';
@@ -24,8 +25,9 @@ export class JobsService {
     jobType: JobType,
     workspaceId?: string | null,
     inputJson?: Prisma.InputJsonValue,
+    tx?: Prisma.TransactionClient,
   ) {
-    const active = await this.jobsRepository.getActiveJobsForTarget(targetId, jobType, workspaceId);
+    const active = await this.jobsRepository.getActiveJobsForTarget(targetId, jobType, workspaceId, tx);
     const existing = inputJson
       ? active.find((job) => {
           try {
@@ -41,7 +43,7 @@ export class JobsService {
       return { job: existing, reused: true };
     }
 
-    const job = await this.jobsRepository.enqueueIndexingJob(targetId, jobType, workspaceId, inputJson);
+    const job = await this.jobsRepository.enqueueIndexingJob(targetId, jobType, workspaceId, inputJson, tx);
     return { job, reused: false };
   }
 
@@ -378,11 +380,18 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
       const actor = evidence.application?.student ?? evidence.collectiveProfile?.representative;
       const manualReview =
         code === ErrorCodes.OCR_EMPTY_TEXT || code === ErrorCodes.EMPTY_EVIDENCE_DOCUMENT;
-      await prisma.evidence.update({
-        where: { id: evidence.id },
-        data: manualReview
-          ? { indexingStatus: IndexingStatus.needs_manual_review, status: EvidenceStatus.needs_supplement }
-          : { indexingStatus: IndexingStatus.failed },
+      await prisma.$transaction(async (tx) => {
+        const applicationCancelled = evidence.applicationId
+          ? await lockApplicationAndReadCancellationState(tx, evidence.applicationId)
+          : false;
+        await tx.evidence.update({
+          where: { id: evidence.id },
+          data: manualReview
+            ? applicationCancelled
+              ? { indexingStatus: IndexingStatus.needs_manual_review }
+              : { indexingStatus: IndexingStatus.needs_manual_review, status: EvidenceStatus.needs_supplement }
+            : { indexingStatus: IndexingStatus.failed },
+        });
       });
       await createApplicationAudit(prisma, {
         actorId: actor?.id,
