@@ -11,6 +11,7 @@ import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { createApplicationAudit } from './application.helpers';
+import { lockApplicationAndAssertNotCancelled } from './application-lifecycle.policy';
 
 export type ConfirmedUniversityRecipientLookup = {
   issuerWorkspaceId: string;
@@ -102,6 +103,7 @@ export class CitySubmissionEligibilityRepository {
 
   saveVerification(input: SaveEligibilityVerificationInput) {
     return this.db.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, input.applicationId);
       const preSubmitApplication = await tx.$queryRaw<Array<{ id: string; updatedAt: Date }>>`
         SELECT "id", "updatedAt"
         FROM "Application"

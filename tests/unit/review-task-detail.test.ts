@@ -438,7 +438,10 @@ describe('individual City review task permissions', () => {
     };
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
     prismaMock.$transaction.mockImplementation((callback: (transaction: unknown) => unknown) =>
-      callback({ reviewTask: { updateMany } }),
+      callback({
+        $queryRaw: vi.fn().mockResolvedValue([{ id: 'app-1', cancelledAt: null }]),
+        reviewTask: { updateMany },
+      }),
     );
     const service = new ReviewService(
       { findDetail: vi.fn().mockResolvedValue(task) } as never,

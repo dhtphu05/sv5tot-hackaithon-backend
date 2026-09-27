@@ -10,8 +10,9 @@ const prismaMock = vi.hoisted(() => ({
 }));
 
 const txMock = vi.hoisted(() => ({
+  $queryRaw: vi.fn(),
   application: { findUnique: vi.fn(), update: vi.fn() },
-  reviewTask: { create: vi.fn() },
+  reviewTask: { findMany: vi.fn(), create: vi.fn() },
   reviewTaskEvidence: { create: vi.fn() },
   auditLog: { create: vi.fn() },
 }));
@@ -45,6 +46,8 @@ beforeEach(() => {
   prismaMock.reviewTask.findMany.mockResolvedValue([]);
   prismaMock.officerSpecialization.findMany.mockResolvedValue([]);
   txMock.application.findUnique.mockResolvedValue({ workspaceId: 'school-1' });
+  txMock.$queryRaw.mockResolvedValue([{ id: 'application-1', cancelledAt: null }]);
+  txMock.reviewTask.findMany.mockImplementation(() => prismaMock.reviewTask.findMany());
   txMock.application.update.mockResolvedValue({});
   txMock.reviewTask.create.mockImplementation(({ data }) => ({ id: `task-${data.criterion}`, ...data }));
   txMock.reviewTaskEvidence.create.mockResolvedValue({});

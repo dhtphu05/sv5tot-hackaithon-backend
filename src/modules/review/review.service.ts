@@ -28,6 +28,7 @@ import {
 } from '../../shared/utils/review-workspace-scope';
 import { workspaceFilterFor } from '../../shared/utils/workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { lockApplicationAndAssertNotCancelled } from '../applications/application-lifecycle.policy';
 import { buildEvidenceCardFieldLayers } from '../evidences/evidence-card-field-presenter';
 import { EvidenceKnowledgePublisher } from '../evidence-knowledge/evidence-knowledge.publisher';
 import { EvidenceKnowledgeService } from '../evidence-knowledge/evidence-knowledge.service';
@@ -80,6 +81,11 @@ type ReviewTaskPriorityReason =
   | null;
 
 type OfficerCriterionAccessCache = Map<string, Promise<boolean>>;
+type AdditionalReviewAudit = {
+  action: string;
+  afterStateJson: Prisma.InputJsonValue;
+  note?: string;
+};
 
 export class ReviewService {
   constructor(
@@ -455,41 +461,38 @@ export class ReviewService {
       throw new AppError(403, ErrorCodes.REVIEW_TASK_PERMISSION_DENIED, permissions.reasonLabel);
     }
 
-    const claimResult = await prisma.reviewTask.updateMany({
-      where: { id: task.id, assignedOfficerId: null },
-      data: {
-        assignedOfficerId: user.id,
-        status: task.status === ReviewTaskStatus.waiting ? ReviewTaskStatus.reviewing : task.status,
-      },
-    });
-
-    if (claimResult.count === 0) {
-      throw new AppError(
-        409,
-        ErrorCodes.CONFLICT,
-        'Task này vừa được giao cho cán bộ khác. Bạn đang ở chế độ chỉ xem.',
-      );
-    }
-
-    const updated = await prisma.reviewTask.findUniqueOrThrow({
-      where: { id: task.id },
-      include: reviewTaskListInclude,
-    });
+    const updated = task.applicationId
+      ? await prisma.$transaction(async (tx) => {
+          await lockApplicationAndAssertNotCancelled(tx, task.applicationId!);
+          const claimResult = await tx.reviewTask.updateMany({
+            where: { id: task.id, assignedOfficerId: null },
+            data: {
+              assignedOfficerId: user.id,
+              status:
+                task.status === ReviewTaskStatus.waiting ? ReviewTaskStatus.reviewing : task.status,
+            },
+          });
+          if (claimResult.count === 0) throw taskClaimConflict();
+          const saved = await tx.reviewTask.findUniqueOrThrow({
+            where: { id: task.id },
+            include: reviewTaskListInclude,
+          });
+          await createApplicationAudit(tx, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: auditActions.REVIEW_TASK_ASSIGNED,
+            targetType: 'review_task',
+            targetId: task.id,
+            applicationId: task.applicationId,
+            beforeStateJson: { assignedOfficerId: task.assignedOfficerId },
+            afterStateJson: { assignedOfficerId: user.id, claimedByOfficer: true },
+            note: 'Officer claimed an unassigned review task',
+          });
+          return saved;
+        })
+      : await this.claimCollectiveTask(user, task);
     const updatedItem = toTaskListItem(updated);
     const updatedPermissions = await this.getTaskPermissions(user, updated);
-
-    await createApplicationAudit(prisma, {
-      actorId: user.id,
-      actorRole: user.role,
-      action: auditActions.REVIEW_TASK_ASSIGNED,
-      targetType: 'review_task',
-      targetId: task.id,
-      applicationId: task.applicationId,
-      collectiveProfileId: task.collectiveProfileId,
-      beforeStateJson: { assignedOfficerId: task.assignedOfficerId },
-      afterStateJson: { assignedOfficerId: user.id, claimedByOfficer: true },
-      note: 'Officer claimed an unassigned review task',
-    });
 
     return {
       task: {
@@ -498,6 +501,36 @@ export class ReviewService {
         priorityReason: getTaskPriorityReason(updatedItem, updatedPermissions),
       },
     };
+  }
+
+  private async claimCollectiveTask(
+    user: AuthenticatedUser,
+    task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
+  ) {
+    const claimResult = await prisma.reviewTask.updateMany({
+      where: { id: task.id, assignedOfficerId: null },
+      data: {
+        assignedOfficerId: user.id,
+        status: task.status === ReviewTaskStatus.waiting ? ReviewTaskStatus.reviewing : task.status,
+      },
+    });
+    if (claimResult.count === 0) throw taskClaimConflict();
+    const updated = await prisma.reviewTask.findUniqueOrThrow({
+      where: { id: task.id },
+      include: reviewTaskListInclude,
+    });
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      action: auditActions.REVIEW_TASK_ASSIGNED,
+      targetType: 'review_task',
+      targetId: task.id,
+      collectiveProfileId: task.collectiveProfileId,
+      beforeStateJson: { assignedOfficerId: task.assignedOfficerId },
+      afterStateJson: { assignedOfficerId: user.id, claimedByOfficer: true },
+      note: 'Officer claimed an unassigned review task',
+    });
+    return updated;
   }
 
   async getCriterionLevelAssessment(user: AuthenticatedUser, taskId: string) {
@@ -549,7 +582,12 @@ export class ReviewService {
     );
   }
 
-  async decideTask(user: AuthenticatedUser, taskId: string, input: TaskDecisionInput) {
+  async decideTask(
+    user: AuthenticatedUser,
+    taskId: string,
+    input: TaskDecisionInput,
+    additionalAudit?: AdditionalReviewAudit,
+  ) {
     const task = await this.getTask(taskId);
     await this.assertTaskAccess(user, task, true);
     const officerNote = input.officerNote ?? input.note;
@@ -632,7 +670,7 @@ export class ReviewService {
     }
 
     if (task.collectiveProfileId && task.collectiveProfile) {
-      return this.decideCollectiveTask(user, task, input);
+      return this.decideCollectiveTask(user, task, input, additionalAudit);
     }
     if (!task.applicationId || !task.application) {
       throw new AppError(409, ErrorCodes.REVIEW_TASK_NOT_FOUND, 'Review task owner is missing');
@@ -653,6 +691,7 @@ export class ReviewService {
         : null;
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, applicationId);
       const status = mapDecisionToStatus(effectiveDecision);
       const taskUpdate = {
         status,
@@ -1053,6 +1092,19 @@ export class ReviewService {
         });
       }
 
+      if (additionalAudit) {
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: additionalAudit.action,
+          targetType: 'review_task',
+          targetId: task.id,
+          applicationId,
+          afterStateJson: additionalAudit.afterStateJson,
+          note: additionalAudit.note,
+        });
+      }
+
       if (
         effectiveDecision !== ReviewDecision.supplement_required &&
         effectiveDecision !== ReviewDecision.resolution_needed
@@ -1150,15 +1202,8 @@ export class ReviewService {
         evidenceIds: input.evidenceIds ?? [],
         requestedFields: input.requestedFields ?? [],
       },
-    });
-
-    await createApplicationAudit(prisma, {
-      actorId: user.id,
-      actorRole: user.role,
+    }, {
       action: 'REVIEW_SUPPLEMENT_REQUESTED',
-      targetType: 'review_task',
-      targetId: taskId,
-      applicationId: result.application?.id,
       afterStateJson: {
         requestedFields: input.requestedFields,
         evidenceIds: input.evidenceIds,
@@ -1208,15 +1253,8 @@ export class ReviewService {
       officerNote: input.reason,
       evidenceDecisions,
       evidenceAssessments: [],
-    });
-
-    await createApplicationAudit(prisma, {
-      actorId: user.id,
-      actorRole: user.role,
+    }, {
       action: 'REVIEW_ESCALATED_TO_RESOLUTION',
-      targetType: 'review_task',
-      targetId: taskId,
-      applicationId: result.application?.id,
       afterStateJson: {
         evidenceIds: selectedEvidenceIds,
         priority: input.priority || 'normal',
@@ -1466,21 +1504,31 @@ export class ReviewService {
     user: AuthenticatedUser,
     task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
   ) {
-    await prisma.reviewTask.update({
-      where: { id: task.id },
-      data: { status: ReviewTaskStatus.reviewing },
-    });
-    await createApplicationAudit(prisma, {
-      actorId: user.id,
-      actorRole: user.role,
-      action: auditActions.REVIEW_TASK_STARTED,
-      targetType: 'review_task',
-      targetId: task.id,
-      applicationId: task.applicationId,
-      collectiveProfileId: task.collectiveProfileId,
-      beforeStateJson: { status: task.status },
-      afterStateJson: { status: ReviewTaskStatus.reviewing },
-    });
+    const writeStarted = async (client: typeof prisma | Prisma.TransactionClient) => {
+      await client.reviewTask.update({
+        where: { id: task.id },
+        data: { status: ReviewTaskStatus.reviewing },
+      });
+      await createApplicationAudit(client, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.REVIEW_TASK_STARTED,
+        targetType: 'review_task',
+        targetId: task.id,
+        applicationId: task.applicationId,
+        collectiveProfileId: task.collectiveProfileId,
+        beforeStateJson: { status: task.status },
+        afterStateJson: { status: ReviewTaskStatus.reviewing },
+      });
+    };
+    if (task.applicationId) {
+      await prisma.$transaction(async (tx) => {
+        await lockApplicationAndAssertNotCancelled(tx, task.applicationId!);
+        await writeStarted(tx);
+      });
+    } else {
+      await writeStarted(prisma);
+    }
 
     const refreshed = await this.reviewRepository.findDetail(task.id);
     return refreshed ?? task;
@@ -1490,6 +1538,7 @@ export class ReviewService {
     user: AuthenticatedUser,
     task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
     input: TaskDecisionInput,
+    additionalAudit?: AdditionalReviewAudit,
   ) {
     const collectiveProfile = task.collectiveProfile;
     if (!task.collectiveProfileId || !collectiveProfile) {
@@ -1559,6 +1608,18 @@ export class ReviewService {
         afterStateJson: { status, decision: input.decision },
         note: input.officerNote,
       });
+      if (additionalAudit) {
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: additionalAudit.action,
+          targetType: 'review_task',
+          targetId: task.id,
+          collectiveProfileId: profileId,
+          afterStateJson: additionalAudit.afterStateJson,
+          note: additionalAudit.note,
+        });
+      }
       return saved;
     });
 
@@ -1642,16 +1703,18 @@ export class ReviewService {
     }
 
     // Existing tasks to prevent duplicate (idempotency check)
-    const existingTasks = await prisma.reviewTask.findMany({
-      where: { applicationId },
-    });
-    const existingCriteria = new Set(existingTasks.map((t) => t.criterion));
-
-    const criteriaToCreate = Array.from(criteriaToEnsure).filter((c) => !existingCriteria.has(c));
-
     const createdTasks: Prisma.ReviewTaskGetPayload<object>[] = [];
+    let ensuredCount = 0;
 
     await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, applicationId);
+      const existingTasks = await tx.reviewTask.findMany({ where: { applicationId } });
+      const existingCriteria = new Set(existingTasks.map((task) => task.criterion));
+      const criteriaToCreate = Array.from(criteriaToEnsure).filter(
+        (criterion) => !existingCriteria.has(criterion),
+      );
+      ensuredCount = criteriaToCreate.length;
+
       for (const criterion of criteriaToCreate) {
         // Find assigned officer with matching criterion and minimum workload
         const assignedOfficerId = await this.findAssignedOfficer(
@@ -1729,7 +1792,7 @@ export class ReviewService {
     }, { maxWait: 10_000, timeout: 30_000 });
 
     return {
-      ensuredCount: criteriaToCreate.length,
+      ensuredCount,
       createdTaskIds: createdTasks.map((t) => t.id),
     };
   }
@@ -2500,4 +2563,12 @@ function isActionablePriorityTask(
 function appendSupplementHistory(history: Prisma.JsonValue | null, item: Record<string, unknown>) {
   const current = Array.isArray(history) ? history : [];
   return [...current, item] as Prisma.InputJsonValue;
+}
+
+function taskClaimConflict() {
+  return new AppError(
+    409,
+    ErrorCodes.CONFLICT,
+    'Task này vừa được giao cho cán bộ khác. Bạn đang ở chế độ chỉ xem.',
+  );
 }

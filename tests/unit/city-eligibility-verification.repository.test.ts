@@ -45,7 +45,7 @@ describe('CitySubmissionEligibilityRepository manual verification audit', () => 
     } as never);
 
     expect(db.$transaction).toHaveBeenCalledOnce();
-    expect(tx.$queryRaw).toHaveBeenCalledOnce();
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
     expect(tx.application.update).toHaveBeenCalledWith({
       where: { id: 'application-a' },
       data: { updatedAt: expect.any(Date) },
@@ -98,6 +98,8 @@ describe('CitySubmissionEligibilityRepository manual verification audit', () => 
       auditLog: { create: vi.fn() },
       $queryRaw: vi.fn().mockResolvedValue([]),
     };
+    tx.$queryRaw.mockResolvedValueOnce([{ id: 'application-a', cancelledAt: null }]);
+    tx.$queryRaw.mockResolvedValueOnce([]);
     const db = {
       $transaction: vi.fn(async (callback: (transaction: typeof tx) => Promise<unknown>) =>
         callback(tx),

@@ -28,6 +28,7 @@ import {
   reviewWorkspaceFilterFor,
 } from '../../shared/utils/review-workspace-scope';
 import { createApplicationAudit } from '../applications/application.helpers';
+import { lockApplicationAndAssertNotCancelled } from '../applications/application-lifecycle.policy';
 import { EvidenceKnowledgePublisher } from '../evidence-knowledge/evidence-knowledge.publisher';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { createNotification } from '../notifications/notifications.service';
@@ -247,6 +248,7 @@ export class ResolutionService {
 
     const result = await prisma.$transaction(
       async (tx) => {
+        await lockApplicationAndAssertNotCancelled(tx, resolutionCase.applicationId);
         await ensureResolutionOpenedAudit(tx, user, resolutionCase);
 
         const updatedCase = await tx.resolutionCase.update({
@@ -427,6 +429,7 @@ export class ResolutionService {
     });
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, resolutionCase.applicationId);
       await ensureResolutionOpenedAudit(tx, user, resolutionCase);
       const updated = await tx.resolutionCase.update({
         where: { id: resolutionCase.id },
@@ -465,6 +468,7 @@ export class ResolutionService {
     }
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, resolutionCase.applicationId);
       const updated = await tx.resolutionCase.update({
         where: { id: resolutionCase.id },
         data: {

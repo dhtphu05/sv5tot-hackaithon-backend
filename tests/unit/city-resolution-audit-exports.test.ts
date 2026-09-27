@@ -268,6 +268,7 @@ describe('City resolution authorization', () => {
     vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
     const watcherQuery = vi.fn().mockResolvedValue([]);
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-1', cancelledAt: null }]),
       resolutionCase: {
         update: vi.fn().mockResolvedValue(caseRecord),
         count: vi.fn().mockResolvedValue(0),
@@ -370,6 +371,7 @@ describe('City resolution authorization', () => {
       criterion: 'volunteer',
     });
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-1', cancelledAt: null }]),
       resolutionCase: {
         update: vi.fn().mockResolvedValue(caseRecord),
         count: vi.fn().mockResolvedValue(0),
@@ -415,6 +417,7 @@ describe('City resolution authorization', () => {
     vi.mocked(prisma.resolutionCase.findUnique).mockResolvedValue(caseRecord as never);
     const updateApplication = vi.fn().mockResolvedValue({ status: ApplicationStatus.under_review });
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-1', cancelledAt: null }]),
       resolutionCase: {
         update: vi.fn().mockResolvedValue({ ...caseRecord, status: 'resolved' }),
         count: vi.fn().mockResolvedValue(0),

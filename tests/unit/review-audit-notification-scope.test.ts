@@ -64,6 +64,7 @@ describe('resolution escalation notification recipients', () => {
   it('scopes legacy staff to the application School, notifies active City staff and keeps admins global', async () => {
     const task = buildAssignedCityOfficerTask();
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-1', cancelledAt: null }]),
       user: { findMany: vi.fn().mockResolvedValue([]) },
       reviewTask: {
         update: vi.fn().mockResolvedValue(task),

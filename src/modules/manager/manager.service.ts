@@ -916,6 +916,9 @@ export class ManagerService {
     }
 
     const updated = await prisma.$transaction(async (tx) => {
+      if (task.applicationId) {
+        await lockApplicationAndAssertNotCancelled(tx, task.applicationId);
+      }
       const saved = await tx.reviewTask.update({
         where: { id: task.id },
         data: { assignedOfficerId: officer.id },
@@ -959,21 +962,32 @@ export class ManagerService {
   async getAggregation(user: AuthenticatedUser, applicationId: string) {
     const application = await this.getApplicationForAggregation(user, applicationId);
     const aggregation = buildAggregation(application);
-    await createApplicationAudit(prisma, {
-      actorId: user.id,
-      actorRole: user.role,
-      action: auditActions.APPLICATION_AGGREGATED,
-      targetType: 'application',
-      targetId: application.id,
-      applicationId: application.id,
-      afterStateJson: {
-        allTasksDone: aggregation.allTasksDone,
-        acceptedCriteria: aggregation.acceptedCriteria,
-        rejectedCriteria: aggregation.rejectedCriteria,
-        pendingCriteria: aggregation.pendingCriteria,
-        suggestedStatus: aggregation.suggestedApplicationStatus,
-      },
-    });
+    if (!application.cancelledAt) {
+      try {
+        await prisma.$transaction(async (tx) => {
+          await lockApplicationAndAssertNotCancelled(tx, application.id);
+          await createApplicationAudit(tx, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: auditActions.APPLICATION_AGGREGATED,
+            targetType: 'application',
+            targetId: application.id,
+            applicationId: application.id,
+            afterStateJson: {
+              allTasksDone: aggregation.allTasksDone,
+              acceptedCriteria: aggregation.acceptedCriteria,
+              rejectedCriteria: aggregation.rejectedCriteria,
+              pendingCriteria: aggregation.pendingCriteria,
+              suggestedStatus: aggregation.suggestedApplicationStatus,
+            },
+          });
+        });
+      } catch (error) {
+        if (!(error instanceof AppError && error.code === ErrorCodes.APPLICATION_CANCELLED)) {
+          throw error;
+        }
+      }
+    }
     return aggregation;
   }
 
@@ -996,6 +1010,11 @@ export class ManagerService {
     }
     const aggregation = buildAggregation(application);
     const updated = await prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, applicationId);
+      const current = await tx.application.findUnique({ where: { id: applicationId } });
+      if (!current) {
+        throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+      }
       const saved = await tx.application.update({
         where: { id: applicationId },
         data: { status: aggregation.suggestedApplicationStatus },
@@ -1007,7 +1026,7 @@ export class ManagerService {
         targetType: 'application',
         targetId: applicationId,
         applicationId,
-        beforeStateJson: { status: application.status },
+        beforeStateJson: { status: current.status },
         afterStateJson: {
           status: saved.status,
           allTasksDone: aggregation.allTasksDone,
@@ -1043,9 +1062,12 @@ export class ManagerService {
     ) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only manager, committee, or admin can finalize results');
     }
+    const scopedApplication = await this.getApplicationForAggregation(user, applicationId);
+    if (scopedApplication.cancelledAt) {
+      throw applicationCancelledError();
+    }
     if (user.role === Role.manager || user.role === Role.committee) {
-      const application = await this.getApplicationForAggregation(user, applicationId);
-      if (isCityIndividualApplication(application)) {
+      if (isCityIndividualApplication(scopedApplication)) {
         throw new AppError(
           403,
           ErrorCodes.FORBIDDEN,
@@ -1095,6 +1117,9 @@ export class ManagerService {
     if (!applicationForCascade) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
+    if (applicationForCascade.cancelledAt) {
+      throw applicationCancelledError();
+    }
     const freshCascade = await computeActiveCascadeSnapshot(applicationForCascade);
     if (!overrideRecommendation) {
       const cityHumanReviewComplete =
@@ -1140,6 +1165,7 @@ export class ManagerService {
         : ApplicationStatus.completed;
 
     return prisma.$transaction(async (tx) => {
+      await lockApplicationAndAssertNotCancelled(tx, applicationId);
       const before = await tx.application.findUniqueOrThrow({ where: { id: applicationId } });
       const cityIndividual = isCityIndividualApplication(applicationForCascade);
       const finalizationData = {
@@ -1155,6 +1181,7 @@ export class ManagerService {
             id: applicationId,
             finalStatus: FinalStatus.pending,
             finalizedAt: null,
+            cancelledAt: null,
           },
           data: { ...finalizationData, finalizedAt: new Date() },
         });
@@ -1536,6 +1563,7 @@ async function persistFinalizeMismatchSnapshot(
   blocked: boolean,
 ) {
   await prisma.$transaction(async (tx) => {
+    await lockApplicationAndAssertNotCancelled(tx, applicationId);
     const cascadeReview = await tx.cascadeReview.create({
       data: {
         applicationId,
@@ -1870,6 +1898,14 @@ function isFinalizedApplication(application: { finalStatus: FinalStatus; finaliz
     application.finalStatus === FinalStatus.passed ||
     application.finalStatus === FinalStatus.failed ||
     application.finalStatus === FinalStatus.partially_passed
+  );
+}
+
+function applicationCancelledError() {
+  return new AppError(
+    409,
+    ErrorCodes.APPLICATION_CANCELLED,
+    'Hồ sơ đã bị hủy. Mở lại hồ sơ trước khi tiếp tục xử lý.',
   );
 }
 

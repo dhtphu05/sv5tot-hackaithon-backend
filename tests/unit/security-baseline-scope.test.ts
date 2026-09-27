@@ -146,6 +146,16 @@ describe('security baseline workspace boundaries', () => {
       assignedOfficerId: 'actor-a',
       status: 'reviewing',
     });
+    prismaMock.$transaction.mockImplementation((callback: (transaction: unknown) => unknown) =>
+      callback({
+        $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-a', cancelledAt: null }]),
+        reviewTask: {
+          updateMany: prismaMock.reviewTask.updateMany,
+          findUniqueOrThrow: prismaMock.reviewTask.findUniqueOrThrow,
+        },
+        auditLog: { create: prismaMock.auditLog.create },
+      }),
+    );
     const service = new ReviewService(
       { findDetail: vi.fn().mockResolvedValue(schoolTask) } as never,
       { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,

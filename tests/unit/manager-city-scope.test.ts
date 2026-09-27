@@ -120,6 +120,7 @@ describe('ManagerService City workspace scope', () => {
       officerSpecializations: [{ criterion: Criterion.academic, facultyScope: null }],
     });
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-1', cancelledAt: null }]),
       reviewTask: { update: vi.fn().mockResolvedValue({ id: 'task-1' }) },
       auditLog: { create: vi.fn().mockResolvedValue({}) },
       notification: { create: vi.fn().mockResolvedValue({}) },
@@ -292,6 +293,7 @@ describe('ManagerService City workspace scope', () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
     const createCascadeReview = vi.fn();
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-city', cancelledAt: null }]),
       application: {
         findUniqueOrThrow: vi.fn().mockResolvedValue(application),
         updateMany,
@@ -364,6 +366,7 @@ describe('ManagerService City workspace scope', () => {
     });
     const update = vi.fn().mockResolvedValue({ id: 'collective-task' });
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: 'collective-1', cancelledAt: null }]),
       reviewTask: { update },
       auditLog: { create: vi.fn().mockResolvedValue({}) },
       notification: { create: vi.fn().mockResolvedValue({}) },
@@ -457,6 +460,7 @@ describe('ManagerService City workspace scope', () => {
     prismaMock.application.findUnique.mockResolvedValue(application);
 
     const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: application.id, cancelledAt: null }]),
       application: {
         findUniqueOrThrow: vi.fn().mockResolvedValue(application),
         findUnique: vi.fn().mockResolvedValue({ workspaceId: schoolAId }),
@@ -512,6 +516,7 @@ describe('ManagerService City workspace scope', () => {
         id: application.id,
         finalStatus: FinalStatus.pending,
         finalizedAt: null,
+        cancelledAt: null,
       },
       data: expect.objectContaining({ status: ApplicationStatus.completed }),
     });
