@@ -662,6 +662,14 @@ describe('non-AI individual application end-to-end flow', () => {
       .expect(200);
     expect(resubmitted.body.data.reviewTasks).toHaveLength(criteria.length);
     expect(
+      await prisma.supplementRequest.findMany({
+        where: { applicationId },
+        select: { status: true, resubmittedAt: true },
+      }),
+    ).toEqual([
+      expect.objectContaining({ status: 'resubmitted', resubmittedAt: expect.any(Date) }),
+    ]);
+    expect(
       await prisma.precheckResult.count({ where: { applicationId } }),
     ).toBe(precheckCountBeforeResubmit + 1);
     expect(

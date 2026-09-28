@@ -72,6 +72,11 @@ function isIndividualCityApplication(
   return application.applicationType === ApplicationType.individual && application.targetLevel === Level.city;
 }
 
+function appendSupplementHistory(history: Prisma.JsonValue | null, item: Record<string, unknown>) {
+  const current = Array.isArray(history) ? history : [];
+  return [...current, item] as Prisma.InputJsonValue;
+}
+
 type SubmitApplicationContext = Prisma.ApplicationGetPayload<{
   include: {
     student: true;
@@ -604,6 +609,28 @@ export class ApplicationsService {
               decisionReason: null,
             },
           });
+          const activeSupplementRequests = await tx.supplementRequest.findMany({
+            where: {
+              applicationId: application.id,
+              reviewTaskId: { in: supplementTasks.map((task) => task.id) },
+              status: 'active',
+            },
+            select: { id: true, historyJson: true },
+          });
+          for (const supplementRequest of activeSupplementRequests) {
+            await tx.supplementRequest.update({
+              where: { id: supplementRequest.id },
+              data: {
+                status: 'resubmitted',
+                resubmittedAt: submittedAt,
+                historyJson: appendSupplementHistory(supplementRequest.historyJson, {
+                  at: submittedAt.toISOString(),
+                  actorId: user.id,
+                  action: 'student_resubmitted',
+                }),
+              },
+            });
+          }
           await tx.evidence.updateMany({
             where: {
               applicationId: application.id,

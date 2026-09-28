@@ -191,6 +191,10 @@ function configureSuccessfulTransaction(updateCount = 1) {
       findMany: vi.fn().mockResolvedValue([task]),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
+    supplementRequest: {
+      findMany: vi.fn().mockResolvedValue([]),
+      update: vi.fn().mockResolvedValue({}),
+    },
     reviewTaskEvidence: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
     evidence: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
     auditLog: { create: vi.fn().mockResolvedValue({}) },
@@ -932,6 +936,9 @@ describe('ApplicationsService City submission eligibility gate', () => {
     };
     const tx = configureSuccessfulTransaction();
     tx.reviewTask.updateMany.mockResolvedValue({ count: 1 });
+    tx.supplementRequest.findMany.mockResolvedValue([
+      { id: 'supplement-a', historyJson: [{ action: 'officer_created_request' }] },
+    ]);
     mocks.prisma.application.findUnique
       .mockResolvedValueOnce(beforePrecheck)
       .mockResolvedValueOnce(afterPrecheck);
@@ -957,6 +964,16 @@ describe('ApplicationsService City submission eligibility gate', () => {
         updatedAt: afterPrecheck.updatedAt,
       }),
       data: expect.objectContaining({ status: ApplicationStatus.under_review }),
+    });
+    expect(tx.supplementRequest.update).toHaveBeenCalledWith({
+      where: { id: 'supplement-a' },
+      data: expect.objectContaining({
+        status: 'resubmitted',
+        resubmittedAt: expect.any(Date),
+        historyJson: expect.arrayContaining([
+          expect.objectContaining({ action: 'student_resubmitted', actorId: student.id }),
+        ]),
+      }),
     });
   });
 
