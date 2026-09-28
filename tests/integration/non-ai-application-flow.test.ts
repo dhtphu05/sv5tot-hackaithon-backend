@@ -208,6 +208,11 @@ describe('non-AI individual application end-to-end flow', () => {
       select: { id: true },
     });
     const applicationIds = applications.map(({ id }) => id);
+    const eventRegistries = await prisma.eventRegistry.findMany({
+      where: { workspaceId: { in: workspaceIds } },
+      select: { id: true },
+    });
+    const eventRegistryIds = eventRegistries.map(({ id }) => id);
     const files = await prisma.file.findMany({
       where: { ownerId: { in: userIds }, workspaceId: { in: workspaceIds } },
       select: { filePath: true },
@@ -256,6 +261,7 @@ describe('non-AI individual application end-to-end flow', () => {
       () => seasonId
         ? prisma.cityReviewSeason.deleteMany({ where: { id: seasonId } })
         : Promise.resolve({ count: 0 }),
+      () => prisma.eventRegistry.deleteMany({ where: { id: { in: eventRegistryIds } } }),
       () => prisma.user.deleteMany({ where: { id: { in: userIds } } }),
       () => prisma.workspace.deleteMany({ where: { id: { in: workspaceIds } } }),
     ];
