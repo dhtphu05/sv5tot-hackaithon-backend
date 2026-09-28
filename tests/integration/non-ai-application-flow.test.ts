@@ -236,6 +236,9 @@ describe('non-AI individual application end-to-end flow', () => {
       () => prisma.citySubmissionWindowException.deleteMany({
         where: { applicationId: { in: applicationIds } },
       }),
+      () => prisma.applicationFinalDecisionHistory.deleteMany({
+        where: { applicationId: { in: applicationIds } },
+      }),
       () => prisma.notification.deleteMany({
         where: {
           OR: [
@@ -503,18 +506,24 @@ describe('non-AI individual application end-to-end flow', () => {
 
       const rejected = criterion === Criterion.ethics;
       const needsSupplement = criterion === Criterion.volunteer;
+      const needsResolution = criterion === Criterion.integration;
       const decisionPayload = {
         decision: rejected
           ? ReviewDecision.rejected
           : needsSupplement
             ? ReviewDecision.supplement_required
-            : ReviewDecision.accepted,
-        officerSuggestedLevel: rejected || needsSupplement ? undefined : Level.school,
+            : needsResolution
+              ? ReviewDecision.resolution_needed
+              : ReviewDecision.accepted,
+        officerSuggestedLevel:
+          rejected || needsSupplement || needsResolution ? undefined : Level.school,
         officerNote: rejected
           ? 'Rejected after human review.'
           : needsSupplement
             ? 'Please provide clearer volunteer evidence for this criterion.'
-            : `Accepted ${criterion} in E2E flow.`,
+            : needsResolution
+              ? 'Please have the committee verify the integration evidence.'
+              : `Accepted ${criterion} in E2E flow.`,
         evidenceDecisions: [
           {
             evidenceId: evidenceIds[criterion],
@@ -522,12 +531,16 @@ describe('non-AI individual application end-to-end flow', () => {
               ? EvidenceStatus.rejected
               : needsSupplement
                 ? EvidenceStatus.needs_supplement
-                : EvidenceStatus.accepted,
+                : needsResolution
+                  ? EvidenceStatus.resolution_needed
+                  : EvidenceStatus.accepted,
             note: rejected
               ? 'Human reviewer rejected this proof.'
               : needsSupplement
                 ? 'The volunteer proof needs a clearer record.'
-                : 'Valid uploaded proof.',
+                : needsResolution
+                  ? 'The integration proof needs committee review.'
+                  : 'Valid uploaded proof.',
           },
         ],
       };
@@ -567,7 +580,7 @@ describe('non-AI individual application end-to-end flow', () => {
         { criterion: Criterion.academic, status: ReviewTaskStatus.accepted },
         { criterion: Criterion.physical, status: ReviewTaskStatus.accepted },
         { criterion: Criterion.volunteer, status: ReviewTaskStatus.supplement_required },
-        { criterion: Criterion.integration, status: ReviewTaskStatus.accepted },
+        { criterion: Criterion.integration, status: ReviewTaskStatus.resolution_needed },
       ]),
     );
 
@@ -668,7 +681,7 @@ describe('non-AI individual application end-to-end flow', () => {
         { criterion: Criterion.academic, status: ReviewTaskStatus.accepted },
         { criterion: Criterion.physical, status: ReviewTaskStatus.accepted },
         { criterion: Criterion.volunteer, status: ReviewTaskStatus.waiting },
-        { criterion: Criterion.integration, status: ReviewTaskStatus.accepted },
+        { criterion: Criterion.integration, status: ReviewTaskStatus.resolution_needed },
       ]),
     );
 
@@ -693,6 +706,36 @@ describe('non-AI individual application end-to-end flow', () => {
         ],
       })
       .expect(200);
+
+    const integrationTask = await prisma.reviewTask.findFirstOrThrow({
+      where: { applicationId, criterion: Criterion.integration },
+      select: { id: true },
+    });
+    const resolutionCase = await prisma.resolutionCase.findFirstOrThrow({
+      where: { applicationId, reviewTaskId: integrationTask.id },
+      select: { id: true, status: true },
+    });
+    expect(resolutionCase.status).toBe('open');
+    const resolutionDecision = await request(app)
+      .post(`/api/resolution/cases/${resolutionCase.id}/resolve`)
+      .set('Authorization', `Bearer ${cityCommittee.accessToken}`)
+      .send({
+        decision: 'accepted',
+        note: 'The committee verified the integration evidence.',
+        evidenceDecisions: [
+          {
+            evidenceId: evidenceIds[Criterion.integration],
+            decision: 'accepted',
+            note: 'The submitted integration proof is sufficient.',
+          },
+        ],
+      })
+      .expect(200);
+    expect(resolutionDecision.body.data.relatedTask).toMatchObject({
+      id: integrationTask.id,
+      status: ReviewTaskStatus.accepted,
+      decision: ReviewDecision.accepted,
+    });
 
     const aggregation = await request(app)
       .get(`/api/manager/applications/${applicationId}/aggregation`)
@@ -786,5 +829,218 @@ describe('non-AI individual application end-to-end flow', () => {
       .set('Authorization', `Bearer ${student.accessToken}`)
       .expect(200);
     expect((timeline.body.data.items ?? timeline.body.data).length).toBeGreaterThan(0);
+
+    const taskSnapshotBeforeCancel = await prisma.reviewTask.findMany({
+      where: { applicationId },
+      select: { id: true, criterion: true, status: true, decision: true },
+      orderBy: { criterion: 'asc' },
+    });
+    expect(taskSnapshotBeforeCancel).toHaveLength(criteria.length);
+
+    const cancelled = await request(app)
+      .post(`/api/manager/applications/${applicationId}/cancel`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ reason: 'E2E lifecycle rehearsal cancellation.' })
+      .expect(200);
+    expect(cancelled.body.data.finalDecisionSuperseded).toBe(true);
+    expect(cancelled.body.data.application).toMatchObject({
+      status: 'completed',
+      finalStatus: FinalStatus.pending,
+      finalLevel: null,
+      finalNote: null,
+      cancelledById: manager.userId,
+      cancelReason: 'E2E lifecycle rehearsal cancellation.',
+    });
+
+    const history = await prisma.applicationFinalDecisionHistory.findMany({
+      where: { applicationId },
+    });
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      finalStatus: FinalStatus.passed,
+      finalLevel: Level.school,
+      supersedeReason: 'E2E lifecycle rehearsal cancellation.',
+    });
+
+    const analyticsAfterCancel = await request(app)
+      .get('/api/analytics/city')
+      .query({ schoolYear, workspaceId })
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .expect(200);
+    expect(analyticsAfterCancel.body.data).toMatchObject({
+      cancelledCount: 1,
+      finalResults: { finalized: 0, passed: 0 },
+    });
+
+    const activeListAfterCancel = await request(app)
+      .get('/api/manager/applications')
+      .query({ schoolYear, workspaceId, q: studentCode })
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .expect(200);
+    expect(activeListAfterCancel.body.data.items).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: applicationId })]),
+    );
+    const cancelledList = await request(app)
+      .get('/api/manager/applications')
+      .query({ schoolYear, workspaceId, q: studentCode, lifecycle: 'cancelled' })
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .expect(200);
+    expect(cancelledList.body.data.items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: applicationId })]),
+    );
+
+    const aggregationAuditCount = await prisma.auditLog.count({
+      where: { applicationId, action: 'APPLICATION_AGGREGATED' },
+    });
+    await request(app)
+      .get(`/api/manager/applications/${applicationId}/aggregation`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .expect(200);
+    expect(
+      await prisma.auditLog.count({
+        where: { applicationId, action: 'APPLICATION_AGGREGATED' },
+      }),
+    ).toBe(aggregationAuditCount);
+
+    const officialResultsWhileCancelled = await request(app)
+      .post('/api/exports/review-results')
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ format: 'json', schoolYear, targetLevel: Level.city })
+      .expect(201);
+    expect(officialResultsWhileCancelled.body.data.data).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ studentCode })]),
+    );
+
+    const exceptionAuditCount = await prisma.auditLog.count({
+      where: {
+        applicationId,
+        action: {
+          in: [
+            'CITY_SUBMISSION_WINDOW_EXCEPTION_GRANTED',
+            'CITY_SUBMISSION_WINDOW_EXCEPTION_REVOKED',
+          ],
+        },
+      },
+    });
+    await request(app)
+      .put(`/api/manager/applications/${applicationId}/submission-deadline-exception`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({
+        validUntil: new Date(Date.now() + 86_400_000).toISOString(),
+        reason: 'Cancelled application must not receive a deadline exception.',
+      })
+      .expect(409)
+      .expect(({ body }) => expect(body.error.code).toBe('APPLICATION_CANCELLED'));
+    await request(app)
+      .delete(`/api/manager/applications/${applicationId}/submission-deadline-exception`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ reason: 'Cancelled application must not change deadline exceptions.' })
+      .expect(409)
+      .expect(({ body }) => expect(body.error.code).toBe('APPLICATION_CANCELLED'));
+    expect(
+      await prisma.citySubmissionWindowException.findUnique({ where: { applicationId } }),
+    ).toBeNull();
+    expect(
+      await prisma.auditLog.count({
+        where: {
+          applicationId,
+          action: {
+            in: [
+              'CITY_SUBMISSION_WINDOW_EXCEPTION_GRANTED',
+              'CITY_SUBMISSION_WINDOW_EXCEPTION_REVOKED',
+            ],
+          },
+        },
+      }),
+    ).toBe(exceptionAuditCount);
+
+    await request(app)
+      .post(`/api/manager/applications/${applicationId}/archive`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ reason: 'Archive canceled rehearsal record.' })
+      .expect(200);
+    const archivedCancelledList = await request(app)
+      .get('/api/manager/applications')
+      .query({ schoolYear, workspaceId, q: studentCode, lifecycle: 'cancelled', archive: 'only' })
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .expect(200);
+    expect(archivedCancelledList.body.data.items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: applicationId })]),
+    );
+
+    const reopened = await request(app)
+      .post(`/api/manager/applications/${applicationId}/reopen-cancelled`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ reason: 'Reopen the record to complete the lifecycle rehearsal.' })
+      .expect(200);
+    expect(reopened.body.data).toMatchObject({
+      status: 'under_review',
+      finalStatus: FinalStatus.pending,
+      finalLevel: null,
+      cancelledAt: null,
+      archivedAt: null,
+    });
+    expect(
+      await prisma.reviewTask.findMany({
+        where: { applicationId },
+        select: { id: true, criterion: true, status: true, decision: true },
+        orderBy: { criterion: 'asc' },
+      }),
+    ).toEqual(taskSnapshotBeforeCancel);
+
+    await request(app)
+      .post(`/api/manager/applications/${applicationId}/finalize`)
+      .set('Authorization', `Bearer ${cityCommittee.accessToken}`)
+      .send({
+        finalStatus: FinalStatus.passed,
+        finalLevel: Level.school,
+        finalNote: 'Explicitly re-finalized after reopening cancellation.',
+        overrideAggregation: false,
+        notifyStudent: true,
+      })
+      .expect(200);
+    expect(await prisma.applicationFinalDecisionHistory.count({ where: { applicationId } })).toBe(
+      1,
+    );
+
+    await request(app)
+      .post(`/api/manager/applications/${applicationId}/archive`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ reason: 'Archive the current official result.' })
+      .expect(200);
+    const analyticsAfterArchive = await request(app)
+      .get('/api/analytics/city')
+      .query({ schoolYear, workspaceId })
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .expect(200);
+    expect(analyticsAfterArchive.body.data).toMatchObject({
+      cancelledCount: 0,
+      finalResults: { finalized: 1, passed: 1 },
+    });
+
+    const officialResultsAfterArchive = await request(app)
+      .post('/api/exports/review-results')
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({ format: 'json', schoolYear, targetLevel: Level.city })
+      .expect(201);
+    expect(officialResultsAfterArchive.body.data.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ studentCode, finalStatus: FinalStatus.passed }),
+      ]),
+    );
+
+    await request(app)
+      .post(`/api/manager/applications/${applicationId}/unarchive`)
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .send({})
+      .expect(200);
+    const activeListAfterUnarchive = await request(app)
+      .get('/api/manager/applications')
+      .query({ schoolYear, workspaceId, q: studentCode })
+      .set('Authorization', `Bearer ${manager.accessToken}`)
+      .expect(200);
+    expect(activeListAfterUnarchive.body.data.items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: applicationId })]),
+    );
   }, 600_000);
 });
