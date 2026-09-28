@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient } from '@prisma/client';
+import { AwardDecisionStatus, type Prisma, type PrismaClient } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type { ListAwardDecisionsQuery } from './award-decisions.validation';
 import { AppError } from '../../shared/errors/app-error';
@@ -33,11 +33,17 @@ export class AwardDecisionsRepository {
   }
 
   async list(issuerWorkspaceId: string | undefined, query: ListAwardDecisionsQuery) {
+    const archive = query.archive ?? (query.status === AwardDecisionStatus.ARCHIVED ? 'only' : 'exclude');
+    const status = query.status ?? (archive === 'exclude'
+      ? { not: AwardDecisionStatus.ARCHIVED }
+      : archive === 'only'
+        ? AwardDecisionStatus.ARCHIVED
+        : undefined);
     const where: Prisma.AwardDecisionWhereInput = {
       ...(issuerWorkspaceId ? { issuerWorkspaceId } : {}),
       ...(query.issuerWorkspaceId ? { issuerWorkspaceId: query.issuerWorkspaceId } : {}),
       ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
-      ...(query.status ? { status: query.status } : {}),
+      ...(status ? { status } : {}),
       ...(query.q
         ? {
             OR: [
@@ -77,6 +83,47 @@ export class AwardDecisionsRepository {
         throw new AppError(409, ErrorCodes.CONFLICT, 'Only draft award decisions can be edited');
       }
       return tx.awardDecision.findUniqueOrThrow({ where: { id }, include: awardDecisionInclude });
+    });
+  }
+
+  archive(id: string, issuerWorkspaceId?: string) {
+    return this.transitionStatus(
+      id,
+      issuerWorkspaceId,
+      { in: [AwardDecisionStatus.DRAFT, AwardDecisionStatus.CONFIRMED] },
+      AwardDecisionStatus.ARCHIVED,
+    );
+  }
+
+  unarchive(id: string, issuerWorkspaceId: string | undefined, status: 'DRAFT' | 'CONFIRMED') {
+    return this.transitionStatus(
+      id,
+      issuerWorkspaceId,
+      { equals: AwardDecisionStatus.ARCHIVED },
+      status,
+    );
+  }
+
+  private async transitionStatus(
+    id: string,
+    issuerWorkspaceId: string | undefined,
+    fromStatus: Prisma.EnumAwardDecisionStatusFilter,
+    toStatus: AwardDecisionStatus,
+  ): Promise<AwardDecisionRecord> {
+    return this.db.$transaction(async (tx) => {
+      const where = { id, ...(issuerWorkspaceId ? { issuerWorkspaceId } : {}) };
+      const updated = await tx.awardDecision.updateMany({
+        where: { ...where, status: fromStatus },
+        data: { status: toStatus },
+      });
+      if (updated.count !== 1) {
+        const existing = await tx.awardDecision.findFirst({ where, select: { id: true } });
+        if (!existing) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Award decision not found');
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Award decision status does not allow this action');
+      }
+      const result = await tx.awardDecision.findFirst({ where, include: awardDecisionInclude });
+      if (!result) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Award decision not found');
+      return result;
     });
   }
 

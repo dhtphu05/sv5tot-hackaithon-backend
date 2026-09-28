@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createAwardDecisionSchema,
+  listAwardDecisionsQuerySchema,
   updateAwardDecisionSchema,
 } from '../../src/modules/award-decisions/award-decisions.validation';
 
@@ -29,5 +30,21 @@ describe('Award Decision validation', () => {
       }).success,
     ).toBe(false);
     expect(updateAwardDecisionSchema.safeParse({}).success).toBe(false);
+  });
+
+  it('accepts archive visibility filters and rejects contradictory explicit status filters', () => {
+    expect(listAwardDecisionsQuerySchema.parse({ archive: 'exclude' })).toMatchObject({
+      archive: 'exclude',
+      page: 1,
+      limit: 20,
+    });
+    expect(listAwardDecisionsQuerySchema.parse({ status: 'ARCHIVED' }).status).toBe('ARCHIVED');
+    expect(
+      listAwardDecisionsQuerySchema.safeParse({ status: 'ARCHIVED', archive: 'exclude' }).success,
+    ).toBe(false);
+    expect(
+      listAwardDecisionsQuerySchema.safeParse({ status: 'DRAFT', archive: 'only' }).success,
+    ).toBe(false);
+    expect(listAwardDecisionsQuerySchema.safeParse({ archive: 'hidden' }).success).toBe(false);
   });
 });

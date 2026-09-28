@@ -38,6 +38,7 @@ export class AwardDecisionsService {
     const issuerWorkspaceId = this.isAdmin(user) ? undefined : this.getUploaderScope(user).workspaceId;
     const { items, total } = await this.repository.list(issuerWorkspaceId, {
       ...query,
+      archive: query.archive ?? (query.status === AwardDecisionStatus.ARCHIVED ? 'only' : 'exclude'),
       issuerWorkspaceId: this.isAdmin(user) ? query.issuerWorkspaceId : undefined,
     });
     return {
@@ -104,6 +105,49 @@ export class AwardDecisionsService {
       after: editableState(updated),
     });
     return toAwardDecisionDto(updated);
+  }
+
+  async archive(user: AuthenticatedUser, id: string) {
+    const before = await this.getRequiredDecision(user, id);
+    if (before.status === AwardDecisionStatus.ARCHIVED) {
+      throw new AppError(409, ErrorCodes.CONFLICT, 'Award decision is already archived');
+    }
+    const issuerWorkspaceId = this.isAdmin(user) ? undefined : before.issuerWorkspaceId;
+    const archived = await this.repository.archive(id, issuerWorkspaceId);
+    await this.auditService.log({
+      actorId: user.id,
+      actorRole: user.role,
+      workspaceId: before.issuerWorkspaceId,
+      action: auditActions.AWARD_DECISION_ARCHIVED,
+      entityType: 'award_decision',
+      entityId: id,
+      before: { status: before.status },
+      after: { status: archived.status },
+    });
+    return toAwardDecisionDto(archived);
+  }
+
+  async unarchive(user: AuthenticatedUser, id: string) {
+    const before = await this.getRequiredDecision(user, id);
+    if (before.status !== AwardDecisionStatus.ARCHIVED) {
+      throw new AppError(409, ErrorCodes.CONFLICT, 'Only archived award decisions can be restored');
+    }
+    const restoredStatus = before.confirmedAt
+      ? AwardDecisionStatus.CONFIRMED
+      : AwardDecisionStatus.DRAFT;
+    const issuerWorkspaceId = this.isAdmin(user) ? undefined : before.issuerWorkspaceId;
+    const restored = await this.repository.unarchive(id, issuerWorkspaceId, restoredStatus);
+    await this.auditService.log({
+      actorId: user.id,
+      actorRole: user.role,
+      workspaceId: before.issuerWorkspaceId,
+      action: auditActions.AWARD_DECISION_UNARCHIVED,
+      entityType: 'award_decision',
+      entityId: id,
+      before: { status: before.status },
+      after: { status: restored.status },
+    });
+    return toAwardDecisionDto(restored);
   }
 
   async uploadFile(

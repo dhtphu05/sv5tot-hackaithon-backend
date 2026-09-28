@@ -22,9 +22,21 @@ export const listAwardDecisionsQuerySchema = z.object({
   q: z.string().trim().optional(),
   schoolYear: z.string().trim().optional(),
   status: z.nativeEnum(AwardDecisionStatus).optional(),
+  archive: z.enum(['exclude', 'only', 'all']).optional(),
   issuerWorkspaceId: z.string().uuid().optional(),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
+}).superRefine((query, context) => {
+  const excludesArchivedStatus = query.status === AwardDecisionStatus.ARCHIVED && query.archive === 'exclude';
+  const requiresArchivedStatus = query.status !== undefined &&
+    query.status !== AwardDecisionStatus.ARCHIVED && query.archive === 'only';
+  if (excludesArchivedStatus || requiresArchivedStatus) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['archive'],
+      message: 'Archive visibility conflicts with the exact status filter',
+    });
+  }
 });
 
 export const createAwardDecisionSchema = z

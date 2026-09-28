@@ -26,6 +26,16 @@ export async function updateAwardDecision(req: Request, res: Response): Promise<
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function archiveAwardDecision(req: Request, res: Response): Promise<void> {
+  const data = await service.archive(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function unarchiveAwardDecision(req: Request, res: Response): Promise<void> {
+  const data = await service.unarchive(req.user!, String(req.params.id));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function uploadAwardDecisionFile(req: Request, res: Response): Promise<void> {
   const data = await service.uploadFile(
     req.user!,

@@ -3,7 +3,13 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Role } from '@prisma/client';
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), processRoster: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  list: vi.fn(),
+  create: vi.fn(),
+  processRoster: vi.fn(),
+  archive: vi.fn(),
+  unarchive: vi.fn(),
+}));
 
 vi.mock('../../src/middlewares/auth.middleware', () => ({
   requireAuth: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
@@ -73,6 +79,26 @@ describe('Award Decision and legacy import route roles', () => {
     expect(mocks.list).toHaveBeenCalledOnce();
   });
 
+  it.each([Role.data_uploader, Role.admin])('allows %s to archive and unarchive through the existing registry scope', async (role) => {
+    mocks.archive.mockResolvedValue({ id: 'decision-1', status: 'ARCHIVED' });
+    mocks.unarchive.mockResolvedValue({ id: 'decision-1', status: 'CONFIRMED' });
+    const app = buildApp();
+
+    const archived = await request(app)
+      .post('/api/award-decisions/decision-1/archive')
+      .set('x-test-role', role)
+      .expect(200);
+    const unarchived = await request(app)
+      .post('/api/award-decisions/decision-1/unarchive')
+      .set('x-test-role', role)
+      .expect(200);
+
+    expect(archived.body.data.status).toBe('ARCHIVED');
+    expect(unarchived.body.data.status).toBe('CONFIRMED');
+    expect(mocks.archive).toHaveBeenCalledWith(expect.anything(), 'decision-1');
+    expect(mocks.unarchive).toHaveBeenCalledWith(expect.anything(), 'decision-1');
+  });
+
   it('allows data uploader to start processing through the Award API without opening the generic jobs API', async () => {
     mocks.processRoster.mockResolvedValue({ status: 'processing' });
 
@@ -86,7 +112,16 @@ describe('Award Decision and legacy import route roles', () => {
     expect(mocks.processRoster).toHaveBeenCalledOnce();
   });
 
-  it.each([Role.student, Role.city_officer, Role.city_manager, Role.city_committee, Role.manager])(
+  it.each([
+    Role.student,
+    Role.class_representative,
+    Role.officer,
+    Role.manager,
+    Role.committee,
+    Role.city_officer,
+    Role.city_manager,
+    Role.city_committee,
+  ])(
     'denies %s access to Award Decision routes',
     async (role) => {
       const response = await request(buildApp())
@@ -106,6 +141,20 @@ describe('Award Decision and legacy import route roles', () => {
       .expect(403);
 
     expect(mocks.processRoster).not.toHaveBeenCalled();
+  });
+
+  it('denies other roles before archive or unarchive service calls', async () => {
+    await request(buildApp())
+      .post('/api/award-decisions/decision-1/archive')
+      .set('x-test-role', Role.city_manager)
+      .expect(403);
+    await request(buildApp())
+      .post('/api/award-decisions/decision-1/unarchive')
+      .set('x-test-role', Role.student)
+      .expect(403);
+
+    expect(mocks.archive).not.toHaveBeenCalled();
+    expect(mocks.unarchive).not.toHaveBeenCalled();
   });
 
   it('keeps data uploader out of Event Registry and DecisionImport routes', async () => {

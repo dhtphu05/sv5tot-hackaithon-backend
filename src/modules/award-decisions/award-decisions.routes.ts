@@ -7,6 +7,7 @@ import { validate } from '../../middlewares/validate.middleware';
 import { asyncHandler } from '../../shared/utils/async-handler';
 import {
   createAwardDecision,
+  archiveAwardDecision,
   confirmAwardDecision,
   getAwardDecisionRecipients,
   getAwardDecision,
@@ -16,6 +17,7 @@ import {
   processAwardRoster,
   updateAwardRosterMapping,
   updateAwardDecision,
+  unarchiveAwardDecision,
   uploadAwardDecisionFile,
 } from './award-decisions.controller';
 import {
@@ -53,6 +55,8 @@ awardDecisionsRouter.patch(
   asyncHandler(updateAwardRosterMapping),
 );
 awardDecisionsRouter.post('/:id/confirm', asyncHandler(confirmAwardDecision));
+awardDecisionsRouter.post('/:id/archive', asyncHandler(archiveAwardDecision));
+awardDecisionsRouter.post('/:id/unarchive', asyncHandler(unarchiveAwardDecision));
 awardDecisionsRouter.get(
   '/:id/recipients',
   validate({ query: awardRosterPageQuerySchema }),

@@ -98,6 +98,35 @@ describe('CitySubmissionEligibilityRepository', () => {
     expect(query.select).not.toHaveProperty('matchedUserId');
   });
 
+  it('stops using an archived UDN Award and uses it again after confirmed status is restored', async () => {
+    const recipient = { studentCode: '0010220001', fullName: 'Nguyễn An', className: '23CNTT1' };
+    let decisionStatus: AwardDecisionStatus = AwardDecisionStatus.CONFIRMED;
+    const db = {
+      application: { findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+      workspace: { findUnique: vi.fn() },
+      awardRecipient: {
+        findMany: vi.fn(({ where }: { where: { awardDecision: { is: { status: AwardDecisionStatus } } } }) =>
+          Promise.resolve(decisionStatus === where.awardDecision.is.status ? [recipient] : []),
+        ),
+      },
+    };
+    const repository = new CitySubmissionEligibilityRepository(db as never);
+    const query = {
+      issuerWorkspaceId: 'udn',
+      institutionWorkspaceId: 'school-a',
+      schoolYear: '2025-2026',
+    };
+
+    await expect(repository.findConfirmedUniversityRecipients(query)).resolves.toEqual([recipient]);
+    decisionStatus = AwardDecisionStatus.ARCHIVED;
+    await expect(repository.findConfirmedUniversityRecipients(query)).resolves.toEqual([]);
+    decisionStatus = AwardDecisionStatus.CONFIRMED;
+    await expect(repository.findConfirmedUniversityRecipients(query)).resolves.toEqual([recipient]);
+
+    expect(db.application.update).not.toHaveBeenCalled();
+    expect(db.application.updateMany).not.toHaveBeenCalled();
+  });
+
   it('loads only the current workspace and its immediate parent classification', async () => {
     const db = {
       application: { findUnique: vi.fn() },

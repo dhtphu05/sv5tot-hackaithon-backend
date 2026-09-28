@@ -61,6 +61,8 @@ function buildService() {
     findWorkspaceById: vi.fn(),
     create: vi.fn().mockResolvedValue(decision()),
     update: vi.fn().mockResolvedValue(decision()),
+    archive: vi.fn().mockResolvedValue(decision({ status: AwardDecisionStatus.ARCHIVED })),
+    unarchive: vi.fn().mockResolvedValue(decision()),
     attachFile: vi.fn().mockResolvedValue({ decision: decision(), fileId: 'file-1' }),
   };
   const storageService = {
@@ -84,6 +86,7 @@ describe('AwardDecisionsService', () => {
     expect(repository.list).toHaveBeenCalledWith(schoolWorkspaceId, {
       ...query,
       issuerWorkspaceId: undefined,
+      archive: 'exclude',
     });
   });
 
@@ -93,7 +96,20 @@ describe('AwardDecisionsService', () => {
 
     await service.list(user(Role.admin, null), query);
 
-    expect(repository.list).toHaveBeenCalledWith(undefined, query);
+    expect(repository.list).toHaveBeenCalledWith(undefined, { ...query, archive: 'exclude' });
+  });
+
+  it('preserves the legacy explicit ARCHIVED status list query', async () => {
+    const { service, repository } = buildService();
+
+    await service.list(user(Role.data_uploader), { page: 1, limit: 20, status: AwardDecisionStatus.ARCHIVED });
+
+    expect(repository.list).toHaveBeenCalledWith(schoolWorkspaceId, {
+      page: 1,
+      limit: 20,
+      status: AwardDecisionStatus.ARCHIVED,
+      archive: 'only',
+    });
   });
 
   it('derives the school award level from the uploader workspace', async () => {
@@ -179,6 +195,82 @@ describe('AwardDecisionsService', () => {
     ).rejects.toMatchObject({ statusCode: 409 });
     expect(repository.update).not.toHaveBeenCalled();
     expect(auditService.log).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [AwardDecisionStatus.DRAFT, null],
+    [AwardDecisionStatus.CONFIRMED, new Date('2026-06-01T00:00:00.000Z')],
+  ] as const)('archives %s and records the audit only after the state transition', async (status, confirmedAt) => {
+    const { service, repository, auditService } = buildService();
+    const before = decision({ status, confirmedAt });
+    const archived = decision({ status: AwardDecisionStatus.ARCHIVED, confirmedAt });
+    repository.findById.mockResolvedValue(before);
+    repository.archive.mockResolvedValue(archived);
+
+    await expect(service.archive(user(Role.data_uploader), 'decision-1')).resolves.toMatchObject({
+      status: AwardDecisionStatus.ARCHIVED,
+    });
+    expect(repository.archive).toHaveBeenCalledWith('decision-1', schoolWorkspaceId);
+    expect(auditService.log).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'AWARD_DECISION_ARCHIVED',
+      workspaceId: schoolWorkspaceId,
+      entityId: 'decision-1',
+      before: { status },
+      after: { status: AwardDecisionStatus.ARCHIVED },
+    }));
+  });
+
+  it('restores archived decisions from confirmed metadata and keeps draft decisions draft', async () => {
+    const { service, repository, auditService } = buildService();
+    const confirmedAt = new Date('2026-06-01T00:00:00.000Z');
+    repository.findById
+      .mockResolvedValueOnce(decision({ status: AwardDecisionStatus.ARCHIVED, confirmedAt }))
+      .mockResolvedValueOnce(decision({ status: AwardDecisionStatus.ARCHIVED, confirmedAt: null }));
+    repository.unarchive
+      .mockResolvedValueOnce(decision({ status: AwardDecisionStatus.CONFIRMED, confirmedAt }))
+      .mockResolvedValueOnce(decision({ status: AwardDecisionStatus.DRAFT, confirmedAt: null }));
+
+    await expect(service.unarchive(user(Role.data_uploader), 'decision-1')).resolves.toMatchObject({
+      status: AwardDecisionStatus.CONFIRMED,
+    });
+    await expect(service.unarchive(user(Role.data_uploader), 'decision-1')).resolves.toMatchObject({
+      status: AwardDecisionStatus.DRAFT,
+    });
+    expect(repository.unarchive).toHaveBeenNthCalledWith(1, 'decision-1', schoolWorkspaceId, AwardDecisionStatus.CONFIRMED);
+    expect(repository.unarchive).toHaveBeenNthCalledWith(2, 'decision-1', schoolWorkspaceId, AwardDecisionStatus.DRAFT);
+    expect(auditService.log).toHaveBeenCalledTimes(2);
+    expect(auditService.log).toHaveBeenLastCalledWith(expect.objectContaining({
+      action: 'AWARD_DECISION_UNARCHIVED',
+      after: expect.objectContaining({ status: AwardDecisionStatus.DRAFT }),
+    }));
+  });
+
+  it('rejects repeated archive or unarchive and workspace mismatches without audit', async () => {
+    const { service, repository, auditService } = buildService();
+    repository.findById.mockResolvedValueOnce(decision({ status: AwardDecisionStatus.ARCHIVED }));
+    await expect(service.archive(user(Role.data_uploader), 'decision-1')).rejects.toMatchObject({ statusCode: 409 });
+    expect(repository.archive).not.toHaveBeenCalled();
+
+    repository.findById.mockResolvedValueOnce(decision({ status: AwardDecisionStatus.DRAFT }));
+    await expect(service.unarchive(user(Role.data_uploader), 'decision-1')).rejects.toMatchObject({ statusCode: 409 });
+    expect(repository.unarchive).not.toHaveBeenCalled();
+
+    repository.findById.mockResolvedValue(null);
+    await expect(service.archive(user(Role.data_uploader), 'decision-outside-workspace')).rejects.toMatchObject({
+      statusCode: 404,
+    });
+    expect(auditService.log).not.toHaveBeenCalled();
+  });
+
+  it('preserves admin archive access and denies review roles before decision lookup', async () => {
+    const { service, repository } = buildService();
+    repository.findById.mockResolvedValue(decision());
+    await service.archive(user(Role.admin, null), 'decision-1');
+    expect(repository.archive).toHaveBeenCalledWith('decision-1', undefined);
+
+    repository.findById.mockClear();
+    await expect(service.archive(user(Role.city_manager), 'decision-1')).rejects.toMatchObject({ statusCode: 403 });
+    expect(repository.findById).not.toHaveBeenCalled();
   });
 
   it('checks workspace and file kind before storing or associating a file', async () => {
