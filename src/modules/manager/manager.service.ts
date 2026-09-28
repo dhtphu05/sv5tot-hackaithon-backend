@@ -296,11 +296,17 @@ export class ManagerService {
     if (user.role === Role.city_committee || user.role === Role.city_officer) {
       throw new AppError(403, ErrorCodes.FORBIDDEN, 'This role cannot view management workloads');
     }
-    const applicationScope = reviewWorkspaceFilterFor(user);
+    const applicationScope: Prisma.ApplicationWhereInput = {
+      ...reviewWorkspaceFilterFor(user),
+      cancelledAt: null,
+    };
     const taskScope: Prisma.ReviewTaskWhereInput = {
       AND: [reviewWorkspaceFilterFor(user), currentReviewTaskApplicationFilter()],
     };
-    const resolutionScope = reviewWorkspaceFilterFor(user);
+    const resolutionScope: Prisma.ResolutionCaseWhereInput = {
+      ...reviewWorkspaceFilterFor(user),
+      application: { is: { cancelledAt: null } },
+    };
     const userScope = workspaceFilterFor(user);
     const cityManager = user.role === Role.city_manager;
     const [
@@ -1429,6 +1435,23 @@ export class ManagerService {
             supersedeReason: input.reason,
           },
         });
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: auditActions.FINAL_DECISION_SUPERSEDED,
+          targetType: 'application',
+          targetId: applicationId,
+          applicationId,
+          workspaceId: lockedApplication.workspaceId,
+          beforeStateJson: {
+            finalStatus: lockedApplication.finalStatus,
+            finalLevel: lockedApplication.finalLevel,
+            finalNote: lockedApplication.finalNote,
+            finalizedAt: lockedApplication.finalizedAt?.toISOString() ?? null,
+          },
+          afterStateJson: { finalStatus: FinalStatus.pending, finalLevel: null },
+          note: input.reason,
+        });
       }
 
       const updated = await tx.application.update({
@@ -1929,7 +1952,10 @@ function getLastActivityAt(application: {
 }
 
 function buildCommitteeInboxWhere(query: CommitteeInboxQuery): Prisma.ApplicationWhereInput {
-  const and: Prisma.ApplicationWhereInput[] = [{ targetLevel: { in: activeCommitteeLevels } }];
+  const and: Prisma.ApplicationWhereInput[] = [
+    { targetLevel: { in: activeCommitteeLevels } },
+    { cancelledAt: null },
+  ];
   if (query.targetLevel) and.push({ targetLevel: query.targetLevel });
   if (query.status) and.push({ status: query.status });
   if (query.search) {

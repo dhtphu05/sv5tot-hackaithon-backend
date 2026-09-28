@@ -124,6 +124,13 @@ describe('ManagerService.reopenFinal history', () => {
           finalizedById: null,
         }),
       });
+      expect(tx.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'FINAL_DECISION_SUPERSEDED',
+          targetId: 'application-1',
+          note: 'Appeal accepted',
+        }),
+      });
     },
   );
 
@@ -142,7 +149,7 @@ describe('ManagerService.reopenFinal history', () => {
 
     expect(tx.applicationFinalDecisionHistory.create).toHaveBeenCalledTimes(1);
     expect(tx.application.update).toHaveBeenCalledTimes(1);
-    expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(tx.auditLog.create).toHaveBeenCalledTimes(2);
     expect(tx.notification.create).toHaveBeenCalledTimes(1);
   });
 

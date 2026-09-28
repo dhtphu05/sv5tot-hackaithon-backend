@@ -49,6 +49,46 @@ describe('application lifecycle export scope', () => {
     expect(prismaMock.application.findMany.mock.calls[0][0].where).not.toHaveProperty('archivedAt');
   });
 
+  it('does not export superseded final details after the current final was reopened', async () => {
+    const oldFinalizedAt = new Date('2026-09-20T10:00:00.000Z');
+    prismaMock.application.findMany.mockResolvedValue([
+      {
+        student: {
+          studentCode: '00123',
+          fullName: 'Student Example',
+          className: 'Class 1',
+          faculty: 'Faculty',
+        },
+        schoolYear: '2025-2026',
+        targetLevel: 'city',
+        finalLevel: null,
+        finalStatus: 'pending',
+        status: 'under_review',
+        readinessScore: 70,
+        submittedAt: new Date('2026-09-01T10:00:00.000Z'),
+        finalizedAt: null,
+        finalizedBy: null,
+        finalNote: null,
+        reviewTasks: [],
+        cascadeReviews: [],
+        auditLogs: [
+          { action: 'APPLICATION_FINALIZED', createdAt: oldFinalizedAt, note: null },
+          {
+            action: 'FINAL_RESULT_CONFIRMED',
+            createdAt: oldFinalizedAt,
+            note: 'Superseded final note',
+          },
+        ],
+      },
+    ] as never);
+
+    const result = await new ExportsService().exportReviewResults(manager, { format: 'json' });
+
+    expect(result).toMatchObject({
+      data: [expect.objectContaining({ completedAt: null, finalNote: null })],
+    });
+  });
+
   it('defaults management application and task exports to active records', async () => {
     await new ExportsService().exportApplicationsJson(manager, {} as never);
     await new ExportsService().exportReviewTasksCsv(manager, {} as never);

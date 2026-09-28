@@ -11,8 +11,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
 const prismaMock = vi.hoisted(() => ({
-  application: { findMany: vi.fn(), count: vi.fn(), findUnique: vi.fn() },
-  reviewTask: { findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
+  application: { findMany: vi.fn(), count: vi.fn(), findUnique: vi.fn(), groupBy: vi.fn() },
+  reviewTask: { findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn(), groupBy: vi.fn() },
+  resolutionCase: { groupBy: vi.fn(), count: vi.fn() },
   user: { findMany: vi.fn(), findUnique: vi.fn() },
   auditLog: { create: vi.fn() },
   notification: { create: vi.fn() },
@@ -54,9 +55,15 @@ describe('ManagerService City workspace scope', () => {
     vi.clearAllMocks();
     prismaMock.application.findMany.mockResolvedValue([]);
     prismaMock.application.count.mockResolvedValue(0);
+    prismaMock.application.groupBy.mockResolvedValue([]);
     prismaMock.reviewTask.findMany.mockResolvedValue([]);
+    prismaMock.reviewTask.groupBy.mockResolvedValue([]);
+    prismaMock.resolutionCase.groupBy.mockResolvedValue([]);
+    prismaMock.resolutionCase.count.mockResolvedValue(0);
     prismaMock.user.findMany.mockResolvedValue([]);
-    prismaMock.$transaction.mockResolvedValue([[], 0]);
+    prismaMock.$transaction.mockImplementation((operations: Promise<unknown>[]) =>
+      Promise.all(operations),
+    );
   });
 
   it('lists individual applications from active School workspaces', async () => {
@@ -102,6 +109,43 @@ describe('ManagerService City workspace scope', () => {
         { assignedOfficerId: null },
       ]),
     });
+  });
+
+  it('excludes cancelled applications from current manager dashboard queries', async () => {
+    await new ManagerService().getDashboardSummary(cityManager);
+
+    const applicationQueries = [
+      ...prismaMock.application.groupBy.mock.calls,
+      ...prismaMock.application.findMany.mock.calls,
+      ...prismaMock.application.count.mock.calls,
+    ].map(([query]) => query.where);
+
+    expect(applicationQueries.length).toBeGreaterThan(0);
+    for (const where of applicationQueries) {
+      expect(where).toMatchObject({ cancelledAt: null });
+    }
+    for (const [query] of prismaMock.resolutionCase.groupBy.mock.calls) {
+      expect(query.where).toMatchObject({ application: { is: { cancelledAt: null } } });
+    }
+    for (const [query] of prismaMock.resolutionCase.count.mock.calls) {
+      expect(query.where).toMatchObject({ application: { is: { cancelledAt: null } } });
+    }
+  });
+
+  it('excludes cancelled applications from the committee inbox query', async () => {
+    await new ManagerService().getCommitteeInbox(cityManager, {
+      page: 1,
+      limit: 20,
+      bucket: 'all',
+    } as never);
+
+    expect(prismaMock.application.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          AND: expect.arrayContaining([{ cancelledAt: null }]),
+        }),
+      }),
+    );
   });
 
   it('allows assignment only to an active specialized City Officer in the same City workspace', async () => {

@@ -203,15 +203,6 @@ export class ExportsService {
         finalizedBy: true,
         reviewTasks: true,
         cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
-        auditLogs: {
-          where: {
-            action: {
-              in: [auditActions.APPLICATION_FINALIZED, auditActions.FINAL_RESULT_CONFIRMED],
-            },
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 3,
-        },
       },
       orderBy: { submittedAt: 'desc' },
     });
@@ -237,18 +228,14 @@ export class ExportsService {
       applicationStatus: application.status,
       readinessScore: application.readinessScore,
       submittedAt: application.submittedAt,
-      completedAt:
-        application.auditLogs.find((log) => log.action === auditActions.APPLICATION_FINALIZED)
-          ?.createdAt ?? null,
+      completedAt: application.finalizedAt,
       criteriaTaskStatuses: Object.fromEntries(
         application.reviewTasks.map((task) => [task.criterion, task.status]),
       ),
       cascadeReviewCreatedAt: latestCascade?.createdAt ?? null,
       cascadeSnapshot: latestCascade?.levelResultsJson ?? null,
       finalizedByName: application.finalizedBy?.fullName ?? null,
-      finalNote:
-        application.auditLogs.find((log) => log.action === auditActions.FINAL_RESULT_CONFIRMED)
-          ?.note ?? null,
+      finalNote: application.finalNote,
       };
     });
   }
