@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getAdminUser: vi.fn(),
   updateAdminUser: vi.fn(),
   setAdminUserActive: vi.fn(),
+  resetAdminUserPassword: vi.fn(),
   setOfficerSpecializations: vi.fn(),
 }));
 
@@ -79,4 +80,41 @@ describe('admin user routes', () => {
       .expect(400);
     expect(mocks.setAdminUserActive).not.toHaveBeenCalled();
   });
+
+  it('allows admin to reset a password and returns only the safe result', async () => {
+    mocks.resetAdminUserPassword.mockResolvedValue({ userId: '11111111-1111-4111-8111-111111111111' });
+    const response = await request(buildApp())
+      .post('/api/admin/users/11111111-1111-4111-8111-111111111111/reset-password')
+      .set('x-test-role', Role.admin)
+      .send({ newPassword: 'new-password-123' })
+      .expect(200);
+
+    expect(mocks.resetAdminUserPassword).toHaveBeenCalledWith(
+      expect.objectContaining({ role: Role.admin }),
+      '11111111-1111-4111-8111-111111111111',
+      'new-password-123',
+    );
+    expect(response.body.data).toEqual({ userId: '11111111-1111-4111-8111-111111111111' });
+    expect(response.body.data).not.toHaveProperty('passwordHash');
+  });
+
+  it('rejects weak password input before calling the service', async () => {
+    await request(buildApp())
+      .post('/api/admin/users/11111111-1111-4111-8111-111111111111/reset-password')
+      .set('x-test-role', Role.admin)
+      .send({ newPassword: 'short' })
+      .expect(400);
+    expect(mocks.resetAdminUserPassword).not.toHaveBeenCalled();
+  });
+
+  it.each([Role.student, Role.data_uploader, Role.city_officer, Role.city_manager, Role.city_committee, Role.manager])(
+    'denies %s from resetting account passwords', async (role) => {
+      await request(buildApp())
+        .post('/api/admin/users/11111111-1111-4111-8111-111111111111/reset-password')
+        .set('x-test-role', role)
+        .send({ newPassword: 'new-password-123' })
+        .expect(403);
+      expect(mocks.resetAdminUserPassword).not.toHaveBeenCalled();
+    },
+  );
 });

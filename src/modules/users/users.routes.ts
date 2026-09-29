@@ -11,6 +11,7 @@ import {
   getMe,
   listAdminUsers,
   listUsers,
+  resetAdminUserPassword,
   updateAdminUser,
   updateAdminUserStatus,
   updateCityOfficerSpecializations,
@@ -24,6 +25,7 @@ import {
   listAdminUsersQuerySchema,
   listUsersQuerySchema,
   adminUserStatusSchema,
+  adminUserResetPasswordSchema,
   updateAdminUserSchema,
   updateMeSchema,
 } from './users.validation';
@@ -57,6 +59,11 @@ adminUsersRouter.patch(
   '/:userId/status',
   validate({ params: adminUserIdParamSchema, body: adminUserStatusSchema }),
   asyncHandler(updateAdminUserStatus),
+);
+adminUsersRouter.post(
+  '/:userId/reset-password',
+  validate({ params: adminUserIdParamSchema, body: adminUserResetPasswordSchema }),
+  asyncHandler(resetAdminUserPassword),
 );
 adminUsersRouter.put(
   '/:userId/specializations',

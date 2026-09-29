@@ -53,6 +53,10 @@ export const adminUserIdParamSchema = z.object({ userId: z.string().uuid() });
 
 export const adminUserStatusSchema = z.object({ isActive: z.boolean() });
 
+export const adminUserResetPasswordSchema = z.object({
+  newPassword: z.string().min(8).max(128),
+}).strict();
+
 export const cityOfficerSpecializationsSchema = z.object({
   criteria: z.array(cityCriterionSchema).max(5).refine((items) => new Set(items).size === items.length, 'Specializations cannot contain duplicates'),
 });

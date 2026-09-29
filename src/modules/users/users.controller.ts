@@ -51,6 +51,13 @@ export async function updateAdminUserStatus(req: Request, res: Response): Promis
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function resetAdminUserPassword(req: Request, res: Response): Promise<void> {
+  const data = await usersService.resetAdminUserPassword(
+    req.user!, String(req.params.userId), req.body.newPassword,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function updateCityOfficerSpecializations(req: Request, res: Response): Promise<void> {
   const data = await usersService.setOfficerSpecializations(
     req.user!, String(req.params.userId), req.body.criteria,

@@ -7,6 +7,10 @@ import type { ListAdminUsersQuery, ListUsersQuery, UpdateMeInput } from './users
 export class UsersRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
 
+  transaction<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>) {
+    return this.db.$transaction(operation);
+  }
+
   findById(id: string) {
     return this.db.user.findUnique({
       where: { id },

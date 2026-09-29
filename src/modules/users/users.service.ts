@@ -187,6 +187,37 @@ export class UsersService {
     return { ...pickSafeUser(updated), officerSpecializations: updated.officerSpecializations };
   }
 
+  async resetAdminUserPassword(actor: AuthenticatedUser, userId: string, newPassword: string) {
+    if (actor.role !== Role.admin) {
+      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Insufficient permissions');
+    }
+    const passwordHash = await this.passwordService.hashPassword(newPassword);
+    await this.usersRepository.transaction(async (tx) => {
+      const target = await tx.user.findUnique({
+        where: { id: userId },
+        select: { id: true, workspaceId: true },
+      });
+      if (!target) throw new AppError(404, ErrorCodes.NOT_FOUND, 'User not found');
+
+      await tx.user.update({ where: { id: userId }, data: { passwordHash } });
+      await tx.refreshToken.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await this.auditService.log({
+        actorId: actor.id,
+        actorRole: actor.role,
+        workspaceId: target.workspaceId,
+        action: 'USER_PASSWORD_RESET',
+        entityType: 'user',
+        entityId: userId,
+        after: { passwordReset: true, refreshSessionsRevoked: true },
+        tx,
+      });
+    });
+    return { userId };
+  }
+
   async setOfficerSpecializations(actor: AuthenticatedUser, userId: string, criteria: Criterion[]) {
     const officer = await this.requireAdminUser(userId);
     if (officer.role !== Role.city_officer || !officer.workspace || officer.workspaceId === null) {
