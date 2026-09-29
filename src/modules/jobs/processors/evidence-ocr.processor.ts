@@ -38,6 +38,7 @@ import type { EvidenceExtractedFields } from '../../evidences/evidence-field-ext
 import { normalizeEvidenceFields } from '../../evidences/evidence-field-normalizer';
 import { matchEvidenceRegistry } from '../../evidences/evidence-registry-matcher';
 import { StorageService } from '../../storage/storage.service';
+import { downloadStoredObject } from '../../storage/storage-download';
 import {
   isStaleEvidenceAnalysisJob,
   parseEvidenceAnalysisJobInput,
@@ -667,14 +668,7 @@ async function loadEvidenceFileBuffer(file: File): Promise<Buffer> {
   }
 
   const signedUrl = await storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
-  const response = await fetch(signedUrl);
-  if (!response.ok) {
-    throw new AppError(502, ErrorCodes.STORAGE_ERROR, 'Evidence file download failed', {
-      retryable: true,
-      status: response.status,
-    });
-  }
-  return Buffer.from(await response.arrayBuffer());
+  return downloadStoredObject(signedUrl, 'Evidence file download failed');
 }
 
 function resolveNewestEvidenceFile(

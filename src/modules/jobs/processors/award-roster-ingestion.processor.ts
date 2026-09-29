@@ -17,6 +17,7 @@ import { readRosterTable } from '../../../shared/utils/roster-table-reader';
 import { createApplicationAudit } from '../../applications/application.helpers';
 import { extractStructuredDocument } from '../../ai/openai-document-extraction';
 import { StorageService } from '../../storage/storage.service';
+import { downloadStoredObject } from '../../storage/storage-download';
 import {
   buildAwardRosterPreview,
   getAwardRosterFormat,
@@ -166,11 +167,7 @@ async function readStoredFile(file: {
     return fs.readFile(filePath);
   }
   const signedUrl = await storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
-  const response = await fetch(signedUrl);
-  if (!response.ok) {
-    throw new AppError(502, ErrorCodes.STORAGE_ERROR, 'Roster file download failed');
-  }
-  return Buffer.from(await response.arrayBuffer());
+  return downloadStoredObject(signedUrl, 'Roster file download failed');
 }
 
 function readInputRosterFileId(value: unknown): string | null {

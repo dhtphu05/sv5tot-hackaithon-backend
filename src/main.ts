@@ -17,12 +17,13 @@ const jobWorker = startJobWorkerLoop({
 
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, 'Shutting down HTTP server');
-  jobWorker.stop();
-
-  server.close(async () => {
-    await prisma.$disconnect();
-    process.exit(0);
+  const serverClosed = new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
   });
+  await jobWorker.stop();
+  await serverClosed;
+  await prisma.$disconnect();
+  process.exit(0);
 }
 
 process.on('SIGTERM', () => {

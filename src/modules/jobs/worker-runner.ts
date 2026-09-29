@@ -3,7 +3,7 @@ import { EmailWorkerService } from '../mail/email-worker.service';
 import { JobsService } from './jobs.service';
 
 type JobWorkerRunner = {
-  stop: () => void;
+  stop: () => Promise<void>;
 };
 
 export function startJobWorkerLoop(
@@ -17,8 +17,8 @@ export function startJobWorkerLoop(
   const service = options.service ?? new JobsService();
   const mailService = options.mailService ?? new EmailWorkerService();
   let stopped = false;
-  let running = false;
   let timer: NodeJS.Timeout | undefined;
+  let inFlight: Promise<void> | null = null;
 
   const schedule = () => {
     if (stopped || !options.enabled) return;
@@ -27,56 +27,53 @@ export function startJobWorkerLoop(
     }, options.intervalMs);
   };
 
-  const tick = async () => {
-    if (stopped || running) return;
-    running = true;
+  const tick = () => {
+    if (stopped || inFlight) return;
+    inFlight = (async () => {
+      try {
+        const result = await service.runWorkerTick();
+        for (const job of result.jobs ?? (result.job ? [result.job] : [])) {
+          logger.info(
+            { jobId: job.id, jobType: job.jobType, status: job.status },
+            'Background job worker processed a queued job',
+          );
+        }
 
-    try {
-      const result = await service.runWorkerTick();
-      if (result.job) {
-        logger.info(
-          {
-            jobId: result.job.id,
-            jobType: result.job.jobType,
-            status: result.job.status,
-          },
-          'Background job worker processed a queued job',
+        const emailResult = await mailService.runTick();
+        if (emailResult.email || emailResult.remindersQueued > 0) {
+          logger.info(
+            {
+              emailOutboxId: emailResult.email?.id ?? null,
+              emailStatus: emailResult.email?.status ?? null,
+              remindersQueued: emailResult.remindersQueued,
+            },
+            'Background mail worker processed email outbox',
+          );
+        }
+      } catch (error) {
+        logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Background worker tick failed',
         );
+      } finally {
+        inFlight = null;
+        schedule();
       }
-
-      const emailResult = await mailService.runTick();
-      if (emailResult.email || emailResult.remindersQueued > 0) {
-        logger.info(
-          {
-            emailOutboxId: emailResult.email?.id ?? null,
-            emailStatus: emailResult.email?.status ?? null,
-            remindersQueued: emailResult.remindersQueued,
-          },
-          'Background mail worker processed email outbox',
-        );
-      }
-    } catch (error) {
-      logger.error(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Background worker tick failed',
-      );
-    } finally {
-      running = false;
-      schedule();
-    }
+    })();
   };
 
   if (options.enabled) {
     logger.info({ intervalMs: options.intervalMs }, 'Background job worker started');
-    void tick();
+    tick();
   } else {
     logger.info('Background job worker disabled');
   }
 
   return {
-    stop: () => {
+    stop: async () => {
       stopped = true;
       if (timer) clearTimeout(timer);
+      await inFlight;
     },
   };
 }

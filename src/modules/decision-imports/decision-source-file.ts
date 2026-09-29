@@ -6,6 +6,7 @@ import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { DocumentExtractionContent } from '../ai/openai-document-extraction';
 import type { StorageService } from '../storage/storage.service';
+import { downloadStoredObject } from '../storage/storage-download';
 
 type DecisionSourceFile = {
   storageType: FileStorageType;
@@ -53,9 +54,5 @@ async function readStoredFile(file: DecisionSourceFile, storage: StorageService)
   }
 
   const signedUrl = await storage.getSignedReadUrl(file.filePath, 300, file.storageType);
-  const response = await fetch(signedUrl);
-  if (!response.ok) {
-    throw new AppError(502, ErrorCodes.STORAGE_ERROR, 'Decision source file download failed');
-  }
-  return Buffer.from(await response.arrayBuffer());
+  return downloadStoredObject(signedUrl, 'Decision source file download failed');
 }
