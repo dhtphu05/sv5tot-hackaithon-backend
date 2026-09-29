@@ -79,7 +79,7 @@ Routes are mounted in `src/app.ts`. Use `asyncHandler` for async controllers and
 - `evidences`: evidence upload/status/card behavior.
 - `event-registry`: official events and participant matching.
 - `decision-imports`: decision document import, OCR, roster parsing.
-- `jobs`: indexing jobs, worker tick, SmartReader-backed processors.
+- `jobs`: indexing jobs, worker tick, and document extraction processors.
 - `notifications`: user notifications.
 - `review`: officer review tasks and decisions.
 - `manager`: assignment, analytics, finalization/result flows.
@@ -87,10 +87,9 @@ Routes are mounted in `src/app.ts`. Use `asyncHandler` for async controllers and
 - `collective`: collective profile and class representative workflows.
 - `resolution`: resolution cases.
 - `mail`: outbox and email worker.
-- `chatbot`: Smartbot/Gemini/local tool orchestration.
-- `smartreader`: VNPT SmartReader client/adapter.
-- `smartbot-hooks`: VNPT Smartbot hooks.
-- `smartux`: SmartUX integration.
+- `chatbot`: OpenAI answer generation with backend-local context, tool routing, and action authority.
+- `smartreader`: historical OCR shapes, normalization, and redaction helpers; outbound clients, test routes, and active extraction jobs are retired.
+- `smartbot-hooks`: token-protected compatibility webhooks retained for external integrations.
 - `exports`: export generation.
 
 ## Jobs And Long-Running Work
@@ -400,7 +399,7 @@ This section reflects the requirement-tree completion foundation added on 2026-0
   - `npm run lint`: passed with the existing 18 `no-explicit-any` warnings only.
   - `npx vitest run tests/unit/criteria-completion.test.ts tests/unit/rules-engine.test.ts`: passed with 2 files and 48 tests after adding integration path coverage.
 
-## Proactive Recommendations / Gemini UX Planning Context
+## Historical Proactive Recommendation Planning (Gemini-era; superseded for current providers)
 
 ### Current Next-Action And Recommendation Sources
 
@@ -412,16 +411,15 @@ This section reflects the requirement-tree completion foundation added on 2026-0
 - Collective precheck has separate deterministic next actions via `src/modules/collective/collective-next-action.generator.ts`.
 - Notifications are durable workflow recommendations in practice: supplement requests, review assignments, result/resolution updates, and deadlines are created through `NotificationsService.create` and returned as `NotificationSummary` with metadata.
 
-### Current Chatbot, Gemini, Smartbot, And SmartUX Architecture
+### Current Chatbot And Assistant Architecture
 
 - Chatbot routes are mounted at `/api/chatbot`: `POST /message`, `POST /stream`, and action confirm/execute/cancel endpoints. Routes require auth, role guards, validation, and chatbot rate limiting.
-- `ChatbotService.prepareMessage` builds safe user/application/page context, optionally builds dynamic Smartbot prompts, classifies intent through Gemini when enabled, dispatches deterministic local tools, or forwards to VNPT Smartbot.
+- `ChatbotService.prepareMessage` builds safe user/application/page context, dispatches deterministic local tools, then uses the OpenAI Responses API for answer text when no local result is available.
 - `buildSafeChatbotContext` only selects safe summaries: role, context scope, page, target level, application status, criterion, missing summary, deadline summary, next action, and review task summary. It enforces application owner/workspace access.
 - Local chatbot tools in `src/modules/chatbot/tools/*` expose read-safe application, gap, checklist, deadline, evidence-card, matching-hub, officer, manager, committee, and handoff behavior. Tool permission checks are workspace-aware.
-- Gemini is infrastructure-level through `src/infrastructure/gemini/gemini.client.ts`. It supports text, JSON, and SSE streaming against `GEMINI_MODEL` with timeout and auth/request/parse error handling.
-- `GeminiIntentService` classifies user requests into safe chatbot tool intents; `GeminiResponseService` polishes or streams Vietnamese answers while preserving backend facts and official-result guardrails.
-- Smartbot webhook tools are mounted at `/api/smartbot/tools/*` and require `SMARTBOT_WEBHOOK_TOKEN`; read tools need user context to resolve workspace.
-- SmartUX routes are mounted at `/api/smartux`, but `SmartUxService` is currently a placeholder that throws `501 NOT_IMPLEMENTED`. Frontend SmartUX SDK tracking is currently the working integration.
+- The OpenAI chatbot client returns answer text only. Tool selection, permission checks, actions, context facts, eligibility, criterion decisions, and final status remain backend-controlled.
+- Smartbot webhook tools remain mounted at `/api/smartbot/tools/*` and require `SMARTBOT_WEBHOOK_TOKEN`; they are a compatibility surface separate from the student-facing chatbot provider.
+- Backend SmartUX placeholder routes and internal SmartReader test routes are retired because repository consumer search found no callers. Frontend SmartUX analytics SDK use is separate and unchanged.
 
 ### Candidate Backend Integration Points
 
@@ -435,15 +433,15 @@ This section reflects the requirement-tree completion foundation added on 2026-0
 
 ### Data Privacy Constraints
 
-- Do not send raw OCR text, raw evidence text, file names, signed URLs, identity numbers, email, phone, or student codes to Gemini, Smartbot metadata, SmartUX, logs, or docs.
+- Do not send raw OCR text, raw evidence text, file names, signed URLs, identity numbers, email, phone, or student codes to model prompts, Smartbot metadata, logs, or docs.
 - Keep recommendation generation server-side and based on IDs plus safe summaries. Existing `llm-safety` helpers and `buildSafeChatbotContext` are the model for LLM inputs.
 - Preserve workspace isolation: every recommendation query for non-admin users must use `req.user.workspaceId`, `workspaceFilterFor`, `assertSameWorkspace`, or an existing owner/access helper.
 - Recommendations must not create official review decisions, final statuses, or pass/fail conclusions. Continue to include human-confirmation caveats where result/readiness language appears.
-- Avoid storing full Gemini/Smartbot raw responses unless explicitly needed and redacted; raw provider logging flags should remain off in normal environments.
+- Avoid storing full model raw responses; raw provider logging flags remain off in normal environments.
 
 ### Latency And Cost Risks
 
-- `GEMINI_ENABLED` defaults false; `GEMINI_API_KEY` is required when true, and `GEMINI_TIMEOUT_MS` defaults to 30000 ms. Recommendation APIs must degrade when Gemini is disabled or times out.
+- OpenAI provider failures use safe user-facing fallbacks; no live provider call is required for deterministic local tools or system health checks.
 - Dashboard/application pages are hot paths. Passive recommendation fetches should be deterministic/cached first and should not trigger Gemini on every page load.
 - Chatbot routes are rate-limited and already have streaming/fallback behavior. Reusing them for proactive cards could increase session writes and provider spend.
 - Precheck can be sync and frontend may auto-run it after edits; do not chain extra LLM work from every precheck unless explicitly throttled or queued.
@@ -1305,7 +1303,7 @@ This section reflects the hardening pass for "Kho minh chứng / Kho sự kiện
 
 ## AI/OCR consolidation audit (2026-09-29)
 
-The following is the runtime-path audit baseline for the OpenAI extraction migration. It describes the code at the start of `backend/ai-ocr-audit`, with the Event Registry fake-row fallback corrected by this audit commit. CSV/XLSX remain deterministic local parsing paths; extracted document content is advisory until an explicit human confirmation endpoint is called.
+The following table is the historical runtime-path audit baseline at the start of `backend/ai-ocr-audit`; it is superseded by the final runtime status below. CSV/XLSX remain deterministic local parsing paths; extracted document content is advisory until an explicit human confirmation endpoint is called.
 
 | Flow and trigger | Current provider/format and timeout/retry | Persistence and consumer | Human gate / audit finding |
 | --- | --- | --- | --- |
@@ -1336,6 +1334,17 @@ The following is the runtime-path audit baseline for the OpenAI extraction migra
 - DecisionImport roster corrections are available at `PATCH /api/decision-imports/:id/preview-rows/:rowId` and `DELETE /api/decision-imports/:id/preview-rows/:rowId/correction`. Existing officer/manager/admin route allowlist and workspace checks remain. Only canonical roster fields are accepted, and only before confirmation/cancellation. Corrections are keyed by source coordinates in the current roster `IndexingJob.resultJson.rowCorrections`; raw tables and raw preview row JSON are not changed. Mapping recomputation reuses corrections; a newly uploaded file gets a new job pointer and does not inherit them.
 - Correction, mapping, replacement, cancellation, and confirmation serialize through a row lock on `DecisionImport`. Confirmation selects persisted effective preview rows only after obtaining that lock, so it cannot confirm a stale row set during a correction. Corrections/reverts recompute required-field warnings and duplicates server-side; audit metadata contains source coordinates and changed field names, not student values.
 - DecisionImport processing labels and user-facing failure text are provider-neutral. Corrections wait until the current roster job reaches `completed`, preventing the worker's final telemetry write from overwriting a new correction overlay. Failure telemetry from the shared extraction core is retained in the existing job JSON with provider, use case, model, pseudonymous entity reference, request ID, latency, usage, attempts, retry count, and safe error code. Failed stale jobs cannot update the current import state.
-- Focused migration checks on 2026-09-29: 8 files / 27 tests passed; `npm run build` passed; `npm run lint` had zero errors and the existing 33 `no-explicit-any` warnings. No schema or migration changed, and no production database was accessed. Event Registry PDF/XLSX extraction, Event row correction, worker concurrency/recovery, chatbot migration, evaluation fixtures/metrics, and legacy placeholder retirement are still pending in later branches.
+- At this historical checkpoint, Event Registry PDF/XLSX extraction, Event row correction, worker concurrency/recovery, chatbot migration, evaluation fixtures/metrics, and legacy placeholder retirement were pending; subsequent branch notes below record their completion.
 - Event Registry migration on `backend/openai-event-registry`: PDF rosters now use the shared OpenAI Responses extractor with the strict `event_roster_table` schema and generic filename; CSV/XLSX remain on the shared local table reader. Upload and processor accept only matching PDF/CSV/XLSX extensions and MIME types; legacy `.xls` and images are rejected, and extraction failures never persist preview rows. `IndexingJob.resultJson.sourceRows` remains the immutable extraction snapshot; canonical row edits live separately in `rowCorrections`, rebuild the effective preview and quality, and are scoped to a specific event/file before confirmation. Confirmation locks EventRegistry then EventFile and consumes the current effective overlay. Audit events contain row number/field names or safe quality counts, not roster values. Added no schema or migration. Focused Event/roster regressions pass 8 files / 33 tests and backend build passes; lint retains the existing 33 warnings. No database or production service was contacted.
 - Worker hardening on `backend/job-worker-hardening`: `JobsRepository` claims up to `JOB_WORKER_CONCURRENCY` (default 3, validated maximum 10) in one PostgreSQL `UPDATE ... FOR UPDATE SKIP LOCKED` statement. Retryable errors requeue only before `JOB_WORKER_MAX_ATTEMPTS` (default 4), with exponential backoff capped by configuration; stale processing leases are recovered and permanently failed at the attempt limit. Signed object downloads have a 30-second default timeout, and shutdown drains the active job/mail tick before disconnecting Prisma. Database claim/recovery integration coverage is gated on an explicitly designated local disposable `WORKER_TEST_DATABASE_URL`; it was skipped because none was supplied. Worker unit regressions pass 17 tests; build passes; lint retains the existing 33 warnings. No migration or database access was made.
+
+### Backend AI/OCR Consolidation — Final Runtime Status (2026-09-29)
+
+- Document extraction uses the shared OpenAI Responses core with per-use-case strict schemas, server-side validation, bounded timeout/retry behavior, safe provider error mapping, `store=false` by default, and HMAC-pseudonymous entity references. Evidence retains the explicit `OPENAI_STORE_RESPONSES` override; Award roster, DecisionImport metadata/roster, and Event roster use their dedicated model settings. All six configured OpenAI model variables default to `gpt-6-luna`.
+- Award, DecisionImport, and Event PDF flows and DecisionImport supported image flow use OpenAI. CSV/XLSX remain local deterministic parsing and do not invoke OpenAI. Event keeps its existing PDF/CSV/XLSX contract and rejects unsupported formats. No extraction result creates an official recipient, participant, criterion decision, eligibility result, or final application outcome without the existing human confirmation/review path.
+- Raw extraction rows remain immutable. Award and Event overlays are held in their existing job JSON; DecisionImport corrections are stored separately from raw preview/table data. Mapping and confirmation recompute server-validated effective rows; replacement input does not inherit stale corrections. No schema or migration was added.
+- Chatbot `/api/chatbot/message` and `/stream` preserve their response contract. OpenAI supplies answer text; deterministic backend tools, actions, permissions, workflow state, and official decisions stay server-side. Dashboard/student assistants likewise narrate backend-computed facts only. Provider failures fall back deterministically.
+- Worker processing uses bounded atomic batch claims, capped concurrency, retry/backoff, stale-lease recovery, storage-download timeout, and graceful shutdown. Safe OpenAI telemetry records use case, model, prompt version, request ID, HMAC entity reference, latency, token counts, attempts, retry count, outcome, and safe error code in logs or existing job JSON.
+- Retired runtime surfaces: the unconsumed AI placeholder route, backend SmartUX placeholder routes, internal SmartReader test routes, SmartReader/VNPT document clients, VNPT Smartbot outbound clients, Gemini runtime, and direct SmartReader/Smartbot live-smoke scripts. The real chatbot routes, token-protected incoming Smartbot webhook compatibility API, SmartReader historical DB rows/audit data and shape/redaction helpers, and the separate frontend analytics SDK remain. Repository search found no consumer for the removed backend placeholders; `tests/unit/retired-ai-routes.test.ts` protects the 404 behavior while confirming the actual chatbot API remains mounted.
+- `npm run eval:ai` scores the checked-in synthetic fixture offline. Its provenance explicitly says predictions are synthetic and not model output; missing real latency/token observations stay null. `npm run smoke:openai` skips unless `OPENAI_LIVE_SMOKE=true`; it was not opted in, so no paid OpenAI request was made.
+- No eligibility, award-confirmation, application-submission, five-criteria, review, supplement, resolution, finalization, deadline, or lifecycle behavior was changed. No database was connected, no migration was added/applied, and no production data was touched during the consolidation.

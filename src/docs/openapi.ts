@@ -38,7 +38,6 @@ export const openApiDocument = {
     { name: 'Notifications' },
     { name: 'Audit' },
     { name: 'AI' },
-    { name: 'SmartUX' },
     { name: 'Exports' },
   ],
   components: {
@@ -1795,7 +1794,6 @@ export const openApiDocument = {
         responses: { '200': jsonResponse('Normalized chatbot response') },
       },
     },
-    '/api/smartux/events': placeholderPath('SmartUX', 'Create SmartUX event placeholder'),
     '/api/exports/applications': placeholderPath('Exports', 'Export applications placeholder'),
   },
 };

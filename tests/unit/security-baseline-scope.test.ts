@@ -14,6 +14,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
   application: { findUnique: vi.fn() },
+  eventRegistry: { findUnique: vi.fn() },
+  eventFile: { findFirst: vi.fn() },
+  eventParticipant: { deleteMany: vi.fn(), upsert: vi.fn() },
   evidence: { findMany: vi.fn() },
   reviewTask: {
     findMany: vi.fn(),
@@ -342,21 +345,21 @@ describe('security baseline workspace boundaries', () => {
   });
 
   it('rejects an event file belonging to another event before loading its roster job', async () => {
-    const repository = {
-      findById: vi.fn().mockResolvedValue({
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      eventRegistry: { findUnique: vi.fn().mockResolvedValue({
         id: 'event-a',
         workspaceId: workspaceA,
         status: EventStatus.active,
         convertedValue: 1,
-      }),
-      findEventFile: vi.fn().mockResolvedValue({
-        id: 'event-file-b',
-        eventId: 'event-b',
-        fileId: 'file-b',
-      }),
-      findLatestCompletedRosterJob: vi.fn(),
+      }) },
+      eventFile: { findFirst: vi.fn().mockResolvedValue(null) },
+      eventParticipant: { deleteMany: vi.fn(), upsert: vi.fn() },
     };
-    const service = new EventRegistryService(repository as never, {} as never, {} as never);
+    prismaMock.$transaction.mockImplementation(
+      ((callback: (transaction: unknown) => Promise<unknown>) => callback(tx)) as never,
+    );
+    const service = new EventRegistryService({} as never, {} as never, {} as never);
 
     await expect(
       service.confirmIndex(user(Role.manager), 'event-a', {
@@ -365,7 +368,11 @@ describe('security baseline workspace boundaries', () => {
       } as never),
     ).rejects.toMatchObject({ code: ErrorCodes.EVENT_FILE_NOT_FOUND });
 
-    expect(repository.findLatestCompletedRosterJob).not.toHaveBeenCalled();
+    expect(tx.eventFile.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'event-file-b', eventId: 'event-a' } }),
+    );
+    expect(tx.eventParticipant.deleteMany).not.toHaveBeenCalled();
+    expect(tx.eventParticipant.upsert).not.toHaveBeenCalled();
   });
 
   it('filters automatic-assignment candidates to the task workspace', async () => {

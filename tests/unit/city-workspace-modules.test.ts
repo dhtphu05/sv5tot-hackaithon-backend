@@ -152,15 +152,22 @@ describe('City staff Event Registry route roles', () => {
     expect(repository.findLatestEventFile).not.toHaveBeenCalled();
   });
 
-  it('rejects a mismatched confirm-index file before participant deletion or upsert', async () => {
+  it('rejects a mismatched confirm-index file in the locked transaction before participant mutation', async () => {
     const repository = {
       findById: vi.fn().mockResolvedValue({ id: 'event-1', workspaceId: cityId }),
-      findEventFile: vi.fn().mockResolvedValue({
-        id: 'foreign-event-file',
-        eventId: 'event-2',
-      }),
     };
     vi.mocked(prisma.$transaction).mockClear();
+    const tx = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      eventRegistry: {
+        findUnique: vi.fn().mockResolvedValue({ id: 'event-1', workspaceId: cityId }),
+      },
+      eventFile: { findFirst: vi.fn().mockResolvedValue(null) },
+      eventParticipant: { deleteMany: vi.fn(), upsert: vi.fn() },
+    };
+    vi.mocked(prisma.$transaction).mockImplementation(
+      ((callback: (transaction: unknown) => Promise<unknown>) => callback(tx)) as never,
+    );
     const service = new EventRegistryService(repository as never, {} as never, {} as never);
 
     await expect(
@@ -169,7 +176,11 @@ describe('City staff Event Registry route roles', () => {
       } as never),
     ).rejects.toMatchObject({ statusCode: 404 });
 
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(tx.eventFile.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'foreign-event-file', eventId: 'event-1' } }),
+    );
+    expect(tx.eventParticipant.deleteMany).not.toHaveBeenCalled();
+    expect(tx.eventParticipant.upsert).not.toHaveBeenCalled();
   });
 });
 

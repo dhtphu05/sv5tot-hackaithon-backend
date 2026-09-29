@@ -11,7 +11,6 @@ import { notFoundMiddleware } from './middlewares/not-found.middleware';
 import { performanceLogMiddleware } from './middlewares/performance-log.middleware';
 import { rateLimitMiddleware } from './middlewares/rate-limit.middleware';
 import { requestIdMiddleware } from './middlewares/request-id.middleware';
-import { aiRouter } from './modules/ai/ai.routes';
 import { applicationsRouter } from './modules/applications/applications.routes';
 import { analyticsRouter } from './modules/analytics/city-analytics.routes';
 import { auditRouter } from './modules/audit/audit.routes';
@@ -40,9 +39,7 @@ import { precheckRouter } from './modules/precheck/precheck.routes';
 import { resolutionRouter } from './modules/resolution/resolution.routes';
 import { reviewRouter } from './modules/review/review.routes';
 import { smartbotHooksRouter } from './modules/smartbot-hooks/smartbot-hooks.routes';
-import { smartReaderRouter } from './modules/smartreader/smartreader.routes';
 import { studentAssistantRouter } from './modules/student-assistant/student-assistant.routes';
-import { smartUxRouter } from './modules/smartux/smartux.routes';
 import { adminUsersRouter, meRouter, usersRouter } from './modules/users/users.routes';
 import { versionRouter } from './modules/version/version.routes';
 import { adminWorkspacesRouter, workspacesRouter } from './modules/workspaces/workspaces.routes';
@@ -103,9 +100,6 @@ export function createApp() {
   app.use('/api/chatbot', chatbotRouter);
   app.use('/api/smartbot', smartbotHooksRouter);
   app.use('/api/mail', mailRouter);
-  app.use('/api', aiRouter);
-  app.use('/api/internal/smartreader', smartReaderRouter);
-  app.use('/api/smartux', smartUxRouter);
   app.use('/api/exports', exportsRouter);
 
   app.use(notFoundMiddleware);
