@@ -184,6 +184,7 @@ export class ApplicationsService {
   ) {
     const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
+    assertApplicationNotCancelled(application);
     if (user.role === Role.student) {
       throw new AppError(
         403,
@@ -191,7 +192,6 @@ export class ApplicationsService {
         'Students cannot change the application review level',
       );
     }
-    assertApplicationNotCancelled(application);
     assertApplicationEditable(application);
 
     await prisma.$transaction(async (tx) => {
@@ -241,6 +241,7 @@ export class ApplicationsService {
   async autosaveDraft(user: AuthenticatedUser, applicationId: string, input: AutosaveDraftInput) {
     const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
+    assertApplicationNotCancelled(application);
     if (user.role === Role.student && input.targetLevel !== undefined) {
       throw new AppError(
         403,
@@ -248,7 +249,6 @@ export class ApplicationsService {
         'Students cannot change the application review level',
       );
     }
-    assertApplicationNotCancelled(application);
     assertApplicationEditable(application);
 
     const newVersion = application.currentDraftVersion + 1;
