@@ -80,7 +80,7 @@ function buildService() {
       institutions: [{ id: workspaceId, code: 'DUT', name: 'DUT', shortName: 'DUT', aliases: [] }],
       users: [{ id: 'student-1', studentCode: '00123456', workspaceId }],
     }),
-    updatePreview: vi.fn(),
+    updatePreview: vi.fn().mockResolvedValue(job().resultJson),
     confirm: vi.fn().mockResolvedValue({ recipientCount: 1 }),
     listRecipients: vi.fn().mockResolvedValue({ items: [{ id: 'recipient-1', studentCode: '00123456', matchStatus: 'MATCHED' }], total: 1 }),
   };
@@ -156,6 +156,7 @@ describe('AwardRosterService', () => {
     repository.findLatestJob.mockResolvedValueOnce(job({
       resultJson: {
         ...job().resultJson,
+        sourceRows: Array.from({ length: 25 }, (_, index) => [`0000${index}`, `Student ${index}`]),
         rows: Array.from({ length: 25 }, (_, index) => ({
           sourceRow: index + 2,
           studentCode: `0000${index}`,
@@ -173,6 +174,48 @@ describe('AwardRosterService', () => {
     expect(JSON.stringify(result)).not.toContain('private-user-id');
   });
 
+  it('filters the full preview before pagination and preserves a global validation summary', async () => {
+    const { service, repository } = buildService();
+    repository.findLatestJob.mockResolvedValueOnce(job({
+      resultJson: {
+        ...job().resultJson,
+        sourceRows: [['00000001', 'One'], ['00000002', 'Two'], ['00000003', 'Three']],
+        rowCorrections: { '4': { fullName: 'Two corrected' } },
+      },
+    }) as never);
+
+    const result = await service.getPreview(uploader(), 'decision-1', {
+      page: 1, limit: 1, filter: 'corrected',
+    });
+
+    expect(result.items).toMatchObject([{ sourceRow: 4, fullName: 'Two corrected', isCorrected: true }]);
+    expect(result.validationSummary.total).toBe(3);
+    expect(result.pagination).toMatchObject({ total: 1, totalPages: 1 });
+  });
+
+  it('keeps unmatched rows out of the attention filter while including duplicate and invalid rows', async () => {
+    const { service, repository } = buildService();
+    repository.findLatestJob.mockResolvedValueOnce(job({
+      resultJson: {
+        ...job().resultJson,
+        sourceRows: [
+          ['00123456', 'Student One'],
+          ['00123456', 'Student One Duplicate'],
+          ['', 'Missing Code'],
+          ['00999999', 'Unmatched Student'],
+        ],
+      },
+    }) as never);
+
+    const result = await service.getPreview(uploader(), 'decision-1', {
+      page: 1, limit: 20, filter: 'attention',
+    });
+
+    expect(result.items.map((row) => row.sourceRow)).toEqual([2, 3, 4]);
+    expect(result.validationSummary).toMatchObject({ total: 4, duplicate: 2, invalid: 1, unmatched: 2 });
+    expect(result.pagination.total).toBe(3);
+  });
+
   it('recomputes mapping and validation from raw rows before updating the preview', async () => {
     const { service, repository } = buildService();
     repository.findLatestJob.mockResolvedValueOnce(job() as never);
@@ -188,10 +231,47 @@ describe('AwardRosterService', () => {
         decisionId: 'decision-1',
         issuerWorkspaceId: workspaceId,
         rosterFileId: 'file-current',
-        resultJson: expect.objectContaining({ summary: expect.objectContaining({ valid: 1, matched: 1 }) }),
+        awardLevel: AwardLevel.SCHOOL,
+        change: { type: 'mapping', mapping: { studentCode: 'MSSV', fullName: 'Họ và tên' } },
       }),
     );
     expect(result.validationSummary.valid).toBe(1);
+  });
+
+  it('updates a scoped draft row through the shared preview transaction', async () => {
+    const { service, repository } = buildService();
+    repository.findLatestJob.mockResolvedValueOnce(job() as never);
+
+    await service.updateRow(uploader(), 'decision-1', 2, { studentCode: '00123457' });
+
+    expect(repository.updatePreview).toHaveBeenCalledWith(expect.objectContaining({
+      decisionId: 'decision-1', issuerWorkspaceId: workspaceId, rosterFileId: 'file-current',
+      awardLevel: AwardLevel.SCHOOL,
+      change: { type: 'correct', sourceRow: 2, correction: { studentCode: '00123457' }, actor: uploader() },
+    }));
+  });
+
+  it('rejects row corrections for confirmed decisions before touching the preview job', async () => {
+    const { service, repository } = buildService();
+    repository.findDecision.mockResolvedValue(decision({ status: AwardDecisionStatus.CONFIRMED }) as never);
+
+    await expect(service.updateRow(uploader(), 'decision-1', 2, { fullName: 'Corrected' }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    expect(repository.findLatestJob).not.toHaveBeenCalled();
+    expect(repository.updatePreview).not.toHaveBeenCalled();
+  });
+
+  it('reverts row corrections through the same scoped preview transaction', async () => {
+    const { service, repository } = buildService();
+    repository.findLatestJob.mockResolvedValueOnce(job() as never);
+
+    await service.revertRowCorrection(uploader(), 'decision-1', 2);
+
+    expect(repository.updatePreview).toHaveBeenCalledWith(expect.objectContaining({
+      decisionId: 'decision-1', issuerWorkspaceId: workspaceId, rosterFileId: 'file-current',
+      awardLevel: AwardLevel.SCHOOL,
+      change: { type: 'revert', sourceRow: 2, actor: uploader() },
+    }));
   });
 
   it('rejects invalid mappings before saving a modified preview', async () => {
@@ -215,16 +295,42 @@ describe('AwardRosterService', () => {
     await expect(service.getPreview(otherUploader, 'decision-b', { page: 1, limit: 20 })).rejects.toMatchObject({ statusCode: 404 });
     await expect(service.updateMapping(otherUploader, 'decision-b', { studentCode: 'MSSV', fullName: 'Họ và tên' }))
       .rejects.toMatchObject({ statusCode: 404 });
+    await expect(service.updateRow(otherUploader, 'decision-b', 2, { fullName: 'Không được sửa' }))
+      .rejects.toMatchObject({ statusCode: 404 });
     await expect(service.confirm(otherUploader, 'decision-b')).rejects.toMatchObject({ statusCode: 404 });
     await expect(service.listRecipients(otherUploader, 'decision-b', { page: 1, limit: 20 }))
       .rejects.toMatchObject({ statusCode: 404 });
 
-    expect(repository.findDecision).toHaveBeenCalledTimes(6);
+    expect(repository.findDecision).toHaveBeenCalledTimes(7);
     expect(repository.findDecision).toHaveBeenCalledWith('decision-b', otherWorkspaceId);
     expect(repository.createJob).not.toHaveBeenCalled();
     expect(repository.updatePreview).not.toHaveBeenCalled();
     expect(repository.confirm).not.toHaveBeenCalled();
     expect(repository.listRecipients).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-uploader, non-admin roles before looking up a decision', async () => {
+    const { service, repository } = buildService();
+    const student = {
+      id: 'student-1',
+      role: Role.student,
+      workspaceId,
+      email: 'student@example.test',
+      fullName: 'Student',
+      studentCode: null,
+      className: null,
+      faculty: null,
+      avatarUrl: null,
+      workspace: { id: workspaceId, type: WorkspaceType.SCHOOL },
+    };
+
+    await expect(service.updateRow(student as never, 'decision-1', 2, {
+      studentCode: '00123457',
+    })).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(repository.findDecision).not.toHaveBeenCalled();
+    expect(repository.findLatestJob).not.toHaveBeenCalled();
+    expect(repository.updatePreview).not.toHaveBeenCalled();
   });
 
   it('confirms only through the scoped repository transaction', async () => {

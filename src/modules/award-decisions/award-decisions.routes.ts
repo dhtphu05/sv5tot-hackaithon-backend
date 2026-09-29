@@ -16,6 +16,8 @@ import {
   listAwardDecisions,
   processAwardRoster,
   updateAwardRosterMapping,
+  updateAwardRosterRow,
+  revertAwardRosterRowCorrection,
   updateAwardDecision,
   unarchiveAwardDecision,
   uploadAwardDecisionFile,
@@ -24,6 +26,8 @@ import {
   createAwardDecisionSchema,
   awardRosterMappingSchema,
   awardRosterPageQuerySchema,
+  awardRosterRowCorrectionSchema,
+  awardRosterRowParamSchema,
   listAwardDecisionsQuerySchema,
   updateAwardDecisionSchema,
 } from './award-decisions.validation';
@@ -53,6 +57,16 @@ awardDecisionsRouter.patch(
   '/:id/roster-mapping',
   validate({ body: awardRosterMappingSchema }),
   asyncHandler(updateAwardRosterMapping),
+);
+awardDecisionsRouter.patch(
+  '/:id/roster-preview/:sourceRow',
+  validate({ params: awardRosterRowParamSchema, body: awardRosterRowCorrectionSchema }),
+  asyncHandler(updateAwardRosterRow),
+);
+awardDecisionsRouter.delete(
+  '/:id/roster-preview/:sourceRow/correction',
+  validate({ params: awardRosterRowParamSchema }),
+  asyncHandler(revertAwardRosterRowCorrection),
 );
 awardDecisionsRouter.post('/:id/confirm', asyncHandler(confirmAwardDecision));
 awardDecisionsRouter.post('/:id/archive', asyncHandler(archiveAwardDecision));

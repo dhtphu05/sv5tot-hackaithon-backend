@@ -36,6 +36,7 @@ function preview(input: {
   issuer: typeof schoolA | { id: string; code: string; name: string; shortName: string; aliases: string[] };
   institutions: Array<typeof schoolA>;
   users: Array<{ id: string; studentCode: string; workspaceId: string }>;
+  rowCorrections?: Record<string, Partial<{ studentCode: string; fullName: string; className: string | null; institutionText: string | null }>>;
 }) {
   const { awardLevel, issuer, institutions, users, ...data } = input;
   return buildAwardRosterPreview({
@@ -197,5 +198,70 @@ describe('Award roster mapping and validation', () => {
     });
 
     expect(rows.rows[0]).toMatchObject({ status: 'CONFLICT', institutionWorkspaceId: null });
+  });
+
+  it('applies human corrections over raw values and recalculates duplicates across all rows', () => {
+    const rows = preview({
+      columns: ['MSSV', 'Họ và tên'],
+      sourceRows: [['00123456', 'Nguyễn An'], ['00123456', 'Trần Bình']],
+      mapping: { studentCode: 'MSSV', fullName: 'Họ và tên' },
+      awardLevel: AwardLevel.SCHOOL,
+      issuer: schoolA,
+      institutions: [schoolA],
+      users: [],
+      rowCorrections: { '3': { studentCode: '00123457' } },
+    });
+
+    expect(rows.rows.map((row) => row.status)).toEqual(['VALID', 'VALID']);
+    expect(rows.summary).toMatchObject({ valid: 2, duplicate: 0 });
+    expect(rows.rows[1]).toMatchObject({
+      studentCode: '00123457',
+      original: { studentCode: '00123456', fullName: 'Trần Bình' },
+      isCorrected: true,
+    });
+  });
+
+  it('allows a human text correction to repair numeric MSSV without changing raw extraction', () => {
+    const rows = preview({
+      columns: ['MSSV', 'Họ và tên'],
+      sourceRows: [[123456, 'Trần Bình']],
+      mapping: { studentCode: 'MSSV', fullName: 'Họ và tên' },
+      awardLevel: AwardLevel.SCHOOL,
+      issuer: schoolA,
+      institutions: [schoolA],
+      users: [{ id: 'student-b', studentCode: '00123456', workspaceId: schoolA.id }],
+      rowCorrections: { '2': { studentCode: '00123456', fullName: 'Trần Bình' } },
+    });
+
+    expect(rows.rows[0]).toMatchObject({
+      studentCode: '00123456',
+      status: 'VALID',
+      matchStatus: AwardRecipientMatchStatus.MATCHED,
+      matchedUserId: 'student-b',
+      original: { studentCode: '123456' },
+      isCorrected: true,
+    });
+  });
+
+  it('re-resolves UDN institution and account match after an institution correction', () => {
+    const rows = preview({
+      columns: ['MSSV', 'Họ và tên', 'Trường'],
+      sourceRows: [['00123456', 'Nguyễn An', 'Unknown']],
+      mapping: { studentCode: 'MSSV', fullName: 'Họ và tên', institution: 'Trường' },
+      awardLevel: AwardLevel.UNIVERSITY_SYSTEM,
+      issuer: { id: 'udn', code: 'UDN', name: 'Đại học Đà Nẵng', shortName: 'UDN', aliases: [] },
+      institutions: [schoolA, schoolB],
+      users: [{ id: 'student-b', studentCode: '00123456', workspaceId: schoolB.id }],
+      rowCorrections: { '2': { institutionText: 'DUE' } },
+    });
+
+    expect(rows.rows[0]).toMatchObject({
+      status: 'VALID',
+      institutionText: 'DUE',
+      institutionWorkspaceId: schoolB.id,
+      matchStatus: AwardRecipientMatchStatus.MATCHED,
+      matchedUserId: 'student-b',
+      original: { institutionText: 'Unknown' },
+    });
   });
 });

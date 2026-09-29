@@ -66,6 +66,20 @@ export async function updateAwardRosterMapping(req: Request, res: Response): Pro
   sendSuccess(res, data, { requestId: req.requestId, pagination: data.pagination });
 }
 
+export async function updateAwardRosterRow(req: Request, res: Response): Promise<void> {
+  const data = await rosterService.updateRow(
+    req.user!, String(req.params.id), Number(req.params.sourceRow), req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId, pagination: data.pagination });
+}
+
+export async function revertAwardRosterRowCorrection(req: Request, res: Response): Promise<void> {
+  const data = await rosterService.revertRowCorrection(
+    req.user!, String(req.params.id), Number(req.params.sourceRow),
+  );
+  sendSuccess(res, data, { requestId: req.requestId, pagination: data.pagination });
+}
+
 export async function confirmAwardDecision(req: Request, res: Response): Promise<void> {
   const data = await rosterService.confirm(req.user!, String(req.params.id));
   sendSuccess(res, data, { requestId: req.requestId });

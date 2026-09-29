@@ -11,7 +11,11 @@ import { AwardRosterRepository } from '../../src/modules/award-decisions/award-r
 
 const workspaceId = '11111111-1111-4111-8111-111111111111';
 
-function buildTransaction(options: { duplicate?: boolean; failRecipientInsert?: boolean } = {}) {
+function buildTransaction(options: {
+  duplicate?: boolean;
+  failRecipientInsert?: boolean;
+  rowCorrections?: Record<string, Record<string, unknown>>;
+} = {}) {
   const state = {
     status: AwardDecisionStatus.DRAFT as AwardDecisionStatus,
     recipients: [] as Array<Record<string, unknown>>,
@@ -25,7 +29,7 @@ function buildTransaction(options: { duplicate?: boolean; failRecipientInsert?: 
     status: state.status,
     rosterFile: { id: 'file-1', workspaceId },
   });
-  const job = {
+  const job: Record<string, unknown> = {
     id: 'internal-job-id',
     targetId: 'decision-1',
     workspaceId,
@@ -38,7 +42,9 @@ function buildTransaction(options: { duplicate?: boolean; failRecipientInsert?: 
       sourceRows: options.duplicate
         ? [['00000001', 'Nguyễn An'], ['00000001', 'Nguyễn An']]
         : [['00000001', 'Nguyễn An']],
+      suggestedMapping: { studentCode: 'MSSV', fullName: 'Họ và tên' },
       mapping: { studentCode: 'MSSV', fullName: 'Họ và tên' },
+      ...(options.rowCorrections ? { rowCorrections: options.rowCorrections } : {}),
     },
   };
   const tx = {
@@ -51,7 +57,13 @@ function buildTransaction(options: { duplicate?: boolean; failRecipientInsert?: 
         return { count: 1 };
       }),
     },
-    indexingJob: { findFirst: vi.fn().mockResolvedValue(job) },
+    indexingJob: {
+      findFirst: vi.fn().mockResolvedValue(job),
+      updateMany: vi.fn(async ({ data }: { data: { resultJson: unknown } }) => {
+        job.resultJson = data.resultJson;
+        return { count: 1 };
+      }),
+    },
     workspace: {
       findUnique: vi.fn().mockResolvedValue({
         id: workspaceId,
@@ -182,8 +194,93 @@ describe('AwardRosterRepository confirmation transaction', () => {
       decisionId: 'decision-1',
       issuerWorkspaceId: workspaceId,
       rosterFileId: 'file-1',
-      resultJson: {},
+      awardLevel: AwardLevel.SCHOOL,
+      change: { type: 'mapping', mapping: { studentCode: 'MSSV', fullName: 'Họ và tên' } },
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(tx.indexingJob.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('stores correction overlays without mutating raw rows and audits only the corrected row fields', async () => {
+    const { repository, state } = buildTransaction({ duplicate: true });
+
+    const updated = await repository.updatePreview({
+      jobId: 'internal-job-id',
+      decisionId: 'decision-1',
+      issuerWorkspaceId: workspaceId,
+      rosterFileId: 'file-1',
+      awardLevel: AwardLevel.SCHOOL,
+      change: {
+        type: 'correct',
+        sourceRow: 3,
+        correction: { studentCode: '00000002', fullName: 'Trần Bình' },
+        actor,
+      },
+    });
+
+    expect(updated.sourceRows).toEqual([['00000001', 'Nguyễn An'], ['00000001', 'Nguyễn An']]);
+    expect(updated.rowCorrections).toEqual({ '3': { studentCode: '00000002', fullName: 'Trần Bình' } });
+    expect(updated.rows.map((row) => row.status)).toEqual(['VALID', 'VALID']);
+    expect(updated.summary).toMatchObject({ valid: 2, duplicate: 0 });
+    expect(state.auditRows).toHaveLength(1);
+    expect(state.auditRows[0]).toMatchObject({
+      action: 'AWARD_ROSTER_ROW_CORRECTED',
+      targetType: 'award_decision',
+      targetId: 'decision-1',
+      beforeStateJson: { sourceRow: 3, fields: { studentCode: '00000001', fullName: 'Nguyễn An' } },
+      afterStateJson: { sourceRow: 3, fields: { studentCode: '00000002', fullName: 'Trần Bình' } },
+    });
+    expect(JSON.stringify(state.auditRows)).not.toContain('sourceRows');
+  });
+
+  it('reverts a correction to raw effective values and records a bounded audit entry', async () => {
+    const { repository, state } = buildTransaction({
+      rowCorrections: { '2': { studentCode: '00000002', fullName: 'Nguyễn An sửa' } },
+    });
+
+    const updated = await repository.updatePreview({
+      jobId: 'internal-job-id',
+      decisionId: 'decision-1',
+      issuerWorkspaceId: workspaceId,
+      rosterFileId: 'file-1',
+      awardLevel: AwardLevel.SCHOOL,
+      change: { type: 'revert', sourceRow: 2, actor },
+    });
+
+    expect(updated.sourceRows).toEqual([['00000001', 'Nguyễn An']]);
+    expect(updated.rowCorrections).toBeUndefined();
+    expect(updated.rows[0]).toMatchObject({ studentCode: '00000001', fullName: 'Nguyễn An', isCorrected: false });
+    expect(state.auditRows[0]).toMatchObject({
+      action: 'AWARD_ROSTER_ROW_CORRECTION_REVERTED',
+      beforeStateJson: { sourceRow: 2, fields: { studentCode: '00000002', fullName: 'Nguyễn An sửa' } },
+      afterStateJson: { sourceRow: 2, fields: { studentCode: '00000001', fullName: 'Nguyễn An' } },
+    });
+  });
+
+  it('uses corrected values to create official recipients at confirmation', async () => {
+    const { repository, state } = buildTransaction({
+      rowCorrections: { '2': { studentCode: '00000002', fullName: 'Nguyễn An sửa' } },
+    });
+
+    await repository.confirm({ decisionId: 'decision-1', issuerWorkspaceId: workspaceId, actor });
+
+    expect(state.recipients).toMatchObject([{ studentCode: '00000002', fullName: 'Nguyễn An sửa' }]);
+  });
+
+  it('preserves row corrections when updating the column mapping', async () => {
+    const { repository } = buildTransaction({
+      rowCorrections: { '2': { studentCode: '00000002' } },
+    });
+
+    const updated = await repository.updatePreview({
+      jobId: 'internal-job-id',
+      decisionId: 'decision-1',
+      issuerWorkspaceId: workspaceId,
+      rosterFileId: 'file-1',
+      awardLevel: AwardLevel.SCHOOL,
+      change: { type: 'mapping', mapping: { studentCode: 'MSSV', fullName: 'Họ và tên' } },
+    });
+
+    expect(updated.rowCorrections).toEqual({ '2': { studentCode: '00000002' } });
+    expect(updated.rows[0].studentCode).toBe('00000002');
   });
 });

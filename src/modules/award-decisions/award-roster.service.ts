@@ -1,9 +1,9 @@
 import {
   AwardDecisionStatus,
+  AwardLevel,
   JobStatus,
   Role,
   WorkspaceType,
-  type Prisma,
 } from '@prisma/client';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
@@ -16,9 +16,14 @@ import {
   getAwardRosterFormat,
   validateAwardRosterMapping,
   type AwardRosterMapping,
+  type AwardRosterRowCorrection,
   type AwardRosterSourceRow,
 } from './award-roster.logic';
-import type { AwardRosterMappingInput, AwardRosterPageQuery } from './award-decisions.validation';
+import type {
+  AwardRosterMappingInput,
+  AwardRosterPageQuery,
+  AwardRosterRowCorrectionInput,
+} from './award-decisions.validation';
 
 export class AwardRosterService {
   constructor(
@@ -84,8 +89,13 @@ export class AwardRosterService {
 
   async getPreview(user: AuthenticatedUser, decisionId: string, query: AwardRosterPageQuery) {
     const decision = await this.getDecision(user, decisionId);
-    const result = await this.getCurrentPreview(decision.id, decision.issuerWorkspaceId, decision.rosterFileId);
-    const rows = result.rows;
+    const result = await this.getCurrentPreview(
+      decision.id,
+      decision.issuerWorkspaceId,
+      decision.rosterFileId,
+      decision.awardLevel,
+    );
+    const rows = filterPreviewRows(result.rows, query.filter);
     const start = (query.page - 1) * query.limit;
     return {
       status: 'preview_ready' as const,
@@ -111,27 +121,50 @@ export class AwardRosterService {
     if (!validateAwardRosterMapping(result.columns, mapping)) {
       throw new AppError(400, ErrorCodes.COLUMN_MAPPING_INVALID, 'Mapping must select existing roster columns');
     }
-    const context = await this.repository.getMappingContext(decision.issuerWorkspaceId, decision.awardLevel);
-    const preview = buildAwardRosterPreview({
-      columns: result.columns,
-      sourceRows: result.sourceRows,
-      mapping,
-      context,
-    });
-    const updated = { ...result, mapping, rows: preview.rows, summary: preview.summary };
-    await this.repository.updatePreview({
+    const updated = await this.repository.updatePreview({
       jobId: job.id,
       decisionId: decision.id,
       issuerWorkspaceId: decision.issuerWorkspaceId,
       rosterFileId: decision.rosterFileId!,
-      resultJson: updated as unknown as Prisma.InputJsonValue,
+      awardLevel: decision.awardLevel,
+      change: { type: 'mapping', mapping },
     });
-    return {
-      mapping,
-      validationSummary: preview.summary,
-      items: preview.rows.slice(0, 20).map(publicPreviewRow),
-      pagination: { page: 1, limit: 20, total: preview.rows.length, totalPages: Math.ceil(preview.rows.length / 20) },
-    };
+    return previewPage(updated, 1, 20);
+  }
+
+  async updateRow(
+    user: AuthenticatedUser,
+    decisionId: string,
+    sourceRow: number,
+    correction: AwardRosterRowCorrectionInput,
+  ) {
+    const decision = await this.getDecision(user, decisionId);
+    this.assertDraft(decision.status);
+    const job = await this.getCompletedCurrentJob(decision.id, decision.issuerWorkspaceId, decision.rosterFileId);
+    const updated = await this.repository.updatePreview({
+      jobId: job.id,
+      decisionId: decision.id,
+      issuerWorkspaceId: decision.issuerWorkspaceId,
+      rosterFileId: decision.rosterFileId!,
+      awardLevel: decision.awardLevel,
+      change: { type: 'correct', sourceRow, correction, actor: user },
+    });
+    return previewPage(updated, 1, 20);
+  }
+
+  async revertRowCorrection(user: AuthenticatedUser, decisionId: string, sourceRow: number) {
+    const decision = await this.getDecision(user, decisionId);
+    this.assertDraft(decision.status);
+    const job = await this.getCompletedCurrentJob(decision.id, decision.issuerWorkspaceId, decision.rosterFileId);
+    const updated = await this.repository.updatePreview({
+      jobId: job.id,
+      decisionId: decision.id,
+      issuerWorkspaceId: decision.issuerWorkspaceId,
+      rosterFileId: decision.rosterFileId!,
+      awardLevel: decision.awardLevel,
+      change: { type: 'revert', sourceRow, actor: user },
+    });
+    return previewPage(updated, 1, 20);
   }
 
   async confirm(user: AuthenticatedUser, decisionId: string) {
@@ -169,9 +202,23 @@ export class AwardRosterService {
     return decision;
   }
 
-  private async getCurrentPreview(decisionId: string, workspaceId: string, rosterFileId: string | null) {
+  private async getCurrentPreview(
+    decisionId: string,
+    workspaceId: string,
+    rosterFileId: string | null,
+    awardLevel: AwardLevel,
+  ) {
     const job = await this.getCompletedCurrentJob(decisionId, workspaceId, rosterFileId);
-    return asProcessingResult(job.resultJson);
+    const result = asProcessingResult(job.resultJson);
+    const context = await this.repository.getMappingContext(workspaceId, awardLevel);
+    const preview = buildAwardRosterPreview({
+      columns: result.columns,
+      sourceRows: result.sourceRows,
+      mapping: result.mapping,
+      context,
+      rowCorrections: result.rowCorrections,
+    });
+    return { ...result, rows: preview.rows, summary: preview.summary };
   }
 
   private async getCompletedCurrentJob(decisionId: string, workspaceId: string, rosterFileId: string | null) {
@@ -249,6 +296,7 @@ function asProcessingResult(value: unknown): {
   mapping: AwardRosterMapping;
   rows: Array<Record<string, unknown>>;
   summary: Record<string, number>;
+  rowCorrections?: Record<string, AwardRosterRowCorrection>;
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new AppError(409, ErrorCodes.CONFLICT, 'Roster preview is not ready');
@@ -266,6 +314,50 @@ function asProcessingResult(value: unknown): {
     throw new AppError(409, ErrorCodes.CONFLICT, 'Roster preview is not ready');
   }
   return result as ReturnType<typeof asProcessingResult>;
+}
+
+function previewPage(
+  result: {
+    mapping: AwardRosterMapping;
+    summary: Record<string, number>;
+    rows: Array<Record<string, unknown>>;
+  },
+  page: number,
+  limit: number,
+) {
+  const start = (page - 1) * limit;
+  return {
+    mapping: result.mapping,
+    validationSummary: result.summary,
+    items: result.rows.slice(start, start + limit).map(publicPreviewRow),
+    pagination: {
+      page,
+      limit,
+      total: result.rows.length,
+      totalPages: Math.ceil(result.rows.length / limit),
+    },
+  };
+}
+
+function filterPreviewRows(
+  rows: Array<Record<string, unknown>>,
+  filter: AwardRosterPageQuery['filter'],
+): Array<Record<string, unknown>> {
+  switch (filter) {
+    case 'attention':
+      return rows.filter((row) => ['INVALID', 'DUPLICATE', 'CONFLICT'].includes(String(row.status)));
+    case 'invalid':
+    case 'duplicate':
+    case 'conflict':
+      return rows.filter((row) => row.status === filter.toUpperCase());
+    case 'unmatched':
+    case 'matched':
+      return rows.filter((row) => row.matchStatus === filter.toUpperCase());
+    case 'corrected':
+      return rows.filter((row) => row.isCorrected === true);
+    default:
+      return rows;
+  }
 }
 
 function publicPreviewRow(row: Record<string, unknown>) {

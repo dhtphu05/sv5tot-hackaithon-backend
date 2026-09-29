@@ -69,10 +69,24 @@ export const awardRosterMappingSchema = z
 export const awardRosterPageQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
+  filter: z.enum(['all', 'attention', 'invalid', 'duplicate', 'conflict', 'unmatched', 'matched', 'corrected']).optional(),
 });
+
+export const awardRosterRowParamSchema = z.object({
+  id: z.string().min(1),
+  sourceRow: z.coerce.number().int().min(2),
+});
+
+export const awardRosterRowCorrectionSchema = z.object({
+  studentCode: z.string().trim().min(1).max(50).optional(),
+  fullName: z.string().trim().min(1).max(255).optional(),
+  className: z.string().trim().max(100).nullable().optional(),
+  institutionText: z.string().trim().max(300).nullable().optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, 'At least one row field must be corrected');
 
 export type ListAwardDecisionsQuery = z.infer<typeof listAwardDecisionsQuerySchema>;
 export type CreateAwardDecisionInput = z.infer<typeof createAwardDecisionSchema>;
 export type UpdateAwardDecisionInput = z.infer<typeof updateAwardDecisionSchema>;
 export type AwardRosterMappingInput = z.infer<typeof awardRosterMappingSchema>;
 export type AwardRosterPageQuery = z.infer<typeof awardRosterPageQuerySchema>;
+export type AwardRosterRowCorrectionInput = z.infer<typeof awardRosterRowCorrectionSchema>;

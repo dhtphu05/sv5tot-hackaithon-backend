@@ -26,6 +26,20 @@ export type AwardRosterSourceCell =
   | null;
 export type AwardRosterSourceRow = AwardRosterSourceCell[];
 
+export type AwardRosterRowCorrection = Partial<{
+  studentCode: string;
+  fullName: string;
+  className: string | null;
+  institutionText: string | null;
+}>;
+
+export type AwardRosterCanonicalFields = {
+  studentCode: string | null;
+  fullName: string | null;
+  className: string | null;
+  institutionText: string | null;
+};
+
 export type AwardRosterPreviewRow = {
   sourceRow: number;
   studentCode: string | null;
@@ -35,6 +49,8 @@ export type AwardRosterPreviewRow = {
   institutionWorkspaceId: string | null;
   matchStatus: AwardRecipientMatchStatus;
   matchedUserId: string | null;
+  original: AwardRosterCanonicalFields;
+  isCorrected: boolean;
   status: 'VALID' | 'INVALID' | 'DUPLICATE' | 'CONFLICT';
   errors: string[];
 };
@@ -109,10 +125,13 @@ export function buildAwardRosterPreview(input: {
   sourceRows: AwardRosterSourceRow[];
   mapping: AwardRosterMapping;
   context: AwardRosterMappingContext;
+  rowCorrections?: Record<string, AwardRosterRowCorrection>;
 }): AwardRosterPreview {
-  const rows = input.sourceRows
-    .filter((row) => row.some((cell) => cell !== null && String(cell).trim() !== ''))
-    .map((source, index) => buildRow(input, source, index + 2));
+  const rows = input.sourceRows.flatMap((source, index) =>
+    source.some((cell) => cell !== null && String(cell).trim() !== '')
+      ? [buildRow(input, source, index + 2)]
+      : [],
+  );
 
   const duplicateCounts = new Map<string, number>();
   for (const row of rows) {
@@ -145,20 +164,42 @@ function buildRow(
     columns: string[];
     mapping: AwardRosterMapping;
     context: AwardRosterMappingContext;
+    rowCorrections?: Record<string, AwardRosterRowCorrection>;
   },
   source: AwardRosterSourceRow,
   sourceRow: number,
 ): AwardRosterPreviewRow {
   const errors: string[] = [];
   const codeCell = valueAt(input.columns, source, input.mapping.studentCode);
-  const studentCode = typeof codeCell === 'string' ? clean(codeCell) : null;
-  const fullName = clean(valueAt(input.columns, source, input.mapping.fullName));
-  const className = clean(valueAt(input.columns, source, input.mapping.className));
-  const institutionText = clean(valueAt(input.columns, source, input.mapping.institution));
+  const original: AwardRosterCanonicalFields = {
+    studentCode: clean(codeCell),
+    fullName: clean(valueAt(input.columns, source, input.mapping.fullName)),
+    className: clean(valueAt(input.columns, source, input.mapping.className)),
+    institutionText: clean(valueAt(input.columns, source, input.mapping.institution)),
+  };
+  const correction = input.rowCorrections?.[String(sourceRow)];
+  const hasCorrection = (key: keyof AwardRosterRowCorrection) =>
+    Boolean(correction && Object.prototype.hasOwnProperty.call(correction, key));
+  const studentCode = hasCorrection('studentCode')
+    ? clean(correction?.studentCode)
+    : typeof codeCell === 'string'
+      ? original.studentCode
+      : null;
+  const fullName = hasCorrection('fullName') ? clean(correction?.fullName) : original.fullName;
+  const className = hasCorrection('className') ? clean(correction?.className) : original.className;
+  const institutionText = hasCorrection('institutionText')
+    ? clean(correction?.institutionText)
+    : original.institutionText;
 
-  if (codeCell === null || codeCell === undefined || (typeof codeCell === 'string' && !codeCell.trim())) {
+  const studentCodeIsNonText =
+    !hasCorrection('studentCode') &&
+    codeCell !== null &&
+    codeCell !== undefined &&
+    typeof codeCell !== 'string';
+  if (!studentCode && !studentCodeIsNonText) {
     errors.push('STUDENT_CODE_REQUIRED');
-  } else if (typeof codeCell !== 'string') {
+  }
+  if (studentCodeIsNonText) {
     errors.push('STUDENT_CODE_MUST_BE_TEXT');
   }
   if (!fullName) errors.push('FULL_NAME_REQUIRED');
@@ -192,6 +233,8 @@ function buildRow(
     institutionWorkspaceId,
     matchStatus,
     matchedUserId: matchedUser?.id ?? null,
+    original,
+    isCorrected: Boolean(correction && Object.keys(correction).length),
     status,
     errors,
   };

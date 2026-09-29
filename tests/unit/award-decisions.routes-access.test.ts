@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   create: vi.fn(),
   processRoster: vi.fn(),
+  updateRow: vi.fn(),
+  revertRowCorrection: vi.fn(),
   archive: vi.fn(),
   unarchive: vi.fn(),
 }));
@@ -110,6 +112,54 @@ describe('Award Decision and legacy import route roles', () => {
     expect(response.body.data).toEqual({ status: 'processing' });
     expect(JSON.stringify(response.body)).not.toContain('jobId');
     expect(mocks.processRoster).toHaveBeenCalledOnce();
+  });
+
+  it.each([Role.data_uploader, Role.admin])('allows %s to correct and revert a draft roster row', async (role) => {
+    mocks.updateRow.mockResolvedValue({ validationSummary: { total: 1, valid: 1 } });
+    mocks.revertRowCorrection.mockResolvedValue({ validationSummary: { total: 1, valid: 1 } });
+    const app = buildApp();
+
+    await request(app)
+      .patch('/api/award-decisions/decision-1/roster-preview/2')
+      .set('x-test-role', role)
+      .send({ studentCode: '00123456', fullName: 'Nguyễn An' })
+      .expect(200);
+    await request(app)
+      .delete('/api/award-decisions/decision-1/roster-preview/2/correction')
+      .set('x-test-role', role)
+      .expect(200);
+
+    expect(mocks.updateRow).toHaveBeenCalledWith(expect.anything(), 'decision-1', 2, {
+      studentCode: '00123456', fullName: 'Nguyễn An',
+    });
+    expect(mocks.revertRowCorrection).toHaveBeenCalledWith(expect.anything(), 'decision-1', 2);
+  });
+
+  it('rejects derived roster fields before calling the correction service', async () => {
+    await request(buildApp())
+      .patch('/api/award-decisions/decision-1/roster-preview/2')
+      .set('x-test-role', Role.data_uploader)
+      .send({ studentCode: '00123456', institutionWorkspaceId: 'school-id' })
+      .expect(400);
+    expect(mocks.updateRow).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid source row numbers before calling the correction service', async () => {
+    await request(buildApp())
+      .patch('/api/award-decisions/decision-1/roster-preview/0')
+      .set('x-test-role', Role.data_uploader)
+      .send({ studentCode: '00123456' })
+      .expect(400);
+    expect(mocks.updateRow).not.toHaveBeenCalled();
+  });
+
+  it.each([Role.student, Role.city_manager, Role.officer])('denies %s roster correction access', async (role) => {
+    await request(buildApp())
+      .patch('/api/award-decisions/decision-1/roster-preview/2')
+      .set('x-test-role', role)
+      .send({ fullName: 'Không được sửa' })
+      .expect(403);
+    expect(mocks.updateRow).not.toHaveBeenCalled();
   });
 
   it.each([

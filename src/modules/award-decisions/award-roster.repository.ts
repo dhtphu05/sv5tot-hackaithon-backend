@@ -1,5 +1,6 @@
 import {
   AwardDecisionStatus,
+  AwardLevel,
   JobStatus,
   JobType,
   Role,
@@ -15,9 +16,12 @@ import type { AuthenticatedUser } from '../../shared/types/auth';
 import { createApplicationAudit } from '../applications/application.helpers';
 import {
   buildAwardRosterPreview,
+  type AwardRosterCanonicalFields,
   type AwardRosterMapping,
   type AwardRosterMappingContext,
+  type AwardRosterRowCorrection,
   type AwardRosterSourceRow,
+  validateAwardRosterMapping,
 } from './award-roster.logic';
 
 const awardRosterInclude = {
@@ -106,9 +110,13 @@ export class AwardRosterRepository {
     decisionId: string;
     issuerWorkspaceId: string;
     rosterFileId: string;
-    resultJson: Prisma.InputJsonValue;
+    awardLevel: AwardLevel;
+    change:
+      | { type: 'mapping'; mapping: AwardRosterMapping }
+      | { type: 'correct'; sourceRow: number; correction: AwardRosterRowCorrection; actor: AuthenticatedUser }
+      | { type: 'revert'; sourceRow: number; actor: AuthenticatedUser };
   }) {
-    await this.db.$transaction(async (tx) => {
+    return this.db.$transaction(async (tx) => {
       // A no-op status update holds the decision row lock through the mapping write.
       const decisionLock = await tx.awardDecision.updateMany({
         where: {
@@ -131,11 +139,88 @@ export class AwardRosterRepository {
           jobType: JobType.award_roster_ingestion,
           status: JobStatus.completed,
         },
-        select: { inputJson: true },
+        select: { inputJson: true, resultJson: true },
       });
       if (asObject(job?.inputJson)?.rosterFileId !== input.rosterFileId) {
         throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster file changed before mapping update');
       }
+      const current = asProcessingResult(job?.resultJson);
+      if (!current || current.rosterFileId !== input.rosterFileId) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster preview is not available');
+      }
+
+      const context = await this.getMappingContext(input.issuerWorkspaceId, input.awardLevel, tx);
+      let mapping = current.mapping;
+      const rowCorrections = { ...(current.rowCorrections ?? {}) };
+      let audit: {
+        action: string;
+        sourceRow: number;
+        fields: Array<keyof AwardRosterCanonicalFields>;
+        before: AwardRosterCanonicalFields;
+        actor: AuthenticatedUser;
+      } | null = null;
+
+      if (input.change.type === 'mapping') {
+        if (!validateAwardRosterMapping(current.columns, input.change.mapping)) {
+          throw new AppError(400, ErrorCodes.COLUMN_MAPPING_INVALID, 'Mapping must select existing roster columns');
+        }
+        mapping = input.change.mapping;
+      } else {
+        const change = input.change;
+        const beforePreview = buildAwardRosterPreview({
+          columns: current.columns,
+          sourceRows: current.sourceRows,
+          mapping,
+          context,
+          rowCorrections,
+        });
+        const beforeRow = beforePreview.rows.find((row) => row.sourceRow === change.sourceRow);
+        if (!beforeRow) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Roster row not found');
+
+        if (change.type === 'correct') {
+          const fields = Object.keys(change.correction) as Array<keyof AwardRosterCanonicalFields>;
+          if (fields.length === 0) throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'At least one row field must be corrected');
+          const priorCorrection = rowCorrections[String(change.sourceRow)] ?? {};
+          rowCorrections[String(change.sourceRow)] = { ...priorCorrection, ...change.correction };
+          audit = {
+            action: 'AWARD_ROSTER_ROW_CORRECTED',
+            sourceRow: change.sourceRow,
+            fields,
+            before: beforeRow,
+            actor: change.actor,
+          };
+        } else {
+          const correction = rowCorrections[String(change.sourceRow)];
+          if (!correction || Object.keys(correction).length === 0) {
+            throw new AppError(409, ErrorCodes.CONFLICT, 'Roster row has no correction to revert');
+          }
+          const fields = Object.keys(correction) as Array<keyof AwardRosterCanonicalFields>;
+          delete rowCorrections[String(change.sourceRow)];
+          audit = {
+            action: 'AWARD_ROSTER_ROW_CORRECTION_REVERTED',
+            sourceRow: change.sourceRow,
+            fields,
+            before: beforeRow,
+            actor: change.actor,
+          };
+        }
+      }
+
+      const preview = buildAwardRosterPreview({
+        columns: current.columns,
+        sourceRows: current.sourceRows,
+        mapping,
+        context,
+        rowCorrections,
+      });
+      const { rowCorrections: _oldCorrections, ...withoutOldCorrections } = current;
+      const resultJson = {
+        ...withoutOldCorrections,
+        mapping,
+        ...(Object.keys(rowCorrections).length > 0 ? { rowCorrections } : {}),
+        rows: preview.rows,
+        summary: preview.summary,
+      } as unknown as Prisma.InputJsonValue;
 
       const updated = await tx.indexingJob.updateMany({
         where: {
@@ -145,11 +230,37 @@ export class AwardRosterRepository {
           jobType: JobType.award_roster_ingestion,
           status: JobStatus.completed,
         },
-        data: { resultJson: input.resultJson },
+        data: { resultJson },
       });
       if (updated.count !== 1) {
         throw new AppError(409, ErrorCodes.CONFLICT, 'Roster preview changed before mapping update');
       }
+
+      if (audit) {
+        const afterRow = preview.rows.find((row) => row.sourceRow === audit!.sourceRow)!;
+        const beforeFields = Object.fromEntries(audit.fields.map((field) => [field, audit!.before[field]]));
+        const afterFields = Object.fromEntries(audit.fields.map((field) => [field, afterRow[field]]));
+        await createApplicationAudit(tx, {
+          actorId: audit.actor.id,
+          actorRole: audit.actor.role,
+          workspaceId: input.issuerWorkspaceId,
+          action: audit.action,
+          targetType: 'award_decision',
+          targetId: input.decisionId,
+          beforeStateJson: { sourceRow: audit.sourceRow, fields: beforeFields } as Prisma.InputJsonValue,
+          afterStateJson: { sourceRow: audit.sourceRow, fields: afterFields } as Prisma.InputJsonValue,
+          metadataJson: { sourceRow: audit.sourceRow, changedFields: audit.fields } as Prisma.InputJsonValue,
+        });
+      }
+
+      return {
+        ...current,
+        rosterFileId: current.rosterFileId,
+        mapping,
+        ...(Object.keys(rowCorrections).length > 0 ? { rowCorrections } : { rowCorrections: undefined }),
+        rows: preview.rows,
+        summary: preview.summary,
+      };
     });
   }
 
@@ -258,6 +369,7 @@ export class AwardRosterRepository {
         sourceRows: result.sourceRows,
         mapping: result.mapping,
         context,
+        rowCorrections: result.rowCorrections,
       });
       if (preview.summary.total === 0 || preview.rows.some((row) => row.status !== 'VALID')) {
         throw new AppError(409, ErrorCodes.VALIDATION_ERROR, 'Every roster row must be valid before confirming', {
@@ -355,12 +467,15 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
-function asProcessingResult(value: unknown): {
+type StoredProcessingResult = Record<string, unknown> & {
   rosterFileId: string;
   columns: string[];
   sourceRows: AwardRosterSourceRow[];
   mapping: AwardRosterMapping;
-} | null {
+  rowCorrections?: Record<string, AwardRosterRowCorrection>;
+};
+
+function asProcessingResult(value: unknown): StoredProcessingResult | null {
   const result = asObject(value);
   if (
     !result ||
@@ -374,10 +489,33 @@ function asProcessingResult(value: unknown): {
   ) {
     return null;
   }
+  const rowCorrections = parseRowCorrections(result.rowCorrections);
   return {
+    ...result,
     rosterFileId: result.rosterFileId,
     columns: result.columns as string[],
     sourceRows: result.sourceRows as AwardRosterSourceRow[],
     mapping: result.mapping as AwardRosterMapping,
+    ...(rowCorrections ? { rowCorrections } : {}),
   };
+}
+
+function parseRowCorrections(value: unknown): Record<string, AwardRosterRowCorrection> | undefined {
+  const source = asObject(value);
+  if (!source) return undefined;
+  const parsed: Record<string, AwardRosterRowCorrection> = {};
+  for (const [sourceRow, value] of Object.entries(source)) {
+    if (!/^\d+$/.test(sourceRow) || Number(sourceRow) < 2) continue;
+    const fields = asObject(value);
+    if (!fields) continue;
+    const correction: AwardRosterRowCorrection = {};
+    if (typeof fields.studentCode === 'string') correction.studentCode = fields.studentCode;
+    if (typeof fields.fullName === 'string') correction.fullName = fields.fullName;
+    if (typeof fields.className === 'string' || fields.className === null) correction.className = fields.className;
+    if (typeof fields.institutionText === 'string' || fields.institutionText === null) {
+      correction.institutionText = fields.institutionText;
+    }
+    if (Object.keys(correction).length) parsed[sourceRow] = correction;
+  }
+  return Object.keys(parsed).length ? parsed : undefined;
 }
