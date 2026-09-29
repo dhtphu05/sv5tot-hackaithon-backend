@@ -20,6 +20,7 @@
     "create-admin": "tsx scripts/create-admin.ts",
     "smartreader:smoke": "tsx scripts/smoke-smartreader.ts",
     "smoke:openai": "tsx scripts/openai-smoke.ts",
+    "eval:ai": "tsx scripts/ai-eval.ts",
     "smoke:smartbot": "tsx scripts/smoke-smartbot.ts",
     "smoke:cloud-run": "tsx scripts/smoke-cloud-run-readiness.ts",
     "evidence:reanalyze-legacy": "tsx scripts/reanalyze-legacy-evidence.ts",

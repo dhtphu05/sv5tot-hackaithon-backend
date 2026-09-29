@@ -1,0 +1,53 @@
+{
+  "provenance": "synthetic_fixture_predictions_not_model_outputs",
+  "samples": [
+    {
+      "useCase": "evidence",
+      "expectedFields": {
+        "documentType": "certificate",
+        "studentCode": "SYN-0001"
+      },
+      "actualFields": {
+        "documentType": "certificate",
+        "studentCode": "SYN-0001"
+      },
+      "documentSuccess": true,
+      "retries": 0,
+      "humanCorrectedRows": 0,
+      "extractedRows": 0
+    },
+    {
+      "useCase": "award_roster",
+      "expectedFields": {
+        "schoolYear": "synthetic-season"
+      },
+      "actualFields": {
+        "schoolYear": "synthetic-season"
+      },
+      "expectedRows": [
+        {
+          "studentCode": "SYN-0002",
+          "fullName": "Synthetic Student A"
+        },
+        {
+          "studentCode": "SYN-0003",
+          "fullName": "Synthetic Student B"
+        }
+      ],
+      "actualRows": [
+        {
+          "studentCode": "SYN-0002",
+          "fullName": "Synthetic Student A"
+        },
+        {
+          "studentCode": "SYN-0003",
+          "fullName": "Synthetic Student B"
+        }
+      ],
+      "documentSuccess": true,
+      "retries": 0,
+      "humanCorrectedRows": 0,
+      "extractedRows": 2
+    }
+  ]
+}
