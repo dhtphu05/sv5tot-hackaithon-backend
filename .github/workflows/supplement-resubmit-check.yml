@@ -1,9 +1,9 @@
 name: Supplement resubmit check
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/canonical-supplement-resubmit
+      - main
 
 permissions:
   contents: read
