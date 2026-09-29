@@ -2,7 +2,23 @@ import type { User, Workspace } from '@prisma/client';
 
 export type WorkspaceSummary = Pick<Workspace, 'id' | 'code' | 'name' | 'shortName'>;
 
-type UserWithWorkspace = User & {
+type UserWithWorkspace = Pick<
+  User,
+  | 'id'
+  | 'workspaceId'
+  | 'fullName'
+  | 'email'
+  | 'phone'
+  | 'role'
+  | 'studentCode'
+  | 'className'
+  | 'faculty'
+  | 'avatarUrl'
+  | 'isActive'
+  | 'lastLoginAt'
+  | 'createdAt'
+  | 'updatedAt'
+> & {
   workspace?: WorkspaceSummary | null;
 };
 

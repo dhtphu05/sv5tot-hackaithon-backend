@@ -43,7 +43,7 @@ import { smartbotHooksRouter } from './modules/smartbot-hooks/smartbot-hooks.rou
 import { smartReaderRouter } from './modules/smartreader/smartreader.routes';
 import { studentAssistantRouter } from './modules/student-assistant/student-assistant.routes';
 import { smartUxRouter } from './modules/smartux/smartux.routes';
-import { meRouter, usersRouter } from './modules/users/users.routes';
+import { adminUsersRouter, meRouter, usersRouter } from './modules/users/users.routes';
 import { versionRouter } from './modules/version/version.routes';
 import { adminWorkspacesRouter, workspacesRouter } from './modules/workspaces/workspaces.routes';
 import { requirementResponsesRouter } from './modules/criteria-completion/criteria-completion.routes';
@@ -71,6 +71,7 @@ export function createApp() {
   app.use('/health', healthRouter);
   app.use('/api/version', versionRouter);
   app.use('/api/admin/workspaces', adminWorkspacesRouter);
+  app.use('/api/admin/users', adminUsersRouter);
   app.use('/api/workspaces', workspacesRouter);
   app.use('/api/auth', authRouter);
   app.use('/api/me', meRouter);

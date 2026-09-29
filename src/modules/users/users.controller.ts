@@ -26,3 +26,34 @@ export async function listUsers(req: Request, res: Response): Promise<void> {
     pagination: data.pagination,
   });
 }
+
+export async function listAdminUsers(req: Request, res: Response): Promise<void> {
+  const data = await usersService.listAdminUsers(req.query as never);
+  sendSuccess(res, data.users, { requestId: req.requestId, pagination: data.pagination });
+}
+
+export async function getAdminUser(req: Request, res: Response): Promise<void> {
+  sendSuccess(res, await usersService.getAdminUser(String(req.params.userId)), { requestId: req.requestId });
+}
+
+export async function createAdminUser(req: Request, res: Response): Promise<void> {
+  const data = await usersService.createAdminUser(req.user!, req.body);
+  sendSuccess(res, data, { requestId: req.requestId }, 201);
+}
+
+export async function updateAdminUser(req: Request, res: Response): Promise<void> {
+  const data = await usersService.updateAdminUser(req.user!, String(req.params.userId), req.body);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function updateAdminUserStatus(req: Request, res: Response): Promise<void> {
+  const data = await usersService.setAdminUserActive(req.user!, String(req.params.userId), req.body.isActive);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function updateCityOfficerSpecializations(req: Request, res: Response): Promise<void> {
+  const data = await usersService.setOfficerSpecializations(
+    req.user!, String(req.params.userId), req.body.criteria,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
