@@ -118,7 +118,9 @@ export class ApplicationsService {
 
   async startCurrent(user: AuthenticatedUser, input: StartApplicationInput) {
     const schoolYear = normalizeSchoolYear(input.schoolYear);
-    const targetLevel = input.targetLevel ?? Level.school;
+    // The current Student individual-application flow is City-only. Ignore stale
+    // client target-level fields; historical rows remain readable as stored.
+    const targetLevel = Level.city;
     const workspaceId = workspaceIdForWrite(user);
 
     const application = await prisma.$transaction(async (tx) => {
@@ -182,6 +184,13 @@ export class ApplicationsService {
   ) {
     const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
+    if (user.role === Role.student) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Students cannot change the application review level',
+      );
+    }
     assertApplicationNotCancelled(application);
     assertApplicationEditable(application);
 
@@ -232,6 +241,13 @@ export class ApplicationsService {
   async autosaveDraft(user: AuthenticatedUser, applicationId: string, input: AutosaveDraftInput) {
     const application = await this.getRequiredBareApplication(user, applicationId);
     assertApplicationOwner(application, user);
+    if (user.role === Role.student && input.targetLevel !== undefined) {
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Students cannot change the application review level',
+      );
+    }
     assertApplicationNotCancelled(application);
     assertApplicationEditable(application);
 
