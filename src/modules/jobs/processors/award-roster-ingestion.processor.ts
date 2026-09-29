@@ -1,5 +1,4 @@
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import {
   AwardDecisionStatus,
@@ -8,6 +7,7 @@ import {
   type IndexingJob,
   type Prisma,
 } from '@prisma/client';
+import { z } from 'zod';
 import { env } from '../../../config/env';
 import { prisma } from '../../../infrastructure/database/prisma';
 import { auditActions } from '../../../shared/constants/application';
@@ -15,9 +15,7 @@ import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
 import { readRosterTable } from '../../../shared/utils/roster-table-reader';
 import { createApplicationAudit } from '../../applications/application.helpers';
-import { normalizeSmartReaderDecisionTables } from '../../decision-imports/decision-roster-parser.service';
-import { getSmartReaderAdapter } from '../../smartreader';
-import { runSmartReaderAsyncTableOcr } from '../../smartreader/smartreader-async-table-ocr';
+import { extractStructuredDocument } from '../../ai/openai-document-extraction';
 import { StorageService } from '../../storage/storage.service';
 import {
   buildAwardRosterPreview,
@@ -30,6 +28,29 @@ import { AwardRosterRepository } from '../../award-decisions/award-roster.reposi
 
 const storageService = new StorageService();
 const repository = new AwardRosterRepository();
+const pdfRosterOutputSchema = z.object({
+  columns: z.array(z.string().trim().min(1)).min(1),
+  rows: z.array(z.array(z.string().nullable())),
+}).strict().superRefine(({ columns, rows }, context) => {
+  rows.forEach((row, rowIndex) => {
+    if (row.length !== columns.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['rows', rowIndex],
+        message: 'Every extracted row must align with the extracted columns',
+      });
+    }
+  });
+});
+const pdfRosterJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['columns', 'rows'],
+  properties: {
+    columns: { type: 'array', items: { type: 'string' } },
+    rows: { type: 'array', items: { type: 'array', items: { type: ['string', 'null'] } } },
+  },
+};
 
 export async function processAwardRosterIngestionJob(job: IndexingJob): Promise<Prisma.InputJsonObject> {
   if (job.jobType !== JobType.award_roster_ingestion) {
@@ -60,7 +81,7 @@ export async function processAwardRosterIngestionJob(job: IndexingJob): Promise<
   const bytes = await readStoredFile(decision.rosterFile);
   const parsed =
     format === 'pdf'
-      ? await parsePdfRoster(decision.rosterFile, bytes)
+      ? await parsePdfRoster(decision.id, bytes)
       : await readRosterTable({ buffer: bytes, format });
   const columns = parsed.columns;
   const sourceRows: AwardRosterSourceRow[] = 'sourceRows' in parsed ? parsed.sourceRows : parsed.rows;
@@ -95,42 +116,39 @@ export async function processAwardRosterIngestionJob(job: IndexingJob): Promise<
 }
 
 async function parsePdfRoster(
-  file: { originalName: string; storageType: FileStorageType; filePath: string },
+  decisionId: string,
   bytes: Buffer,
 ): Promise<{ columns: string[]; sourceRows: AwardRosterSourceRow[] }> {
-  const localPath = await prepareSmartReaderSource(file, bytes);
-  try {
-    const upload = await getSmartReaderAdapter().uploadFile({ filePath: localPath.filePath, originalName: file.originalName });
-    const ocr = await runSmartReaderAsyncTableOcr({ fileHash: upload.hash, fileType: upload.fileType });
-    const tables = normalizeSmartReaderDecisionTables(ocr);
-    const columns = [...new Set(tables.flatMap((table) => table.header.filter(Boolean)))];
-    if (!columns.length) throw new AppError(422, ErrorCodes.OCR_NO_TABLE_FOUND, 'PDF roster has no detected table');
-    const sourceRows = tables.flatMap((table) =>
-      table.rows.map((row) => columns.map((column) => toRosterCell(row[column]))),
-    );
-    return { columns, sourceRows };
-  } finally {
-    await localPath.cleanup?.();
-  }
-}
+  const result = await extractStructuredDocument({
+    useCase: 'award_roster',
+    model: env.OPENAI_AWARD_ROSTER_MODEL,
+    promptVersion: env.OPENAI_AWARD_ROSTER_PROMPT_VERSION,
+    instructions: [
+      'Extract the visible column headings and every roster row from this award roster PDF.',
+      'Transcribe only visible values. Never infer, normalize, or complete a student identity.',
+      'Return blank cells as null. Preserve student codes exactly as printed, including leading zeros.',
+      'Each row must have exactly one cell per column. Do not decide award eligibility or confirm this roster.',
+    ].join('\n'),
+    schemaName: 'award_roster_table',
+    outputSchema: pdfRosterJsonSchema,
+    validate: (value) => pdfRosterOutputSchema.parse(value),
+    content: [
+      {
+        type: 'input_file',
+        filename: 'award-roster.pdf',
+        file_data: `data:application/pdf;base64,${bytes.toString('base64')}`,
+      },
+    ],
+    timeoutMs: env.OPENAI_DOCUMENT_EXTRACTION_TIMEOUT_MS,
+    maxRetries: env.OPENAI_DOCUMENT_EXTRACTION_MAX_RETRIES,
+    entity: { type: 'award_decision', id: decisionId },
+    maxOutputTokens: 8000,
+  });
 
-async function prepareSmartReaderSource(
-  file: { storageType: FileStorageType; filePath: string; originalName: string },
-  bytes: Buffer,
-): Promise<{ filePath: string; cleanup?: () => Promise<void> }> {
-  if (file.storageType === FileStorageType.local) {
-    const root = path.resolve(env.UPLOAD_DIR);
-    const filePath = path.resolve(root, file.filePath);
-    const relative = path.relative(root, filePath);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'Roster file not found');
-    }
-    return { filePath };
-  }
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), '5tot-award-roster-'));
-  const filePath = path.join(directory, path.basename(file.originalName));
-  await fs.writeFile(filePath, bytes);
-  return { filePath, cleanup: () => fs.rm(directory, { recursive: true, force: true }) };
+  return {
+    columns: result.data.columns,
+    sourceRows: result.data.rows.map((row) => row.map((cell) => cell ?? '')),
+  };
 }
 
 async function readStoredFile(file: {
@@ -166,11 +184,4 @@ function toJsonCell(
 ): Exclude<AwardRosterSourceCell, Date> {
   if (cell instanceof Date) return { __cellType: 'date', value: cell.toISOString() };
   return cell;
-}
-
-function toRosterCell(value: unknown): string | number | boolean | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
-  if (value instanceof Date) return value.toISOString();
-  return String(value);
 }

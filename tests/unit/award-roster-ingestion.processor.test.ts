@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   uploadFile: vi.fn(),
   startAdvancedAsync: vi.fn(),
   getAdvancedAsyncResult: vi.fn(),
+  extractStructuredDocument: vi.fn(),
   readSheet: vi.fn(),
   createAudit: vi.fn(),
   getMappingContext: vi.fn(),
@@ -35,6 +36,9 @@ vi.mock('../../src/modules/smartreader', () => ({
     getAdvancedAsyncResult: mocks.getAdvancedAsyncResult,
   }),
   mapOcrResponse: vi.fn(),
+}));
+vi.mock('../../src/modules/ai/openai-document-extraction', () => ({
+  extractStructuredDocument: mocks.extractStructuredDocument,
 }));
 vi.mock('read-excel-file/node', () => ({ readSheet: mocks.readSheet }));
 
@@ -73,7 +77,7 @@ function decision(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe('Award roster PDF processor', () => {
+describe('Award roster ingestion processor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -94,6 +98,23 @@ describe('Award roster PDF processor', () => {
       status: 'completed',
       raw: {},
     });
+    mocks.extractStructuredDocument.mockResolvedValue({
+      data: { columns: ['MSSV', 'Họ và tên'], rows: [['00123456', 'Nguyễn An']] },
+      telemetry: {
+        provider: 'openai',
+        useCase: 'award_roster',
+        model: 'gpt-6-luna',
+        promptVersion: 'award-roster-v1',
+        requestId: 'req-award-1',
+        latencyMs: 25,
+        inputTokens: 20,
+        outputTokens: 10,
+        totalTokens: 30,
+        attempts: 1,
+        retries: 0,
+        outcome: 'success',
+      },
+    });
     mocks.createAudit.mockResolvedValue(undefined);
     mocks.getMappingContext.mockResolvedValue({
       awardLevel: AwardLevel.SCHOOL,
@@ -103,16 +124,25 @@ describe('Award roster PDF processor', () => {
     });
   });
 
-  it('reuses SmartReader upload, async table OCR, and the existing table normalizer', async () => {
+  it('uses structured OpenAI extraction for PDF and preserves the existing preview normalization', async () => {
     const result = await processAwardRosterIngestionJob(job());
 
-    expect(mocks.uploadFile).toHaveBeenCalledWith(expect.objectContaining({ originalName: 'roster.pdf' }));
-    expect(mocks.startAdvancedAsync).toHaveBeenCalledWith({
-      fileHash: 'smartreader-hash',
-      fileType: 'pdf',
-      details: true,
-      exporter: 'json',
-    });
+    expect(mocks.extractStructuredDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        useCase: 'award_roster',
+        model: 'gpt-6-luna',
+        schemaName: 'award_roster_table',
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: 'input_file', filename: 'award-roster.pdf' }),
+        ]),
+      }),
+    );
+    expect(mocks.uploadFile).not.toHaveBeenCalled();
+    expect(mocks.startAdvancedAsync).not.toHaveBeenCalled();
+    const extractionInput = mocks.extractStructuredDocument.mock.calls[0]?.[0] as {
+      validate: (value: unknown) => unknown;
+    };
+    expect(() => extractionInput.validate({ columns: ['MSSV', 'Họ và tên'], rows: [['00123456']] })).toThrow();
     expect(result).toMatchObject({
       format: 'pdf',
       columns: ['MSSV', 'Họ và tên'],
@@ -137,13 +167,34 @@ describe('Award roster PDF processor', () => {
     const result = await processAwardRosterIngestionJob(job());
 
     expect(result).toMatchObject({ rows: [{ status: 'INVALID', studentCode: null, errors: ['STUDENT_CODE_MUST_BE_TEXT'] }] });
+    expect(mocks.extractStructuredDocument).not.toHaveBeenCalled();
   });
 
-  it('propagates SmartReader failures so the indexing job can be marked failed and retried', async () => {
-    mocks.getAdvancedAsyncResult.mockResolvedValueOnce({ status: 'failed' });
+  it('propagates OpenAI failures so the indexing job can be marked failed and retried', async () => {
+    mocks.extractStructuredDocument.mockRejectedValueOnce(Object.assign(new Error('provider failed'), { statusCode: 502 }));
 
     await expect(processAwardRosterIngestionJob(job())).rejects.toMatchObject({ statusCode: 502 });
     expect(mocks.createAudit).not.toHaveBeenCalled();
+  });
+
+  it('parses CSV locally without calling OpenAI', async () => {
+    const csv = Buffer.from('MSSV,Họ và tên\n00123456,Nguyễn An');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => csv.buffer.slice(csv.byteOffset, csv.byteOffset + csv.byteLength),
+    }));
+    mocks.findDecision.mockResolvedValueOnce(decision({
+      rosterFile: {
+        ...decision().rosterFile,
+        originalName: 'roster.csv',
+        mimeType: 'text/csv',
+      },
+    }));
+
+    const result = await processAwardRosterIngestionJob(job());
+
+    expect(mocks.extractStructuredDocument).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ format: 'csv', sourceRows: [['00123456', 'Nguyễn An']] });
   });
 
   it('rejects a mismatched job workspace before storage and OCR side effects', async () => {
