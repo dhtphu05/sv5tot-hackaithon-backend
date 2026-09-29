@@ -1,57 +1,19 @@
-import { z } from 'zod';
-import {
-  buildOpenAiSafetyIdentifier,
-  getOpenAiClient,
-  mapOpenAiRuntimeError,
-} from '../openai-client';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
-import { evidenceDocumentTypes, validateEvidenceAnalysisOutput } from './evidence-analysis.schema';
+import {
+  evidenceDocumentTypes,
+  validateEvidenceAnalysisOutput,
+} from './evidence-analysis.schema';
 import type {
   EvidenceAnalysisProvider,
   EvidenceDocumentAnalysisInput,
   EvidenceDocumentAnalysisResult,
 } from './evidence-analysis.types';
 import { buildEvidenceCardPrompt } from './prompts/evidence-card-v1.prompt';
-
-type ResponsesCreateParams = {
-  model: string;
-  store: boolean;
-  input: Array<{
-    role: 'developer' | 'user';
-    content: Array<
-      | { type: 'input_text'; text: string }
-      | { type: 'input_image'; image_url: string; detail: 'auto' }
-      | { type: 'input_file'; filename: string; file_data: string }
-    >;
-  }>;
-  text: {
-    format: {
-      type: 'json_schema';
-      name: string;
-      strict: true;
-      schema: Record<string, unknown>;
-    };
-  };
-  max_output_tokens: number;
-  reasoning?: { effort: 'minimal' };
-  safety_identifier?: string;
-  metadata: Record<string, string>;
-};
-
-type ResponsesCreateOptions = {
-  timeout: number;
-  maxRetries: number;
-};
-
-type OpenAiResponsesClient = {
-  responses: {
-    create(
-      params: ResponsesCreateParams,
-      options: ResponsesCreateOptions,
-    ): Promise<unknown>;
-  };
-};
+import {
+  extractStructuredDocument,
+  type DocumentExtractionClient,
+} from '../openai-document-extraction';
 
 export type OpenAiEvidenceAnalysisConfig = {
   apiKey: string;
@@ -64,91 +26,60 @@ export type OpenAiEvidenceAnalysisConfig = {
 
 export class OpenAiEvidenceAnalysisAdapter implements EvidenceAnalysisProvider {
   readonly provider = 'openai' as const;
-  private readonly client: OpenAiResponsesClient;
 
   constructor(
     private readonly config: OpenAiEvidenceAnalysisConfig,
-    client?: OpenAiResponsesClient,
-  ) {
-    this.client = client ?? (getOpenAiClient() as unknown as OpenAiResponsesClient);
-  }
+    private readonly client?: DocumentExtractionClient,
+  ) {}
 
   async analyze(input: EvidenceDocumentAnalysisInput): Promise<EvidenceDocumentAnalysisResult> {
-    const startedAt = Date.now();
-    const requestId = `evidence-${input.evidenceId}-${Date.now()}`;
-    try {
-      const response = await this.client.responses.create(
-        this.buildRequest(input, requestId),
-        { timeout: this.config.timeoutMs, maxRetries: this.config.maxRetries },
-      );
-      const output = parseResponseOutput(response);
-      const parsed = validateEvidenceAnalysisOutput(
-        output,
-        'openai',
-        this.config.model,
-        this.config.promptVersion,
-      );
-      return {
-        ...parsed,
-        requestId,
-        latencyMs: Date.now() - startedAt,
-        usage: parseUsage(response),
-      };
-    } catch (error) {
-      throw mapOpenAiError(error);
-    }
-  }
-
-  private buildRequest(input: EvidenceDocumentAnalysisInput, requestId: string): ResponsesCreateParams {
-    return {
-      model: this.config.model,
-      store: this.config.storeResponses,
-      input: [
-        {
-          role: 'developer',
-          content: [{ type: 'input_text', text: buildEvidenceCardPrompt() }],
-        },
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: [
-                `Evidence name: ${input.evidenceName}`,
-                `Selected criterion: ${input.selectedCriterion}`,
-                `Filename: ${input.filename}`,
-                `MIME type: ${input.mimeType}`,
-                input.studentContext?.fullName
-                  ? `Student full name for comparison only: ${input.studentContext.fullName}`
-                  : null,
-                input.studentContext?.studentCode
-                  ? `Student code for comparison only: ${input.studentContext.studentCode}`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join('\n'),
-            },
-            buildFileInput(input),
-          ],
-        },
-      ],
-      text: {
-        format: {
-          type: 'json_schema',
-          name: 'evidence_card_extraction',
-          strict: true,
-          schema: zodToJsonSchema(),
-        },
-      },
-      max_output_tokens: 4000,
-      reasoning: { effort: 'minimal' },
-      safety_identifier: buildOpenAiSafetyIdentifier('evidence', input.evidenceId),
-      metadata: {
-        requestId,
-        evidenceId: input.evidenceId,
-        evidenceFileId: input.evidenceFileId,
-        fileId: input.fileId,
+    const result = await extractStructuredDocument(
+      {
+        useCase: 'evidence',
+        model: this.config.model,
         promptVersion: this.config.promptVersion,
+        instructions: buildEvidenceCardPrompt(),
+        schemaName: 'evidence_card_extraction',
+        outputSchema: evidenceAnalysisJsonSchema(),
+        validate: (value) =>
+          validateEvidenceAnalysisOutput(value, 'openai', this.config.model, this.config.promptVersion),
+        content: [
+          {
+            type: 'input_text',
+            text: [
+              `Evidence name: ${input.evidenceName}`,
+              `Selected criterion: ${input.selectedCriterion}`,
+              `Filename: ${input.filename}`,
+              `MIME type: ${input.mimeType}`,
+              input.studentContext?.fullName
+                ? `Student full name for comparison only: ${input.studentContext.fullName}`
+                : null,
+              input.studentContext?.studentCode
+                ? `Student code for comparison only: ${input.studentContext.studentCode}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join('\n'),
+          },
+          buildFileInput(input),
+        ],
+        timeoutMs: this.config.timeoutMs,
+        maxRetries: this.config.maxRetries,
+        entity: { type: 'evidence', id: input.evidenceId },
+        maxOutputTokens: 4000,
+        reasoningEffort: 'minimal',
+        storeResponses: this.config.storeResponses,
+      },
+      this.client,
+    );
+    return {
+      ...result.data,
+      requestId: result.telemetry.requestId,
+      latencyMs: result.telemetry.latencyMs,
+      usage: {
+        inputTokens: result.telemetry.inputTokens ?? undefined,
+        outputTokens: result.telemetry.outputTokens ?? undefined,
+        totalTokens: result.telemetry.totalTokens ?? undefined,
       },
     };
   }
@@ -175,81 +106,7 @@ function buildFileInput(input: EvidenceDocumentAnalysisInput) {
   });
 }
 
-function parseResponseOutput(response: unknown) {
-  const record = asRecord(response);
-  if (hasRefusal(record)) {
-    throw new AppError(422, ErrorCodes.OPENAI_REFUSED, 'OpenAI refused to analyze the document', {
-      retryable: false,
-    });
-  }
-  const outputText = typeof record?.output_text === 'string' ? record.output_text : undefined;
-  if (!outputText?.trim()) {
-    throw new AppError(502, ErrorCodes.OPENAI_INVALID_OUTPUT, 'OpenAI response did not include structured output', {
-      retryable: false,
-    });
-  }
-  try {
-    return JSON.parse(outputText) as unknown;
-  } catch {
-    throw new AppError(502, ErrorCodes.OPENAI_INVALID_OUTPUT, 'OpenAI structured output was not valid JSON', {
-      retryable: false,
-    });
-  }
-}
-
-function mapOpenAiError(error: unknown): AppError {
-  if (error instanceof AppError) return error;
-  if (error instanceof z.ZodError) {
-    return new AppError(502, ErrorCodes.OPENAI_INVALID_OUTPUT, 'OpenAI structured output failed validation', {
-      retryable: false,
-      issues: error.issues.map((issue) => ({ path: issue.path, code: issue.code })),
-    });
-  }
-  const record = asRecord(error);
-  const status = typeof record?.status === 'number' ? record.status : undefined;
-  const name = typeof record?.name === 'string' ? record.name : '';
-  const message = typeof record?.message === 'string' ? record.message : 'OpenAI evidence analysis failed';
-  if (name === 'AbortError' || message.toLowerCase().includes('timeout')) {
-    return new AppError(504, ErrorCodes.OPENAI_TIMEOUT, 'OpenAI evidence analysis timed out', {
-      retryable: true,
-    });
-  }
-  if (status === 429) {
-    return new AppError(429, ErrorCodes.OPENAI_RATE_LIMITED, 'OpenAI evidence analysis was rate limited', {
-      retryable: true,
-    });
-  }
-  const code = mapOpenAiRuntimeError(error, ErrorCodes.EVIDENCE_ANALYSIS_FAILED);
-  return new AppError(502, code, 'Evidence analysis failed', {
-    retryable: status === undefined || status >= 500,
-  });
-}
-
-function parseUsage(response: unknown) {
-  const usage = asRecord(asRecord(response)?.usage);
-  if (!usage) return undefined;
-  return {
-    inputTokens: numberValue(usage.input_tokens),
-    outputTokens: numberValue(usage.output_tokens),
-    totalTokens: numberValue(usage.total_tokens),
-  };
-}
-
-function hasRefusal(record: Record<string, unknown> | undefined) {
-  const output = record?.output;
-  return Array.isArray(output) && output.some((item) => asRecord(item)?.type === 'refusal');
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
-}
-
-function numberValue(value: unknown) {
-  return typeof value === 'number' ? value : undefined;
-}
-
-function zodToJsonSchema(): Record<string, unknown> {
+function evidenceAnalysisJsonSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
