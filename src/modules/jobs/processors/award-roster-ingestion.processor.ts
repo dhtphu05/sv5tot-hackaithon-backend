@@ -103,6 +103,9 @@ export async function processAwardRosterIngestionJob(job: IndexingJob): Promise<
     mapping,
     rows: preview.rows,
     summary: preview.summary,
+    ...('telemetry' in parsed && parsed.telemetry
+      ? { telemetry: parsed.telemetry as unknown as Prisma.JsonObject }
+      : {}),
   };
 
   await createApplicationAudit(prisma, {
@@ -119,7 +122,11 @@ export async function processAwardRosterIngestionJob(job: IndexingJob): Promise<
 async function parsePdfRoster(
   decisionId: string,
   bytes: Buffer,
-): Promise<{ columns: string[]; sourceRows: AwardRosterSourceRow[] }> {
+): Promise<{
+  columns: string[];
+  sourceRows: AwardRosterSourceRow[];
+  telemetry: Awaited<ReturnType<typeof extractStructuredDocument>>['telemetry'];
+}> {
   const result = await extractStructuredDocument({
     useCase: 'award_roster',
     model: env.OPENAI_AWARD_ROSTER_MODEL,
@@ -149,6 +156,7 @@ async function parsePdfRoster(
   return {
     columns: result.data.columns,
     sourceRows: result.data.rows.map((row) => row.map((cell) => cell ?? '')),
+    telemetry: result.telemetry,
   };
 }
 

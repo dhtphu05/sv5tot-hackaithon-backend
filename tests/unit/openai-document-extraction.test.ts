@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { describe, expect, it, vi } from 'vitest';
+import { logger } from '../../src/config/logger';
 
 const mocks = vi.hoisted(() => ({
   mapOpenAiRuntimeError: vi.fn(),
@@ -37,6 +38,7 @@ function input(overrides: Record<string, unknown> = {}) {
 
 describe('OpenAI structured document extraction core', () => {
   it('uses strict Responses output, validates the result, and reports safe usage metadata', async () => {
+    const telemetryLog = vi.spyOn(logger, 'info');
     const create = vi.fn().mockResolvedValue({
       id: 'resp_1',
       _request_id: 'req_1',
@@ -72,9 +74,31 @@ describe('OpenAI structured document extraction core', () => {
         outcome: 'success',
       },
     });
+    expect(telemetryLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        useCase: 'award_roster',
+        model: 'gpt-6-luna',
+        promptVersion: 'award-roster-v1',
+        requestId: 'req_1',
+        entityType: 'award_decision',
+        entityRef: expect.not.stringContaining('private-entity-id'),
+        inputTokens: 120,
+        outputTokens: 24,
+        totalTokens: 144,
+        attempts: 1,
+        retries: 0,
+        outcome: 'success',
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
+      }),
+      'OpenAI request completed',
+    );
+    expect(JSON.stringify(telemetryLog.mock.calls)).not.toContain('synthetic fixture');
+    telemetryLog.mockRestore();
   });
 
   it('does not return a refusal as extracted data', async () => {
+    const telemetryLog = vi.spyOn(logger, 'warn');
     const client = {
       responses: {
         create: vi.fn().mockResolvedValue({
@@ -90,6 +114,11 @@ describe('OpenAI structured document extraction core', () => {
         telemetry: expect.objectContaining({ outcome: 'failure', errorCode: 'OPENAI_REFUSED', attempts: 1 }),
       }),
     });
+    expect(telemetryLog).toHaveBeenCalledWith(
+      expect.objectContaining({ useCase: 'award_roster', outcome: 'failure', errorCode: 'OPENAI_REFUSED' }),
+      'OpenAI request failed',
+    );
+    telemetryLog.mockRestore();
   });
 
   it('rejects structured output that fails server validation', async () => {

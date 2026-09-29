@@ -148,6 +148,14 @@ describe('Award roster ingestion processor', () => {
       columns: ['MSSV', 'Họ và tên'],
       sourceRows: [['00123456', 'Nguyễn An']],
       rows: [{ studentCode: '00123456', fullName: 'Nguyễn An', status: 'VALID' }],
+      telemetry: {
+        provider: 'openai',
+        useCase: 'award_roster',
+        requestId: 'req-award-1',
+        inputTokens: 20,
+        outputTokens: 10,
+        totalTokens: 30,
+      },
     });
   });
 

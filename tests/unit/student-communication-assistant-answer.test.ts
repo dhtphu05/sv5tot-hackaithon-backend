@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { logger } from '../../src/config/logger';
 import {
   buildDeterministicAnswer,
   OpenAiStudentAnswerProvider,
@@ -205,6 +206,7 @@ describe('student communication assistant answer validation', () => {
   });
 
   it('uses strict OpenAI structured output settings and a safety identifier', async () => {
+    const telemetryLog = vi.spyOn(logger, 'info');
     const output = JSON.stringify({
       answer:
         'Bạn cần bổ sung đúng bảng điểm theo yêu cầu cán bộ. Sau khi sẵn sàng, hãy gửi lại để cán bộ xem tiếp.',
@@ -238,6 +240,11 @@ describe('student communication assistant answer validation', () => {
         max_output_tokens: 1200,
         reasoning: { effort: 'minimal' },
         safety_identifier: 'student_safe_hash',
+        metadata: expect.objectContaining({
+          use_case: 'student_assistant',
+          prompt_version: expect.any(String),
+          request_id: expect.any(String),
+        }),
         text: expect.objectContaining({
           format: expect.objectContaining({
             type: 'json_schema',
@@ -246,12 +253,33 @@ describe('student communication assistant answer validation', () => {
           }),
         }),
       }),
-      expect.objectContaining({ timeout: expect.any(Number), maxRetries: expect.any(Number) }),
+      expect.objectContaining({ timeout: expect.any(Number), maxRetries: 0 }),
     );
+    expect(telemetryLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        useCase: 'student_assistant',
+        entityRef: 'student_safe_hash',
+        requestId: 'req_student_assistant',
+        inputTokens: 7,
+        outputTokens: 5,
+        totalTokens: 12,
+        attempts: 1,
+        retries: 0,
+        outcome: 'success',
+      }),
+      'OpenAI request completed',
+    );
+    telemetryLog.mockRestore();
   });
 });
 
 async function* streamEvents(text: string) {
   yield { type: 'response.output_text.delta', delta: text };
-  yield { type: 'response.completed', response: { usage: { total_tokens: 12 } } };
+  yield {
+    type: 'response.completed',
+    response: {
+      _request_id: 'req_student_assistant',
+      usage: { input_tokens: 7, output_tokens: 5, total_tokens: 12 },
+    },
+  };
 }

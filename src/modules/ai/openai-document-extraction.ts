@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { buildOpenAiSafetyIdentifier, getOpenAiClient, mapOpenAiRuntimeError } from './openai-client';
+import { logOpenAiTelemetry } from './openai-telemetry';
 
 export type DocumentExtractionContent =
   | { type: 'input_text'; text: string }
@@ -43,6 +44,8 @@ export type DocumentExtractionTelemetry = {
   entityType?: string;
   entityRef?: string;
   latencyMs: number;
+  startedAt: string;
+  endedAt: string;
   inputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
@@ -108,22 +111,22 @@ export async function extractStructuredDocument<T>(
         });
       }
 
+      const telemetry: DocumentExtractionTelemetry = logOpenAiTelemetry({
+        useCase: input.useCase,
+        model: input.model,
+        promptVersion: input.promptVersion,
+        requestId: responseRequestId,
+        entityType: input.entity?.type,
+        entityRef,
+        ...parseUsage(response),
+        attempts,
+        retries: attempts - 1,
+        outcome: 'success',
+        startedAtMs: startedAt,
+      });
       return {
         data,
-        telemetry: {
-          provider: 'openai',
-          useCase: input.useCase,
-          model: input.model,
-          promptVersion: input.promptVersion,
-          requestId: responseRequestId,
-          entityType: input.entity?.type,
-          entityRef,
-          latencyMs: Date.now() - startedAt,
-          ...parseUsage(response),
-          attempts,
-          retries: attempts - 1,
-          outcome: 'success',
-        },
+        telemetry,
       };
     } catch (error) {
       const code = error instanceof AppError ? error.code : mapOpenAiRuntimeError(error);
@@ -134,23 +137,22 @@ export async function extractStructuredDocument<T>(
       }
 
       const errorRequestId = readRequestId(error) ?? readAppErrorRequestId(error) ?? requestId;
-      const telemetry = {
-        provider: 'openai' as const,
+      const telemetry = logOpenAiTelemetry({
         useCase: input.useCase,
         model: input.model,
         promptVersion: input.promptVersion,
         requestId: errorRequestId,
         entityType: input.entity?.type,
         entityRef,
-        latencyMs: Date.now() - startedAt,
         inputTokens: null,
         outputTokens: null,
         totalTokens: null,
         attempts,
         retries: attempts - 1,
-        outcome: 'failure' as const,
+        outcome: 'failure',
         errorCode: code,
-      } satisfies DocumentExtractionTelemetry;
+        startedAtMs: startedAt,
+      });
       if (error instanceof AppError) {
         const details = asRecord(error.details);
         throw new AppError(error.statusCode, error.code, error.message, {

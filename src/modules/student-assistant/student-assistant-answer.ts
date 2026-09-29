@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import type OpenAI from 'openai';
 import { z } from 'zod';
 import { env } from '../../config/env';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { getOpenAiClient, mapOpenAiRuntimeError } from '../ai/openai-client';
+import { logOpenAiTelemetry } from '../ai/openai-telemetry';
 import {
   buildFriendlyDeterministicAnswer,
   sanitizeStudentAssistantAnswer,
@@ -126,7 +128,10 @@ export class DisabledStudentAnswerProvider implements StudentAnswerProvider {
 type OpenAiStreamEvent = {
   type?: string;
   delta?: string;
-  response?: { usage?: { total_tokens?: number } };
+  response?: {
+    _request_id?: string;
+    usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+  };
 };
 
 export class OpenAiStudentAnswerProvider implements StudentAnswerProvider {
@@ -144,9 +149,15 @@ export class OpenAiStudentAnswerProvider implements StudentAnswerProvider {
     safetyIdentifier?: string;
     onDelta: (delta: { text: string }) => void | Promise<void>;
   }): Promise<StudentAnswerProviderResult> {
+    const startedAt = Date.now();
+    const requestId = randomUUID();
     let text = '';
+    let inputTokens: number | undefined;
+    let outputTokens: number | undefined;
     let totalTokens: number | undefined;
-    const stream = await this.client.responses.create(
+    let responseRequestId: string = requestId;
+    try {
+      const stream = await this.client.responses.create(
       {
         model: env.OPENAI_STUDENT_ASSISTANT_MODEL,
         store: false,
@@ -154,6 +165,11 @@ export class OpenAiStudentAnswerProvider implements StudentAnswerProvider {
         max_output_tokens: 1200,
         reasoning: { effort: 'minimal' },
         safety_identifier: input.safetyIdentifier,
+        metadata: {
+          use_case: 'student_assistant',
+          prompt_version: env.OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION,
+          request_id: requestId,
+        },
         text: {
           format: {
             type: 'json_schema',
@@ -189,32 +205,71 @@ export class OpenAiStudentAnswerProvider implements StudentAnswerProvider {
       } as never,
       {
         timeout: env.OPENAI_ASSISTANT_TIMEOUT_MS,
-        maxRetries: env.OPENAI_ASSISTANT_MAX_RETRIES,
+        maxRetries: 0,
         signal: input.signal,
       } as never,
     );
 
-    for await (const event of stream as unknown as AsyncIterable<OpenAiStreamEvent>) {
-      if (input.signal?.aborted) break;
-      if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
-        text += event.delta;
+      for await (const event of stream as unknown as AsyncIterable<OpenAiStreamEvent>) {
+        if (input.signal?.aborted) break;
+        if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+          text += event.delta;
+        }
+        if (event.type === 'response.completed') {
+          responseRequestId = event.response?._request_id ?? responseRequestId;
+          inputTokens = event.response?.usage?.input_tokens;
+          outputTokens = event.response?.usage?.output_tokens;
+          totalTokens = event.response?.usage?.total_tokens;
+        }
       }
-      if (event.type === 'response.completed') {
-        totalTokens = event.response?.usage?.total_tokens;
+
+      const answer = parseAndValidateAnswer(text, input.context, input.message);
+      for (const chunk of splitText(answer.answer)) {
+        if (input.signal?.aborted) break;
+        await input.onDelta({ text: chunk });
       }
-    }
 
-    const answer = parseAndValidateAnswer(text, input.context, input.message);
-    for (const chunk of splitText(answer.answer)) {
-      if (input.signal?.aborted) break;
-      await input.onDelta({ text: chunk });
-    }
+      logOpenAiTelemetry({
+        useCase: 'student_assistant',
+        model: env.OPENAI_STUDENT_ASSISTANT_MODEL,
+        promptVersion: env.OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION,
+        requestId: responseRequestId,
+        entityType: 'student_assistant_context',
+        entityRef: input.safetyIdentifier,
+        inputTokens: inputTokens ?? null,
+        outputTokens: outputTokens ?? null,
+        totalTokens: totalTokens ?? null,
+        attempts: 1,
+        retries: 0,
+        outcome: 'success',
+        startedAtMs: startedAt,
+      });
 
-    return {
-      answer,
-      model: env.OPENAI_STUDENT_ASSISTANT_MODEL,
-      totalTokens,
-    };
+      return {
+        answer,
+        model: env.OPENAI_STUDENT_ASSISTANT_MODEL,
+        totalTokens,
+      };
+    } catch (error) {
+      const errorCode = mapOpenAiRuntimeError(error);
+      logOpenAiTelemetry({
+        useCase: 'student_assistant',
+        model: env.OPENAI_STUDENT_ASSISTANT_MODEL,
+        promptVersion: env.OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION,
+        requestId: responseRequestId,
+        entityType: 'student_assistant_context',
+        entityRef: input.safetyIdentifier,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        attempts: 1,
+        retries: 0,
+        outcome: 'failure',
+        errorCode,
+        startedAtMs: startedAt,
+      });
+      throw error;
+    }
   }
 }
 

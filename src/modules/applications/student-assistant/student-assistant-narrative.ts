@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import type OpenAI from 'openai';
 import { env } from '../../../config/env';
 import { AppError } from '../../../shared/errors/app-error';
 import { ErrorCodes } from '../../../shared/errors/error-codes';
-import { getOpenAiClient } from '../../ai/openai-client';
+import { getOpenAiClient, mapOpenAiRuntimeError } from '../../ai/openai-client';
+import { logOpenAiTelemetry } from '../../ai/openai-telemetry';
 import type { StudentAssistantContext } from './student-assistant.dto';
 
 export type AssistantNarrativeDelta = {
@@ -83,7 +85,10 @@ type OpenAiStreamEvent = {
   type?: string;
   delta?: string;
   text?: string;
-  response?: { usage?: { total_tokens?: number } };
+  response?: {
+    _request_id?: string;
+    usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+  };
 };
 
 export class OpenAiAssistantNarrativeProvider implements AssistantNarrativeProvider {
@@ -101,9 +106,15 @@ export class OpenAiAssistantNarrativeProvider implements AssistantNarrativeProvi
       safetyIdentifier?: string;
     },
   ) {
+    const startedAt = Date.now();
+    const requestId = randomUUID();
     let text = '';
+    let responseRequestId: string = requestId;
+    let inputTokens: number | undefined;
+    let outputTokens: number | undefined;
     let totalTokens: number | undefined;
-    const stream = await this.client.responses.create(
+    try {
+      const stream = await this.client.responses.create(
       {
         model: this.config.model,
         store: false,
@@ -111,6 +122,11 @@ export class OpenAiAssistantNarrativeProvider implements AssistantNarrativeProvi
         max_output_tokens: 800,
         reasoning: { effort: 'minimal' },
         safety_identifier: callbacks.safetyIdentifier,
+        metadata: {
+          use_case: 'dashboard_assistant_narrative',
+          prompt_version: this.config.promptVersion,
+          request_id: requestId,
+        },
         input: [
           {
             role: 'developer',
@@ -127,26 +143,60 @@ export class OpenAiAssistantNarrativeProvider implements AssistantNarrativeProvi
           },
         ],
       } as never,
-      { timeout: this.config.timeoutMs, maxRetries: this.config.maxRetries, signal: callbacks.signal } as never,
+      { timeout: this.config.timeoutMs, maxRetries: 0, signal: callbacks.signal } as never,
     );
 
-    for await (const event of stream as unknown as AsyncIterable<OpenAiStreamEvent>) {
-      if (callbacks.signal?.aborted) break;
-      if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
-        text += event.delta;
-        const safeDelta = validateNarrativePartial(event.delta);
-        if (safeDelta) await callbacks.onDelta({ text: safeDelta });
+      for await (const event of stream as unknown as AsyncIterable<OpenAiStreamEvent>) {
+        if (callbacks.signal?.aborted) break;
+        if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+          text += event.delta;
+          const safeDelta = validateNarrativePartial(event.delta);
+          if (safeDelta) await callbacks.onDelta({ text: safeDelta });
+        }
+        if (event.type === 'response.completed') {
+          responseRequestId = event.response?._request_id ?? responseRequestId;
+          inputTokens = event.response?.usage?.input_tokens;
+          outputTokens = event.response?.usage?.output_tokens;
+          totalTokens = event.response?.usage?.total_tokens;
+        }
       }
-      if (event.type === 'response.completed') {
-        totalTokens = event.response?.usage?.total_tokens;
-      }
-    }
 
-    return {
-      text,
-      model: this.config.model,
-      totalTokens,
-    };
+      logOpenAiTelemetry({
+        useCase: 'dashboard_assistant_narrative',
+        model: this.config.model,
+        promptVersion: this.config.promptVersion,
+        requestId: responseRequestId,
+        entityType: 'student_assistant_context',
+        entityRef: callbacks.safetyIdentifier,
+        inputTokens: inputTokens ?? null,
+        outputTokens: outputTokens ?? null,
+        totalTokens: totalTokens ?? null,
+        attempts: 1,
+        retries: 0,
+        outcome: 'success',
+        startedAtMs: startedAt,
+      });
+
+      return { text, model: this.config.model, totalTokens };
+    } catch (error) {
+      logOpenAiTelemetry({
+        useCase: 'dashboard_assistant_narrative',
+        model: this.config.model,
+        promptVersion: this.config.promptVersion,
+        requestId: responseRequestId,
+        entityType: 'student_assistant_context',
+        entityRef: callbacks.safetyIdentifier,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        attempts: 1,
+        retries: 0,
+        outcome: 'failure',
+        errorCode: mapOpenAiRuntimeError(error),
+        startedAtMs: startedAt,
+      });
+      throw error;
+    }
   }
 }
 
