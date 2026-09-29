@@ -1535,12 +1535,11 @@ describe('workspace A/B HTTP isolation flow', () => {
       where: { id: b.applicationId },
       select: { status: true },
     });
-    expectNotFound(
-      await request(app)
-        .patch(`/api/resolution/cases/${b.resolutionCaseId}/status`)
-        .set(auth(a.managerToken))
-        .send({ status: 'closed', note: 'cross workspace status attempt' }),
-    );
+    await request(app)
+      .patch(`/api/resolution/cases/${b.resolutionCaseId}/status`)
+      .set(auth(a.managerToken))
+      .send({ status: 'closed', note: 'cross workspace status attempt' })
+      .expect(403);
     expectNotFound(
       await request(app)
         .post(`/api/resolution/cases/${b.resolutionCaseId}/reopen`)
@@ -1564,7 +1563,7 @@ describe('workspace A/B HTTP isolation flow', () => {
       .patch(`/api/resolution/cases/${a.resolutionCaseId}/status`)
       .set(auth(a.managerToken))
       .send({ status: 'resolved', note: 'same workspace status update' })
-      .expect(200);
+      .expect(403);
     await request(app)
       .post(`/api/resolution/cases/${a.resolutionCaseId}/reopen`)
       .set(auth(a.committeeToken))

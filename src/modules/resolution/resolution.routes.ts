@@ -74,7 +74,8 @@ resolutionRouter.post(
 resolutionRouter.patch(
   '/cases/:id/status',
   requireAuth,
-  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
+  // @deprecated Case-only status update; target City workflows must use /resolve.
+  requireRole(Role.manager, Role.committee, Role.admin),
   validate({ body: resolutionStatusUpdateSchema }),
   asyncHandler(updateResolutionCaseStatus),
 );

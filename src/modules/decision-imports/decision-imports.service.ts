@@ -31,7 +31,11 @@ import {
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { assertSameWorkspace, workspaceIdForWrite } from '../../shared/utils/workspace-scope';
+import {
+  assertSameWorkspace,
+  workspaceFilterFor,
+  workspaceIdForWrite,
+} from '../../shared/utils/workspace-scope';
 import { canStudentAccessCityEvent } from '../event-registry/event-registry.scope';
 import { AuditService } from '../audit/audit.service';
 import { assertApplicationEditable, assertApplicationOwner, createApplicationAudit } from '../applications/application.helpers';
@@ -284,9 +288,10 @@ export class DecisionImportsService {
     };
   }
 
-  async audit(_user: AuthenticatedUser, id: string) {
+  async audit(user: AuthenticatedUser, id: string) {
+    await this.getRequiredImport(id, user);
     return prisma.auditLog.findMany({
-      where: { decisionImportId: id },
+      where: { decisionImportId: id, ...workspaceFilterFor(user) },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
