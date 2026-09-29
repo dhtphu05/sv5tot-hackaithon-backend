@@ -1,3 +1,5 @@
+import { Criterion } from '@prisma/client';
+
 export const criteria = {
   STUDY: 'study',
   ETHICS: 'ethics',
@@ -5,3 +7,11 @@ export const criteria = {
   VOLUNTEERING: 'volunteering',
   INTEGRATION: 'integration',
 } as const;
+
+export const coreCriteria = [
+  Criterion.ethics,
+  Criterion.academic,
+  Criterion.physical,
+  Criterion.volunteer,
+  Criterion.integration,
+] as const;

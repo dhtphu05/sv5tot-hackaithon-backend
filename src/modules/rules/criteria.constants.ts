@@ -1,4 +1,4 @@
-import { Criterion, Level } from '@prisma/client';
+import { Level } from '@prisma/client';
 import { centralRules } from './central.rules';
 import { cityRules } from './city.rules';
 import { schoolRules } from './school.rules';
@@ -7,13 +7,7 @@ import type { CriteriaRuleConfig } from './rules.types';
 
 export const defaultCriteriaUnitScope = 'DHBK-DHDN';
 
-export const coreCriteria = [
-  Criterion.ethics,
-  Criterion.academic,
-  Criterion.physical,
-  Criterion.volunteer,
-  Criterion.integration,
-] as const;
+export { coreCriteria } from '../../shared/constants/criteria';
 
 export const levelOrderHighToLow = [
   Level.central,
