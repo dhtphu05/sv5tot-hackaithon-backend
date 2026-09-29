@@ -49,16 +49,12 @@ export async function buildSafeChatbotContext(input: {
     role: input.user.role,
     contextScope,
     currentPage: input.pageContext?.page ?? 'dashboard',
-    targetLevel: application?.targetLevel ?? 'school',
-    applicationStatus: application?.status ?? 'prechecked',
+    targetLevel: application?.targetLevel ?? undefined,
+    applicationStatus: application?.status ?? undefined,
     criterion: input.pageContext?.criterion,
-    missingSummary:
-      summarizeMissing(application?.precheckResults[0]?.missingItemsJson) ??
-      'Thiếu minh chứng Thể lực tốt; Tình nguyện mới ghi nhận 1/2 ngày',
-    deadlineSummary: 'Hạn nộp/bổ sung: 30/10',
-    nextAction:
-      application?.precheckResults[0]?.nextBestAction ??
-      'Tìm minh chứng tình nguyện hoặc upload minh chứng thể lực',
+    missingSummary: summarizeMissing(application?.precheckResults[0]?.missingItemsJson),
+    deadlineSummary: undefined,
+    nextAction: application?.precheckResults[0]?.nextBestAction ?? undefined,
     taskSummary,
   };
 }

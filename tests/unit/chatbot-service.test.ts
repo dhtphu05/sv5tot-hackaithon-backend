@@ -238,7 +238,7 @@ describe('ChatbotService', () => {
     );
   });
 
-  it('calls Smartbot/mock for school-level criteria questions with safe metadata', async () => {
+  it('answers criteria questions from the deterministic school fallback without calling an LLM', async () => {
     const client = new CapturingSmartbotClient();
     const service = buildNoopChatbotService(client);
     const result = await service.sendMessage(
@@ -261,24 +261,12 @@ describe('ChatbotService', () => {
       },
     );
 
-    const variables = Object.fromEntries(
-      client.lastRequest!.metadata.button_variables.map((item) => [item.variableName, item.value]),
-    );
-    expect(result.answer).toContain('tiêu chí Tình nguyện tốt');
-    expect(variables).toMatchObject({
-      role: 'student',
-      context_scope: 'student_helpdesk',
-      current_page: 'dashboard',
-      target_level: 'school',
-      application_status: 'prechecked',
-      missing_summary: 'Thiếu minh chứng Thể lực tốt; Tình nguyện mới ghi nhận 1/2 ngày',
-      deadline_summary: 'Hạn nộp/bổ sung: 30/10',
-      next_action: 'Tìm minh chứng tình nguyện hoặc upload minh chứng thể lực',
-    });
-    expect(JSON.stringify(variables)).not.toContain('student@example.com');
+    expect(client.lastRequest).toBeUndefined();
+    expect(result.answer).toContain('xem danh mục tiêu chí và kết quả tiền kiểm');
+    expect(result.answer).toContain('kết quả chính thức do cán bộ/Hội đồng xác nhận.');
   });
 
-  it('uses local school criteria fallback when criteria RAG Smartbot call fails', async () => {
+  it('keeps deterministic criteria guidance available without a provider request', async () => {
     const service = buildNoopChatbotService(new FailingSmartbotClient());
     const result = await service.sendMessage(
       {
@@ -300,8 +288,8 @@ describe('ChatbotService', () => {
       },
     );
 
-    expect(result.answer).toContain('Ở cấp Trường, hồ sơ Sinh viên 5 tốt cần đáp ứng 5 nhóm tiêu chí');
-    expect(result.answer).toContain('Hệ thống chỉ hỗ trợ tiền kiểm và giải thích.');
+    expect(result.answer).toContain('Điều kiện Sinh viên 5 tốt được cấu hình theo cấp xét duyệt');
+    expect(result.answer).toContain('Hệ thống chỉ hỗ trợ tiền kiểm và giải thích;');
     expect(result.answer).not.toContain('Mình chưa thể kết nối trợ lý hội thoại ngay lúc này');
   });
 
@@ -342,6 +330,6 @@ class CapturingSmartbotClient implements SmartbotClient {
 
 class FailingSmartbotClient implements SmartbotClient {
   async sendMessage(): Promise<unknown> {
-    throw new AppError(504, ErrorCodes.SMARTBOT_TIMEOUT, ErrorCodes.SMARTBOT_TIMEOUT);
+    throw new AppError(504, ErrorCodes.OPENAI_TIMEOUT, ErrorCodes.OPENAI_TIMEOUT);
   }
 }

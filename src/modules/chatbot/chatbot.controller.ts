@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
-import { smartbotFallbackText } from '../../infrastructure/vnpt/vnpt-smartbot.diagnostics';
 import { sendSuccess } from '../../shared/responses/api-response';
 import { ChatbotService } from './chatbot.service';
+import { chatbotFallbackText } from './chatbot-fallback';
 
 const service = new ChatbotService();
 
@@ -27,7 +27,7 @@ export async function streamChatbotMessage(req: Request, res: Response): Promise
     });
   } catch {
     writeSse(res, 'error', {
-      message: smartbotFallbackText,
+      message: chatbotFallbackText,
     });
   } finally {
     res.end();

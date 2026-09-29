@@ -1,11 +1,7 @@
 import { randomUUID } from 'crypto';
 import { env } from '../../config/env';
 import { MockSmartbotClient } from '../../infrastructure/vnpt/mock-smartbot.client';
-import { fallbackResponse, VnptSmartBotClient } from '../../infrastructure/vnpt/vnpt-smartbot.client';
-import { smartbotFallbackText } from '../../infrastructure/vnpt/vnpt-smartbot.diagnostics';
-import { VnptSmartBotStreamClient } from '../../infrastructure/vnpt/vnpt-smartbot-stream.client';
 import { AppError } from '../../shared/errors/app-error';
-import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import { buildContextualActions } from './chatbot-action.builder';
 import { listAvailableReadTools } from './chatbot-action.registry';
@@ -37,6 +33,7 @@ import type {
   SmartbotStreamClient,
 } from './chatbot.types';
 import type { ChatbotMessageInput } from './chatbot.validation';
+import { chatbotFallbackText } from './chatbot-fallback';
 import {
   createSchoolDemoHandoff,
   draftReviewerSupplementRequest,
@@ -47,9 +44,7 @@ import {
   searchSchoolDemoMatchingHub,
   type SchoolDemoToolResult,
 } from './chatbot-school-demo.tools';
-import { GeminiIntentService } from './llm/gemini-intent.service';
-import { GeminiResponseService } from './llm/gemini-response.service';
-import type { ChatbotLlmIntent, ChatbotLlmToolName } from './llm/chatbot-llm.types';
+import { OpenAiChatbotClient } from './openai-chatbot.client';
 import { normalizeSmartbotResponse } from './smartbot-card.normalizer';
 import { callChatbotTool } from './tools/chatbot-tool.registry';
 import type { ChatbotToolResult, ChatbotToolRole } from './tools/chatbot-tool.types';
@@ -57,14 +52,12 @@ import type { ChatbotToolResult, ChatbotToolRole } from './tools/chatbot-tool.ty
 export class ChatbotService {
   constructor(
     private readonly smartbotClient: SmartbotClient =
-      env.SMARTBOT_MODE === 'mock' ? new MockSmartbotClient() : new VnptSmartBotClient(),
+      env.NODE_ENV === 'test' ? new MockSmartbotClient() : new OpenAiChatbotClient(),
     private readonly conversationRepository: ChatbotConversationRepository =
       new PrismaChatbotConversationRepository(),
     private readonly actionRepository: ChatbotActionRepository = new PrismaChatbotActionRepository(),
     private readonly handoffRepository: ChatbotHandoffRepository = new PrismaChatbotHandoffRepository(),
-    private readonly smartbotStreamClient: SmartbotStreamClient = new VnptSmartBotStreamClient(),
-    private readonly geminiIntentService = new GeminiIntentService(),
-    private readonly geminiResponseService = new GeminiResponseService(),
+    private readonly smartbotStreamClient: SmartbotStreamClient = new OpenAiChatbotClient(),
   ) {}
 
   async sendMessage(
@@ -76,7 +69,9 @@ export class ChatbotService {
       return this.finalizeResponse(prepared, emptyNormalizedResponse(prepared.sessionId));
     }
 
-    const raw = await this.safeSendSmartbotMessage(prepared);
+    const raw = prepared.intent === 'criteria_rag'
+      ? criteriaFallbackResponse(prepared.sessionId)
+      : await this.safeSendSmartbotMessage(prepared);
     const normalized = normalizeSmartbotResponse({
       raw,
       sessionId: prepared.sessionId,
@@ -103,8 +98,21 @@ export class ChatbotService {
       return;
     }
 
-    if (env.SMARTBOT_MODE === 'mock') {
+    if (env.NODE_ENV === 'test') {
       await this.streamMockResponse(prepared, callbacks);
+      return;
+    }
+
+    if (prepared.intent === 'criteria_rag') {
+      const response = await this.finalizeResponse(
+        prepared,
+        normalizeSmartbotResponse({
+          raw: criteriaFallbackResponse(prepared.sessionId),
+          sessionId: prepared.sessionId,
+          fallbackText,
+        }),
+      );
+      await streamResponse(response, callbacks);
       return;
     }
 
@@ -118,16 +126,13 @@ export class ChatbotService {
         },
       });
     } catch (error) {
-      if (prepared.intent !== 'criteria_rag' || (error instanceof AppError && !isSmartbotProviderError(error))) {
+      if (!(error instanceof AppError) || !isAssistantProviderError(error)) {
         throw error;
       }
+      const raw = providerFallbackResponse(prepared.sessionId, false);
       const response = await this.finalizeResponse(
         prepared,
-        normalizeSmartbotResponse({
-          raw: criteriaFallbackResponse(prepared.sessionId),
-          sessionId: prepared.sessionId,
-          fallbackText,
-        }),
+        normalizeSmartbotResponse({ raw, sessionId: prepared.sessionId, fallbackText }),
       );
       for (const chunk of splitForStreaming(response.answer)) {
         await callbacks.onDelta({ text: chunk });
@@ -148,17 +153,8 @@ export class ChatbotService {
       contextScope: input.contextScope,
       pageContext: input.pageContext,
     });
-    const prompts = env.SMARTBOT_USE_DYNAMIC_PROMPT ? buildSmartbotPrompts(context) : undefined;
-    let schoolDemoResult = inferSchoolDemoTool(input, context);
+    const schoolDemoResult = inferSchoolDemoTool(input, context);
     const deterministicCriteriaRag = context.contextScope === 'student_helpdesk' && inferCriteriaRagIntent(input);
-    const geminiIntent = !schoolDemoResult && !deterministicCriteriaRag
-      ? await this.geminiIntentService.classify({
-          text: input.text,
-          context,
-          availableTools: availableGeminiTools,
-        })
-      : null;
-    schoolDemoResult = schoolDemoResult ?? schoolDemoToolFromGemini(geminiIntent, context);
     const toolMatch = schoolDemoResult ? null : inferToolCall(user.role as ChatbotToolRole, input);
     const registryToolResult = toolMatch
       ? await callChatbotTool(
@@ -179,11 +175,11 @@ export class ChatbotService {
     const toolResult = schoolDemoResult ?? registryToolResult;
     const intent = toolResult
       ? 'local_tool'
-      : deterministicCriteriaRag || geminiIntent?.tool === 'callVnptRag'
+      : deterministicCriteriaRag
         ? 'criteria_rag'
-        : 'smartbot';
+        : 'assistant';
     const request = {
-      bot_id: env.SMARTBOT_MODE === 'mock' ? 'mock-smartbot' : env.SMARTBOT_BOT_ID,
+      bot_id: 'openai-assistant',
       sender_id: buildSenderId(user.id),
       text: input.text,
       input_channel: env.SMARTBOT_INPUT_CHANNEL,
@@ -195,7 +191,7 @@ export class ChatbotService {
           ...(toolResult ? [{ variableName: 'tool_summary', value: toolResult.message.slice(0, 500) }] : []),
         ],
       },
-      settings: prompts,
+      settings: buildSmartbotPrompts(context),
     };
 
     await this.conversationRepository.ensureSession({
@@ -224,7 +220,7 @@ export class ChatbotService {
   private async finalizeResponse(
     prepared: PreparedChatbotMessage,
     normalized: NormalizedSmartbotResponse,
-    options: { answerOverride?: string; skipGeminiPolish?: boolean } = {},
+    options: { answerOverride?: string } = {},
   ): Promise<ChatbotMessageResponseDto> {
     const guardrailedAnswer = applySmartbotGuardrails(
       options.answerOverride ?? prepared.schoolDemoResult?.message ?? normalized.answer,
@@ -265,14 +261,7 @@ export class ChatbotService {
       ),
       handoffRequired: normalized.handoffRequired || Boolean(prepared.schoolDemoResult?.handoffRequired),
     };
-    const polishedResponse = options.skipGeminiPolish
-      ? baseUnsavedResponse
-      : await this.geminiResponseService.polishResponse({
-          text: prepared.input.text,
-          context: prepared.context,
-          response: baseUnsavedResponse,
-        });
-    const unsavedResponse = applyResponseGuardrails(polishedResponse, prepared.input.text);
+    const unsavedResponse = applyResponseGuardrails(baseUnsavedResponse, prepared.input.text);
 
     const savedActions = await this.actionRepository.saveActions({
       sessionId: prepared.sessionId,
@@ -310,13 +299,13 @@ export class ChatbotService {
     try {
       return await this.smartbotClient.sendMessage(prepared.request);
     } catch (error) {
-      if (error instanceof AppError && !isSmartbotProviderError(error)) {
+      if (error instanceof AppError && !isAssistantProviderError(error)) {
         throw error;
       }
       if (prepared.intent === 'criteria_rag') {
         return criteriaFallbackResponse(prepared.sessionId);
       }
-      return fallbackResponse(prepared.sessionId);
+      return providerFallbackResponse(prepared.sessionId, false);
     }
   }
 
@@ -330,7 +319,6 @@ export class ChatbotService {
     const answer = await this.streamPreparedAnswer(prepared, callbacks);
     const response = await this.finalizeResponse(prepared, emptyNormalizedResponse(prepared.sessionId), {
       answerOverride: answer || undefined,
-      skipGeminiPolish: true,
     });
     await callbacks.onCard({
       messages: response.messages,
@@ -350,7 +338,6 @@ export class ChatbotService {
     const answer = await this.streamPreparedAnswer(prepared, callbacks);
     const response = await this.finalizeResponse(prepared, emptyNormalizedResponse(prepared.sessionId), {
       answerOverride: answer || undefined,
-      skipGeminiPolish: true,
     });
     await callbacks.onCard({
       messages: response.messages,
@@ -368,22 +355,6 @@ export class ChatbotService {
       prepared.schoolDemoResult?.message ?? prepared.registryToolResult?.message ?? 'Mình đã chuẩn bị phản hồi phù hợp.',
       prepared.input.text,
     );
-    const cards = prepared.schoolDemoResult?.cards ?? [];
-    const actions = prepared.schoolDemoResult?.actions ?? [];
-    const streamed = await this.geminiResponseService.streamAnswer(
-      {
-        text: prepared.input.text,
-        context: prepared.context,
-        answer: baseAnswer,
-        cards,
-        actions,
-      },
-      {
-        onDelta: (text) => callbacks.onDelta({ text: redactUnsafeSmartbotClaims(text) }),
-      },
-    );
-    if (streamed) return applySmartbotGuardrails(streamed, prepared.input.text);
-
     for (const chunk of splitForStreaming(baseAnswer)) {
       await callbacks.onDelta({ text: chunk });
       await delay(60);
@@ -396,7 +367,9 @@ export class ChatbotService {
     prepared: PreparedChatbotMessage,
     callbacks: ChatbotStreamEventCallbacks,
   ): Promise<void> {
-    const raw = await this.safeSendSmartbotMessage(prepared);
+    const raw = prepared.intent === 'criteria_rag'
+      ? criteriaFallbackResponse(prepared.sessionId)
+      : await this.safeSendSmartbotMessage(prepared);
     const normalized = normalizeSmartbotResponse({ raw, sessionId: prepared.sessionId, fallbackText });
     const response = await this.finalizeResponse(prepared, normalized);
     for (const chunk of splitForStreaming(response.answer)) {
@@ -405,6 +378,15 @@ export class ChatbotService {
     }
     await callbacks.onFinal(response);
   }
+}
+
+async function streamResponse(
+  response: ChatbotMessageResponseDto,
+  callbacks: ChatbotStreamEventCallbacks,
+): Promise<void> {
+  for (const chunk of splitForStreaming(response.answer)) await callbacks.onDelta({ text: chunk });
+  await callbacks.onCard({ messages: response.messages, cards: response.cards, actions: response.actions });
+  await callbacks.onFinal(response);
 }
 
 export function buildNoopChatbotService(client: SmartbotClient): ChatbotService {
@@ -424,19 +406,11 @@ export function buildNoopChatbotService(client: SmartbotClient): ChatbotService 
   );
 }
 
-const fallbackText = smartbotFallbackText;
+const fallbackText = chatbotFallbackText;
 
 const schoolCriteriaFallbackText =
-  'Ở cấp Trường, hồ sơ Sinh viên 5 tốt cần đáp ứng 5 nhóm tiêu chí: Đạo đức tốt, Học tập tốt, Thể lực tốt, Tình nguyện tốt và Hội nhập tốt. Một số mốc chính gồm điểm rèn luyện từ 82 điểm trở lên, điểm học tập từ 3.0/4.0 trở lên và không có điểm F, tình nguyện có thể xét theo các minh chứng như hoạt động tình nguyện, hiến máu hoặc giấy chứng nhận phù hợp, và hội nhập có thể xét theo hoạt động hội nhập hoặc chứng chỉ ngoại ngữ phù hợp. Hệ thống chỉ hỗ trợ tiền kiểm và giải thích. Kết quả chính thức do cán bộ/Hội đồng xác nhận.';
+  'Điều kiện Sinh viên 5 tốt được cấu hình theo cấp xét duyệt và từng nhóm tiêu chí. Hãy xem danh mục tiêu chí và kết quả tiền kiểm trong hồ sơ để biết yêu cầu đang áp dụng. Hệ thống chỉ hỗ trợ tiền kiểm và giải thích; kết quả chính thức do cán bộ/Hội đồng xác nhận.';
 
-const availableGeminiTools: ChatbotLlmToolName[] = [
-  'getGapAnalysis',
-  'getEvidenceSummary',
-  'searchMatchingHub',
-  'openEvidenceUpload',
-  'createHandoff',
-  'callVnptRag',
-];
 
 export type ChatbotStreamEventCallbacks = {
   onMeta: (data: { sessionId: string; mode: 'stream' }) => Promise<void> | void;
@@ -455,7 +429,7 @@ type PreparedChatbotMessage = {
   sessionId: string;
   context: SafeChatbotContext;
   request: SmartbotConversationRequest;
-  intent: 'local_tool' | 'criteria_rag' | 'smartbot';
+  intent: 'local_tool' | 'criteria_rag' | 'assistant';
   schoolDemoResult: SchoolDemoToolResult | null;
   registryToolResult: ChatbotToolResult | null;
 };
@@ -514,94 +488,28 @@ function applyResponseGuardrails(
   };
 }
 
-function schoolDemoToolFromGemini(
-  intent: ChatbotLlmIntent | null,
-  context: SafeChatbotContext,
-): SchoolDemoToolResult | null {
-  if (!intent || intent.confidence === 'low' || context.contextScope !== 'student_helpdesk') return null;
-  switch (intent.tool) {
-    case 'getGapAnalysis':
-      return getSchoolDemoGapAnalysis(context);
-    case 'getEvidenceSummary':
-      return getSchoolDemoEvidenceSummary(context);
-    case 'searchMatchingHub':
-      return searchSchoolDemoMatchingHub(context);
-    case 'openEvidenceUpload':
-      return buildUploadEvidenceToolResult(intent);
-    case 'createHandoff':
-      return createSchoolDemoHandoff(context);
-    default:
-      return null;
-  }
-}
-
-function buildUploadEvidenceToolResult(intent: ChatbotLlmIntent): SchoolDemoToolResult {
-  const criterion = intent.args.criterion ?? 'physical';
-  const label = criterion === 'physical' ? 'Thể lực tốt' : criterionLabel(criterion);
-  return {
-    type: 'action_cards',
-    title: `Upload minh chứng ${label}`,
-    message: `Bạn có thể mở workspace Minh chứng và chọn tiêu chí ${label} để tải file phù hợp.`,
-    subtitle: `Mở trang Minh chứng và chọn tiêu chí ${label}.`,
-    cards: [
-      {
-        type: 'gap_item',
-        title: label,
-        status: 'Cần bổ sung minh chứng',
-        description: `Mở trang Minh chứng và chọn tiêu chí ${label} để tải file phù hợp.`,
-      },
-    ],
-    actions: [
-      {
-        id: `act_school_nav_upload_${criterion}`,
-        label: `Upload minh chứng ${label.replace(' tốt', '').toLowerCase()}`,
-        type: 'navigate',
-        route: '/app/evidence',
-        query: { criterion, action: 'upload' },
-        requiresConfirmation: false,
-      },
-    ],
-  };
-}
-
-function criterionLabel(criterion: ChatbotLlmIntent['args']['criterion']): string {
-  switch (criterion) {
-    case 'ethics':
-      return 'Đạo đức tốt';
-    case 'academic':
-      return 'Học tập tốt';
-    case 'physical':
-      return 'Thể lực tốt';
-    case 'volunteer':
-      return 'Tình nguyện tốt';
-    case 'integration':
-      return 'Hội nhập tốt';
-    default:
-      return 'Thể lực tốt';
-  }
-}
-
 function hasLocalToolResponse(prepared: PreparedChatbotMessage): boolean {
   if (prepared.schoolDemoResult) return true;
   const result = prepared.registryToolResult;
   return Boolean(result && ((result.cards?.length ?? 0) > 0 || (result.actions?.length ?? 0) > 0));
 }
 
-function isSmartbotProviderError(error: AppError): boolean {
-  switch (error.code) {
-    case ErrorCodes.SMARTBOT_AUTH_FAILED:
-    case ErrorCodes.SMARTBOT_ENV_MISSING:
-    case ErrorCodes.SMARTBOT_HTTP_ERROR:
-    case ErrorCodes.SMARTBOT_TIMEOUT:
-    case ErrorCodes.SMARTBOT_PARSE_FAILED:
-    case ErrorCodes.SMARTBOT_EMPTY_CARD_DATA:
-    case ErrorCodes.SMARTBOT_NETWORK_ERROR:
-    case ErrorCodes.SMARTBOT_RESPONSE_INVALID:
-    case ErrorCodes.SMARTBOT_REQUEST_FAILED:
-      return true;
-    default:
-      return false;
-  }
+function isAssistantProviderError(error: AppError): boolean {
+  return error.code.startsWith('OPENAI_');
+}
+
+function providerFallbackResponse(sessionId: string, criteria: boolean) {
+  if (criteria) return criteriaFallbackResponse(sessionId);
+  return {
+    object: {
+      sb: {
+        session_id: sessionId,
+        intent_name: 'openai_fallback',
+        card_data: [{ type: 'text', text: fallbackText }],
+        card_data_info: { status: 0 },
+      },
+    },
+  };
 }
 
 function splitForStreaming(text: string): string[] {
