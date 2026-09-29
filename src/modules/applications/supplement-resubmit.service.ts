@@ -328,7 +328,7 @@ function evaluateSupplementReadiness(task: SupplementTaskRecord) {
   return { canResubmit: true, reason: null };
 }
 
-function jsonInputOrNull(value: Prisma.JsonValue | null | undefined): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+function jsonInputOrNull(value: unknown): Prisma.InputJsonValue | typeof Prisma.JsonNull {
   return value === null || value === undefined
     ? Prisma.JsonNull
     : (value as Prisma.InputJsonValue);
