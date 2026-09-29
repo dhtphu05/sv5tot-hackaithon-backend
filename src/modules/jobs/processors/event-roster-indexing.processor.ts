@@ -6,6 +6,8 @@ import { FileStorageType, IndexingStatus, type File, type IndexingJob, type Pris
 import { env } from '../../../config/env';
 import { prisma } from '../../../infrastructure/database/prisma';
 import { auditActions } from '../../../shared/constants/application';
+import { AppError } from '../../../shared/errors/app-error';
+import { ErrorCodes } from '../../../shared/errors/error-codes';
 import { createApplicationAudit } from '../../applications/application.helpers';
 import { StorageService } from '../../storage/storage.service';
 
@@ -59,17 +61,32 @@ export async function processEventRosterIndexingJob(
     data: { indexingStatus: IndexingStatus.ocr_processing },
   });
 
-  const source = await prepareRosterPreviewSource(eventFile.file);
+  let source: { filePath: string; cleanup?: () => Promise<void> } | undefined;
   let preview: RosterPreviewResult;
   try {
+    source = await prepareRosterPreviewSource(eventFile.file);
     preview = await extractRosterPreview({
       filePath: source.filePath,
       originalName: eventFile.file.originalName,
       mimeType: eventFile.file.mimeType,
       fallbackConvertedValue: eventFile.event.convertedValue,
     });
+  } catch (error) {
+    const code = error instanceof AppError ? error.code : ErrorCodes.ROSTER_PARSE_FAILED;
+    await prisma.eventFile.updateMany({
+      where: { id: eventFile.id, fileId: eventFile.file.id },
+      data: { indexingStatus: IndexingStatus.failed },
+    });
+    await createApplicationAudit(prisma, {
+      actorId: eventFile.event.createdBy,
+      action: auditActions.EVENT_ROSTER_INDEXING_FAILED,
+      targetType: 'event',
+      targetId: eventFile.eventId,
+      afterStateJson: { eventFileId: eventFile.id, code },
+    });
+    throw error;
   } finally {
-    await source.cleanup?.();
+    await source?.cleanup?.();
   }
 
   const indexingStatus =
@@ -141,12 +158,17 @@ async function extractRosterPreview(input: {
       const content = await fs.readFile(input.filePath, 'utf8');
       const rows = parseCsv(content);
       return buildPreview(rows, input.fallbackConvertedValue);
-    } catch {
-      return mockRows(input.originalName, input.fallbackConvertedValue);
+    } catch (error) {
+      throw new AppError(422, ErrorCodes.ROSTER_PARSE_FAILED, 'Event roster CSV could not be parsed', {
+        retryable: false,
+        cause: error instanceof Error ? error.name : 'unknown',
+      });
     }
   }
 
-  return mockRows(input.originalName, input.fallbackConvertedValue);
+  throw new AppError(422, ErrorCodes.ROSTER_PARSE_FAILED, 'Unsupported event roster format', {
+    retryable: false,
+  });
 }
 
 function parseCsv(content: string): Array<Record<string, string>> {
@@ -183,45 +205,6 @@ function splitCsvLine(line: string): string[] {
   }
   cells.push(current.trim());
   return cells;
-}
-
-function mockRows(fileName: string, fallbackConvertedValue: number | null): RosterPreviewResult {
-  const normalized = fileName.toLowerCase();
-  if (normalized.includes('empty')) {
-    return buildPreview([], fallbackConvertedValue);
-  }
-
-  const rows = [
-    {
-      MSSV: '102220001',
-      'Họ và tên': 'Nguyễn Văn Sinh',
-      Lớp: '22T_DT1',
-      Khoa: 'Khoa Công nghệ Thông tin',
-      'Trạng thái': 'Hoàn thành',
-      'Số ngày': fallbackConvertedValue ?? 3,
-    },
-    {
-      MSSV: normalized.includes('duplicate') ? '102220001' : '102220002',
-      'Họ và tên': 'Trần Lớp Trưởng',
-      Lớp: '22T_DT1',
-      Khoa: 'Khoa Công nghệ Thông tin',
-      'Trạng thái': 'Hoàn thành',
-      'Số ngày': fallbackConvertedValue ?? 3,
-    },
-  ];
-
-  if (normalized.includes('missing')) {
-    rows.push({
-      MSSV: '',
-      'Họ và tên': 'Thiếu MSSV',
-      Lớp: '22T_DT1',
-      Khoa: 'Khoa Công nghệ Thông tin',
-      'Trạng thái': 'Hoàn thành',
-      'Số ngày': fallbackConvertedValue ?? 3,
-    });
-  }
-
-  return buildPreview(rows, fallbackConvertedValue);
 }
 
 function buildPreview(
