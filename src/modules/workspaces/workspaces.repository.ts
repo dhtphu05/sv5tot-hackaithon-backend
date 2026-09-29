@@ -41,12 +41,16 @@ export class WorkspacesRepository {
           shortName: true,
           isActive: true,
           registrationEnabled: true,
+          type: true,
+          parentWorkspaceId: true,
+          parentWorkspace: { select: { id: true, code: true, name: true, shortName: true, type: true } },
           createdAt: true,
           updatedAt: true,
           _count: {
             select: {
               users: true,
               applications: true,
+              childWorkspaces: true,
             },
           },
         },
@@ -70,6 +74,9 @@ export class WorkspacesRepository {
         shortName: true,
         isActive: true,
         registrationEnabled: true,
+        type: true,
+        parentWorkspaceId: true,
+        parentWorkspace: { select: { id: true, code: true, name: true, shortName: true, type: true } },
         createdAt: true,
         updatedAt: true,
         _count: {
@@ -89,7 +96,18 @@ export class WorkspacesRepository {
     });
   }
 
-  create(data: Prisma.WorkspaceCreateInput) {
+  findParentById(id: string) {
+    return this.db.workspace.findUnique({
+      where: { id },
+      select: { id: true, type: true, isActive: true },
+    });
+  }
+
+  countApplicationsInWorkspace(workspaceId: string) {
+    return this.db.application.count({ where: { workspaceId } });
+  }
+
+  create(data: Prisma.WorkspaceUncheckedCreateInput) {
     return this.db.workspace.create({
       data,
       select: {
@@ -99,6 +117,9 @@ export class WorkspacesRepository {
         shortName: true,
         isActive: true,
         registrationEnabled: true,
+        type: true,
+        parentWorkspaceId: true,
+        parentWorkspace: { select: { id: true, code: true, name: true, shortName: true, type: true } },
         createdAt: true,
         updatedAt: true,
         _count: {
@@ -122,6 +143,9 @@ export class WorkspacesRepository {
         shortName: true,
         isActive: true,
         registrationEnabled: true,
+        type: true,
+        parentWorkspaceId: true,
+        parentWorkspace: { select: { id: true, code: true, name: true, shortName: true, type: true } },
         createdAt: true,
         updatedAt: true,
         _count: {

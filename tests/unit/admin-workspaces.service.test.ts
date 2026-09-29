@@ -1,4 +1,4 @@
-import { ApplicationStatus, Role } from '@prisma/client';
+import { ApplicationStatus, Role, WorkspaceType } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkspacesService } from '../../src/modules/workspaces/workspaces.service';
 
@@ -25,6 +25,9 @@ function workspace(overrides: Record<string, unknown> = {}) {
     shortName: 'TEST',
     isActive: true,
     registrationEnabled: false,
+    type: WorkspaceType.SCHOOL,
+    parentWorkspaceId: null,
+    parentWorkspace: null,
     createdAt: now,
     updatedAt: now,
     _count: { users: 2, applications: 1 },
@@ -38,6 +41,8 @@ function buildMocks() {
     listAdmin: vi.fn(),
     findById: vi.fn(),
     findByCode: vi.fn(),
+    findParentById: vi.fn(),
+    countApplicationsInWorkspace: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
     countUsersByRole: vi.fn(),
@@ -74,6 +79,8 @@ describe('admin workspace service', () => {
       shortName: 'TEST',
       isActive: true,
       registrationEnabled: false,
+      type: WorkspaceType.SCHOOL,
+      parentWorkspaceId: null,
     });
     expect(result).toMatchObject({ code: 'TEST-DHDN', userCount: 2, applicationCount: 1 });
     expect(auditService.log).toHaveBeenCalledWith(
@@ -102,6 +109,39 @@ describe('admin workspace service', () => {
     await expect(
       service.createAdmin(actor, { code: 'bad code', name: 'Invalid' }),
     ).rejects.toMatchObject({ statusCode: 400, code: 'WORKSPACE_CODE_INVALID' });
+  });
+
+  it('creates a UDN school under a valid UNIVERSITY_SYSTEM workspace', async () => {
+    const { repository, service } = buildMocks();
+    repository.findByCode.mockResolvedValue(null);
+    repository.findParentById.mockResolvedValue({ id: 'udn', type: WorkspaceType.UNIVERSITY_SYSTEM, isActive: true });
+    repository.create.mockResolvedValue(workspace({ type: WorkspaceType.SCHOOL, parentWorkspaceId: 'udn' }));
+    await service.createAdmin(actor, {
+      code: 'SCHOOL-A', name: 'School A', type: WorkspaceType.SCHOOL, parentWorkspaceId: 'udn',
+    } as never);
+    expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({
+      type: WorkspaceType.SCHOOL, parentWorkspaceId: 'udn',
+    }));
+  });
+
+  it('rejects invalid workspace type and parent combinations', async () => {
+    const { repository, service } = buildMocks();
+    repository.findByCode.mockResolvedValue(null);
+    repository.findParentById.mockResolvedValue({ id: 'school-parent', type: WorkspaceType.SCHOOL, isActive: true });
+    await expect(service.createAdmin(actor, {
+      code: 'SCHOOL-B', name: 'School B', type: WorkspaceType.SCHOOL, parentWorkspaceId: 'school-parent',
+    } as never)).rejects.toMatchObject({ code: 'UNSUPPORTED_WORKSPACE_HIERARCHY' });
+    expect(repository.create).not.toHaveBeenCalled();
+  });
+
+  it('blocks changing a school parent after applications exist', async () => {
+    const { repository, service } = buildMocks();
+    repository.findById.mockResolvedValue(workspace({ type: WorkspaceType.SCHOOL, parentWorkspaceId: null }));
+    repository.findParentById.mockResolvedValue({ id: 'udn', type: WorkspaceType.UNIVERSITY_SYSTEM, isActive: true });
+    repository.countApplicationsInWorkspace.mockResolvedValue(1);
+    await expect(service.updateAdmin(actor, workspaceId, { parentWorkspaceId: 'udn' } as never))
+      .rejects.toMatchObject({ statusCode: 409, code: 'WORKSPACE_HIERARCHY_IN_USE' });
+    expect(repository.update).not.toHaveBeenCalled();
   });
 
   it('blocks opening registration while creating an inactive workspace', async () => {
@@ -156,6 +196,14 @@ describe('admin workspace service', () => {
       statusCode: 409,
       code: 'WORKSPACE_NOT_READY_FOR_REGISTRATION',
     });
+    expect(repository.update).not.toHaveBeenCalled();
+  });
+
+  it('does not allow City or University System workspaces to open school registration', async () => {
+    const { repository, service } = buildMocks();
+    repository.findById.mockResolvedValue(workspace({ type: WorkspaceType.UNIVERSITY_SYSTEM }));
+    await expect(service.updateStatusAdmin(actor, workspaceId, { registrationEnabled: true }))
+      .rejects.toMatchObject({ statusCode: 400, code: 'WORKSPACE_STATUS_INVALID' });
     expect(repository.update).not.toHaveBeenCalled();
   });
 

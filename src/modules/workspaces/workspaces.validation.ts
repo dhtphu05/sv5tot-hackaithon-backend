@@ -1,8 +1,8 @@
-import { Role } from '@prisma/client';
+import { Role, WorkspaceType } from '@prisma/client';
 import { z } from 'zod';
 
 export const listWorkspacesQuerySchema = z.object({
-  registration: z.coerce.boolean().optional(),
+  registration: z.enum(['true', 'false']).transform((value) => value === 'true').optional(),
 });
 
 const optionalTrimmedString = z.preprocess((value) => {
@@ -22,6 +22,7 @@ const paginationQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
+const booleanQuerySchema = z.enum(['true', 'false']).transform((value) => value === 'true');
 
 export const workspaceIdParamSchema = z.object({
   workspaceId: z.string().uuid(),
@@ -29,24 +30,28 @@ export const workspaceIdParamSchema = z.object({
 
 export const listAdminWorkspacesQuerySchema = paginationQuerySchema.extend({
   search: optionalTrimmedString,
-  isActive: z.coerce.boolean().optional(),
-  registrationEnabled: z.coerce.boolean().optional(),
+  type: z.nativeEnum(WorkspaceType).optional(),
+  isActive: booleanQuerySchema.optional(),
+  registrationEnabled: booleanQuerySchema.optional(),
 });
 
 export const createAdminWorkspaceBodySchema = z.object({
   code: z.string().trim().min(1).max(64).transform((value) => value.toUpperCase()),
   name: z.string().trim().min(1).max(255),
   shortName: optionalNullableTrimmedString,
-  isActive: z.coerce.boolean().optional(),
-  registrationEnabled: z.coerce.boolean().optional(),
+  isActive: z.boolean().optional(),
+  registrationEnabled: z.boolean().optional(),
+  type: z.nativeEnum(WorkspaceType).optional(),
+  parentWorkspaceId: z.string().uuid().nullable().optional(),
 });
 
 export const updateAdminWorkspaceBodySchema = z
   .object({
     name: z.string().trim().min(1).max(255).optional(),
     shortName: optionalNullableTrimmedString,
+    parentWorkspaceId: z.string().uuid().nullable().optional(),
   })
-  .refine((value) => value.name !== undefined || value.shortName !== undefined, {
+  .refine((value) => value.name !== undefined || value.shortName !== undefined || value.parentWorkspaceId !== undefined, {
     message: 'At least one editable workspace field is required',
   });
 
@@ -62,7 +67,7 @@ export const updateAdminWorkspaceStatusBodySchema = z
 export const listAdminWorkspaceUsersQuerySchema = paginationQuerySchema.extend({
   search: optionalTrimmedString,
   role: z.nativeEnum(Role).optional(),
-  isActive: z.coerce.boolean().optional(),
+  isActive: booleanQuerySchema.optional(),
 });
 
 export type ListWorkspacesQuery = z.infer<typeof listWorkspacesQuerySchema>;

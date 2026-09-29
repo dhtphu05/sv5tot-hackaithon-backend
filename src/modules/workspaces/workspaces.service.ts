@@ -1,4 +1,4 @@
-import { ApplicationStatus, Role, type Prisma } from '@prisma/client';
+import { ApplicationStatus, Role, WorkspaceType, type Prisma } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -58,6 +58,10 @@ export class WorkspacesService {
         shortName: workspace.shortName,
         isActive: workspace.isActive,
         registrationEnabled: workspace.registrationEnabled,
+        type: workspace.type,
+        parentWorkspaceId: workspace.parentWorkspaceId,
+        parentWorkspace: workspace.parentWorkspace,
+        childWorkspaceCount: workspace._count.childWorkspaces,
         userCount: workspace._count.users,
         applicationCount: workspace._count.applications,
         createdAt: workspace.createdAt,
@@ -92,6 +96,9 @@ export class WorkspacesService {
       shortName: workspace.shortName,
       isActive: workspace.isActive,
       registrationEnabled: workspace.registrationEnabled,
+      type: workspace.type,
+      parentWorkspaceId: workspace.parentWorkspaceId,
+      parentWorkspace: workspace.parentWorkspace,
       totalUsers: workspace._count.users,
       usersByRole: toRoleCountMap(usersByRoleRows),
       totalApplications: workspace._count.applications,
@@ -115,12 +122,18 @@ export class WorkspacesService {
 
     const isActive = input.isActive ?? true;
     const registrationEnabled = input.registrationEnabled ?? false;
+    const type = input.type ?? WorkspaceType.SCHOOL;
+    const parentWorkspaceId = input.parentWorkspaceId ?? null;
     if (registrationEnabled && !isActive) {
       throw new AppError(
         400,
         ErrorCodes.WORKSPACE_STATUS_INVALID,
         'Registration cannot be enabled for an inactive workspace',
       );
+    }
+    await assertValidWorkspaceHierarchy(this.workspacesRepository, type, parentWorkspaceId);
+    if (registrationEnabled && type !== WorkspaceType.SCHOOL) {
+      throw new AppError(400, ErrorCodes.WORKSPACE_STATUS_INVALID, 'Only School workspaces can open registration');
     }
 
     const existing = await this.workspacesRepository.findByCode(code);
@@ -138,6 +151,8 @@ export class WorkspacesService {
       shortName: normalizeNullableString(input.shortName),
       isActive,
       registrationEnabled,
+      type,
+      parentWorkspaceId,
     });
 
     await this.logWorkspaceMutation(user, workspace.id, workspaceAuditActions.created, null, workspace);
@@ -153,6 +168,24 @@ export class WorkspacesService {
     const data: Prisma.WorkspaceUpdateInput = {};
     if (input.name !== undefined) data.name = input.name.trim();
     if (input.shortName !== undefined) data.shortName = normalizeNullableString(input.shortName);
+    if (input.parentWorkspaceId !== undefined && input.parentWorkspaceId !== before.parentWorkspaceId) {
+      await assertValidWorkspaceHierarchy(
+        this.workspacesRepository,
+        before.type,
+        input.parentWorkspaceId,
+        workspaceId,
+      );
+      if ((await this.workspacesRepository.countApplicationsInWorkspace(workspaceId)) > 0) {
+        throw new AppError(
+          409,
+          ErrorCodes.WORKSPACE_HIERARCHY_IN_USE,
+          'Đơn vị đã có hồ sơ. Không thể đổi đơn vị cha để tránh thay đổi cách xác định điều kiện của hồ sơ hiện có.',
+        );
+      }
+      data.parentWorkspace = input.parentWorkspaceId
+        ? { connect: { id: input.parentWorkspaceId } }
+        : { disconnect: true };
+    }
 
     const after = await this.workspacesRepository.update(workspaceId, data);
     await this.logWorkspaceMutation(
@@ -162,6 +195,18 @@ export class WorkspacesService {
       before,
       after,
     );
+    if (input.parentWorkspaceId !== undefined && input.parentWorkspaceId !== before.parentWorkspaceId) {
+      await this.auditService.log({
+        actorId: user.id,
+        actorRole: user.role,
+        workspaceId,
+        action: 'WORKSPACE_HIERARCHY_UPDATED',
+        entityType: 'workspace',
+        entityId: workspaceId,
+        before: { parentWorkspaceId: before.parentWorkspaceId },
+        after: { parentWorkspaceId: after.parentWorkspaceId },
+      });
+    }
     return toAdminWorkspaceDto(after);
   }
 
@@ -173,6 +218,10 @@ export class WorkspacesService {
     const before = await this.getWorkspaceOrThrow(workspaceId);
     const nextIsActive = input.isActive ?? before.isActive;
     let nextRegistrationEnabled = input.registrationEnabled ?? before.registrationEnabled;
+
+    if (nextRegistrationEnabled && before.type !== WorkspaceType.SCHOOL) {
+      throw new AppError(400, ErrorCodes.WORKSPACE_STATUS_INVALID, 'Only School workspaces can open registration');
+    }
 
     if (!nextIsActive) {
       if (input.registrationEnabled === true) {
@@ -343,6 +392,7 @@ export class WorkspacesService {
 
 function buildWorkspaceListWhere(query: ListAdminWorkspacesQuery): Prisma.WorkspaceWhereInput {
   return {
+    ...(query.type ? { type: query.type } : {}),
     ...(query.isActive === undefined ? {} : { isActive: query.isActive }),
     ...(query.registrationEnabled === undefined
       ? {}
@@ -411,11 +461,41 @@ function toAdminWorkspaceDto(
     shortName: typedWorkspace.shortName,
     isActive: typedWorkspace.isActive,
     registrationEnabled: typedWorkspace.registrationEnabled,
+    type: typedWorkspace.type,
+    parentWorkspaceId: typedWorkspace.parentWorkspaceId,
+    parentWorkspace: typedWorkspace.parentWorkspace,
     userCount: typedWorkspace._count.users,
     applicationCount: typedWorkspace._count.applications,
     createdAt: typedWorkspace.createdAt,
     updatedAt: typedWorkspace.updatedAt,
   };
+}
+
+async function assertValidWorkspaceHierarchy(
+  repository: WorkspacesRepository,
+  type: WorkspaceType,
+  parentWorkspaceId: string | null,
+  workspaceId?: string,
+) {
+  if (!parentWorkspaceId) return;
+  if (parentWorkspaceId === workspaceId || type !== WorkspaceType.SCHOOL) {
+    throw new AppError(
+      400,
+      ErrorCodes.UNSUPPORTED_WORKSPACE_HIERARCHY,
+      'Trường chỉ có thể trực thuộc một đơn vị UNIVERSITY_SYSTEM hợp lệ.',
+    );
+  }
+  const parent = await repository.findParentById(parentWorkspaceId);
+  if (!parent) {
+    throw new AppError(404, ErrorCodes.WORKSPACE_NOT_FOUND, 'Workspace parent not found');
+  }
+  if (parent.type !== WorkspaceType.UNIVERSITY_SYSTEM || !parent.isActive) {
+    throw new AppError(
+      400,
+      ErrorCodes.UNSUPPORTED_WORKSPACE_HIERARCHY,
+      'Trường chỉ có thể trực thuộc một đơn vị UNIVERSITY_SYSTEM hợp lệ.',
+    );
+  }
 }
 
 function normalizeNullableString(value: string | null | undefined) {

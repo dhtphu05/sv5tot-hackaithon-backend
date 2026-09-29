@@ -86,6 +86,16 @@ describe('admin workspace routes', () => {
     );
   });
 
+  it('parses false workspace status filters as false', async () => {
+    mocks.listAdmin.mockResolvedValue({ items: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 0 } });
+    await request(buildApp())
+      .get('/api/admin/workspaces')
+      .query({ isActive: false, registrationEnabled: false })
+      .set('x-test-role', Role.admin)
+      .expect(200);
+    expect(mocks.listAdmin).toHaveBeenCalledWith(expect.objectContaining({ isActive: false, registrationEnabled: false }));
+  });
+
   it('denies manager access', async () => {
     const response = await request(buildApp())
       .get('/api/admin/workspaces')
