@@ -313,7 +313,7 @@ enum CollectiveStatus {
 }
 
 model Workspace {
-  id                         String                           @id @default(uuid()) @db.Uuid
+  id                         String                           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   code                       String                           @unique
   type                       WorkspaceType                    @default(SCHOOL)
   parentWorkspaceId          String?                          @db.Uuid
@@ -322,7 +322,7 @@ model Workspace {
   isActive                   Boolean                          @default(true)
   registrationEnabled        Boolean                          @default(false)
   createdAt                  DateTime                         @default(now())
-  updatedAt                  DateTime                         @updatedAt
+  updatedAt                  DateTime                         @default(now()) @updatedAt
   parentWorkspace            Workspace?                       @relation("WorkspaceHierarchy", fields: [parentWorkspaceId], references: [id], onDelete: SetNull)
   childWorkspaces             Workspace[]                      @relation("WorkspaceHierarchy")
   users                      User[]
@@ -478,7 +478,7 @@ model Application {
   finalDecisionHistory ApplicationFinalDecisionHistory[]
 
   @@unique([studentId, schoolYear, applicationType])
-  @@unique([workspaceId, studentId, schoolYear, applicationType])
+  @@unique([workspaceId, studentId, schoolYear, applicationType], map: "Application_workspaceId_studentId_schoolYear_applicationType_ke")
   @@index([workspaceId, status, targetLevel])
   @@index([workspaceId, studentId, schoolYear])
   @@index([status, targetLevel])
@@ -589,6 +589,7 @@ model ApplicationMetric {
   requirementResponses ApplicationRequirementResponse[]
 
   @@unique([applicationId, metricType])
+  @@index([supportingEvidenceId])
   @@index([verificationStatus])
 }
 
@@ -658,7 +659,7 @@ model Evidence {
 }
 
 model ApplicationRequirementResponse {
-  id             String                    @id @default(uuid()) @db.Uuid
+  id             String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId    String                    @db.Uuid
   applicationId  String                    @db.Uuid
   criterion      Criterion
@@ -739,6 +740,8 @@ model EvidenceCard {
   approvedEvidencePrecedents ApprovedEvidencePrecedent[]
 
   @@index([confirmationStatus])
+  @@index([matchedParticipantId], map: "EvidenceCard_matched_participant_id_idx")
+  @@index([smartreaderJobId], map: "EvidenceCard_smartreader_job_id_idx")
   @@index([sourceEvidenceFileId])
   @@index([sourceFileId])
 }
@@ -1017,7 +1020,7 @@ model KnowledgeBaseItem {
 }
 
 model EventRegistryAlias {
-  id                 String                               @id @default(uuid()) @db.Uuid
+  id                 String                               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId        String                               @db.Uuid
   eventId            String                               @db.Uuid
   criterion          Criterion
@@ -1035,10 +1038,11 @@ model EventRegistryAlias {
   @@index([workspaceId, criterion, normalizedAliasKey])
   @@index([workspaceId, normalizedAliasKey])
   @@index([eventId])
+  @@index([normalizedAliasKey(ops: raw("gin_trgm_ops"))], type: Gin, map: "EventRegistryAlias_normalizedAliasKey_trgm_idx")
 }
 
 model WorkspaceAbbreviation {
-  id                    String    @id @default(uuid()) @db.Uuid
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId           String    @db.Uuid
   token                 String
   normalizedTokenKey    String
@@ -1052,10 +1056,11 @@ model WorkspaceAbbreviation {
 
   @@unique([workspaceId, normalizedTokenKey])
   @@index([workspaceId, isActive])
+  @@index([normalizedTokenKey(ops: raw("gin_trgm_ops"))], type: Gin, map: "WorkspaceAbbreviation_normalizedTokenKey_trgm_idx")
 }
 
 model ApprovedEvidencePrecedent {
-  id                     String                          @id @default(uuid()) @db.Uuid
+  id                     String                          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId            String                          @db.Uuid
   criterion              Criterion
   eventId                String                          @db.Uuid
@@ -1090,14 +1095,17 @@ model ApprovedEvidencePrecedent {
   criteriaVersion        CriteriaVersion?                @relation(fields: [criteriaVersionId], references: [id], onDelete: SetNull)
 
   @@unique([sourceEvidenceId])
-  @@index([workspaceId, criterion, eventId, status])
+  @@index([workspaceId, criterion, eventId, status], map: "ApprovedEvidencePrecedent_workspaceId_criterion_eventId_status_")
   @@index([workspaceId, criterion, status])
   @@index([workspaceId, normalizedTitleKey])
-  @@index([workspaceId, normalizedOrganizerKey])
+  @@index([workspaceId, normalizedOrganizerKey], map: "ApprovedEvidencePrecedent_workspaceId_normalizedOrganizerKey_id")
   @@index([workspaceId, eventYear])
   @@index([sourceReviewTaskId])
   @@index([sourceResolutionCaseId])
   @@index([previewFileId])
+  @@index([normalizedTitleKey(ops: raw("gin_trgm_ops"))], type: Gin, map: "ApprovedEvidencePrecedent_normalizedTitleKey_trgm_idx")
+  @@index([normalizedOrganizerKey(ops: raw("gin_trgm_ops"))], type: Gin, map: "ApprovedEvidencePrecedent_normalizedOrganizerKey_trgm_idx")
+  @@index([ocrSearchKey(ops: raw("gin_trgm_ops"))], type: Gin, map: "ApprovedEvidencePrecedent_ocrSearchKey_trgm_idx")
 }
 
 model CriteriaVersion {
@@ -1123,7 +1131,7 @@ model CriteriaVersion {
 }
 
 model CriteriaConfig {
-  id                   String                   @id @default(uuid()) @db.Uuid
+  id                   String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   scope                Level
   workspaceId          String?                  @db.Uuid
   code                 String                   @unique
@@ -1138,7 +1146,7 @@ model CriteriaConfig {
   sourceNote           String?
   isActive             Boolean                  @default(true)
   createdAt            DateTime                 @default(now())
-  updatedAt            DateTime                 @updatedAt
+  updatedAt            DateTime                 @default(now()) @updatedAt
   workspace            Workspace?               @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   rules                NormalizedCriteriaRule[]
 
@@ -1147,7 +1155,7 @@ model CriteriaConfig {
 }
 
 model NormalizedCriteriaRule {
-  id                       String         @id @default(uuid()) @db.Uuid
+  id                       String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   criteriaConfigId         String         @db.Uuid
   criterion                Criterion
   ruleKey                  String
@@ -1165,12 +1173,12 @@ model NormalizedCriteriaRule {
   sortOrder                Int            @default(0)
   isActive                 Boolean        @default(true)
   createdAt                DateTime       @default(now())
-  updatedAt                DateTime       @updatedAt
+  updatedAt                DateTime       @default(now()) @updatedAt
   criteriaConfig           CriteriaConfig @relation(fields: [criteriaConfigId], references: [id], onDelete: Cascade)
 
   @@unique([criteriaConfigId, ruleKey])
   @@index([criteriaConfigId, criterion, isActive])
-  @@index([criteriaConfigId, mandatory, priorityRule, isActive])
+  @@index([criteriaConfigId, mandatory, priorityRule, isActive], map: "NormalizedCriteriaRule_criteriaConfigId_mandatory_priorityRule_")
 }
 
 model CriteriaRule {
@@ -1250,10 +1258,11 @@ model ReviewTask {
   @@index([applicationId])
   @@index([applicationId, criterion])
   @@index([collectiveProfileId, criterion])
+  @@index([officerSuggestedLevel])
 }
 
 model SupplementRequest {
-  id                        String      @id @default(uuid()) @db.Uuid
+  id                        String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId               String      @db.Uuid
   applicationId             String      @db.Uuid
   reviewTaskId              String      @db.Uuid
@@ -1266,7 +1275,7 @@ model SupplementRequest {
   deadline                  DateTime?
   createdByUserId           String?     @db.Uuid
   createdAt                 DateTime    @default(now())
-  updatedAt                 DateTime    @updatedAt
+  updatedAt                 DateTime    @default(now()) @updatedAt
   resubmittedAt             DateTime?
   closedAt                  DateTime?
   historyJson               Json?
@@ -1335,7 +1344,7 @@ model IndexingJob {
 }
 
 model SmartReaderJob {
-  id                     String               @id @default(uuid()) @db.Uuid
+  id                     String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId            String?              @map("workspace_id") @db.Uuid
   jobType                SmartReaderJobType   @map("job_type")
   provider               String               @default("vnpt_smartreader")
@@ -1362,7 +1371,7 @@ model SmartReaderJob {
   lockedAt               DateTime?            @map("locked_at")
   lockedBy               String?              @map("locked_by")
   createdAt              DateTime             @default(now()) @map("created_at")
-  updatedAt              DateTime             @updatedAt @map("updated_at")
+  updatedAt              DateTime             @default(now()) @updatedAt @map("updated_at")
   completedAt            DateTime?            @map("completed_at")
   workspace              Workspace?           @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
 
@@ -1500,7 +1509,7 @@ model CollectiveProfile {
   auditLogs        AuditLog[]
 
   @@unique([representativeId, schoolYear, className])
-  @@unique([workspaceId, representativeId, schoolYear, className])
+  @@unique([workspaceId, representativeId, schoolYear, className], map: "CollectiveProfile_workspaceId_representativeId_schoolYear_class")
   @@index([workspaceId, status, targetLevel])
   @@index([status, targetLevel])
 }
@@ -1549,7 +1558,7 @@ model CollectivePrecheckResult {
 }
 
 model ChatSession {
-  id                String           @id @default(uuid()) @db.Uuid
+  id                String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId       String?          @db.Uuid
   userId            String           @db.Uuid
   role              String
@@ -1574,7 +1583,7 @@ model ChatSession {
 }
 
 model ChatMessage {
-  id                    String      @id @default(uuid()) @db.Uuid
+  id                    String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   sessionId             String      @db.Uuid
   sender                String
   textRedacted          String?
@@ -1589,7 +1598,7 @@ model ChatMessage {
 }
 
 model ChatbotAction {
-  id                   String      @id @default(uuid()) @db.Uuid
+  id                   String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId          String?     @db.Uuid
   sessionId            String      @db.Uuid
   userId               String      @db.Uuid
@@ -1619,7 +1628,7 @@ model ChatbotAction {
 }
 
 model ChatbotHandoff {
-  id                String      @id @default(uuid()) @db.Uuid
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   workspaceId       String?     @db.Uuid
   sessionId         String      @db.Uuid
   userId            String      @db.Uuid
