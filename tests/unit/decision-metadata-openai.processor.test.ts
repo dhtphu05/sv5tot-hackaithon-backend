@@ -42,6 +42,8 @@ function decisionImport() {
     id: importId,
     workspaceId,
     sourceFileId,
+    metadataJobId: 'job-1',
+    rosterJobId: 'job-2',
     sourceFile: {
       id: sourceFileId,
       workspaceId,
