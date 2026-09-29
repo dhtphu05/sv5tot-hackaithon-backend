@@ -1,4 +1,4 @@
-import { DecisionImportStatus, type IndexingJob, type Prisma } from '@prisma/client';
+import { type IndexingJob, type Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { env } from '../../../config/env';
 import { prisma } from '../../../infrastructure/database/prisma';
