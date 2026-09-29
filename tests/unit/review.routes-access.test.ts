@@ -105,4 +105,12 @@ describe('Review mutation route authority', () => {
       .expect(200);
     expect(controllerMocks.listReviewTasks).toHaveBeenCalledOnce();
   });
+
+  it('denies data uploaders from the review task list route', async () => {
+    await request(buildApp())
+      .get('/api/review/tasks')
+      .set('x-test-role', Role.data_uploader)
+      .expect(403);
+    expect(controllerMocks.listReviewTasks).not.toHaveBeenCalled();
+  });
 });

@@ -77,6 +77,7 @@ export class ReviewRepository {
     andFilters.push(reviewWorkspaceFilterFor(user));
     andFilters.push(currentReviewTaskApplicationFilter());
     if (query.status) andFilters.push({ status: query.status });
+    if (query.statuses?.length) andFilters.push({ status: { in: query.statuses } });
     if (query.supplementRequired) andFilters.push({ status: 'supplement_required' });
     if (query.resolutionNeeded) andFilters.push({ status: 'resolution_needed' });
     if (query.criterion) andFilters.push({ criterion: query.criterion });
