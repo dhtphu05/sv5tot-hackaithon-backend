@@ -64,6 +64,21 @@ export const confirmIndexSchema = z.object({
   replaceExisting: z.boolean().default(true),
 });
 
+export const eventRosterCorrectionSchema = z.object({
+  studentCode: z.string().trim().min(1).max(128).optional(),
+  studentName: z.string().trim().min(1).max(255).optional(),
+  className: z.string().trim().max(128).nullable().optional(),
+  faculty: z.string().trim().max(255).nullable().optional(),
+  participationStatus: z.string().trim().max(128).nullable().optional(),
+  convertedValue: z.number().finite().nonnegative().nullable().optional(),
+}).strict().refine((input) => Object.keys(input).length > 0, 'At least one roster field is required');
+
+export const eventRosterRowParamsSchema = z.object({
+  id: z.string().uuid(),
+  eventFileId: z.string().uuid(),
+  rowNumber: z.coerce.number().int().min(2),
+}).strict();
+
 export const applicationIdBodySchema = z.object({
   applicationId: z.string().uuid(),
 });
@@ -109,6 +124,8 @@ export type StartRosterIndexingInput = z.infer<typeof startRosterIndexingSchema>
 export type ParticipantsQuery = z.infer<typeof participantsQuerySchema>;
 export type SearchEventsQuery = z.infer<typeof searchEventsQuerySchema>;
 export type ConfirmIndexInput = z.infer<typeof confirmIndexSchema>;
+export type EventRosterCorrectionInput = z.infer<typeof eventRosterCorrectionSchema>;
+export type EventRosterRowParams = z.infer<typeof eventRosterRowParamsSchema>;
 export type ApplicationIdBody = z.infer<typeof applicationIdBodySchema>;
 export type ImportParticipantsJsonInput = z.infer<typeof importParticipantsJsonSchema>;
 export type CheckParticipantInput = z.infer<typeof checkParticipantSchema>;

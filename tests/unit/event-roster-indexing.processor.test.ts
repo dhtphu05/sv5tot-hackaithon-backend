@@ -39,6 +39,7 @@ import { processEventRosterIndexingJob } from '../../src/modules/jobs/processors
 
 const eventFile = {
   id: 'event-file-1',
+  fileId: 'file-1',
   eventId: 'event-1',
   file: {
     id: 'file-1',
@@ -68,6 +69,7 @@ function job() {
 
 describe('event roster indexing processor', () => {
   beforeEach(() => {
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
     mocks.findEventFile.mockResolvedValue(eventFile);
     mocks.updateEventFile.mockResolvedValue({ ...eventFile, indexingStatus: IndexingStatus.ocr_processing });
@@ -85,6 +87,7 @@ describe('event roster indexing processor', () => {
       callback({
         eventFile: {
           update: mocks.updateEventFile,
+          updateMany: mocks.updateManyEventFile,
           findUnique: vi.fn().mockResolvedValue(eventFile),
         },
       }),
@@ -96,8 +99,8 @@ describe('event roster indexing processor', () => {
       code: 'ROSTER_PARSE_FAILED',
     });
     expect(mocks.transaction).not.toHaveBeenCalled();
-    expect(mocks.updateManyEventFile).toHaveBeenCalledWith({
-      where: { id: eventFile.id, fileId: eventFile.file.id },
+    expect(mocks.updateManyEventFile).toHaveBeenLastCalledWith({
+      where: { id: eventFile.id, eventId: eventFile.eventId, fileId: eventFile.file.id, indexingStatus: IndexingStatus.ocr_processing },
       data: { indexingStatus: IndexingStatus.failed },
     });
     expect(mocks.createAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -111,16 +114,14 @@ describe('event roster indexing processor', () => {
       file: { ...eventFile.file, originalName: 'roster.png', mimeType: 'image/png' },
     });
 
-    await expect(processEventRosterIndexingJob(job())).rejects.toMatchObject({
-      code: 'ROSTER_PARSE_FAILED',
-    });
+    await expect(processEventRosterIndexingJob(job())).rejects.toMatchObject({ code: 'FILE_TYPE_NOT_ALLOWED' });
     expect(mocks.transaction).not.toHaveBeenCalled();
-    expect(mocks.updateManyEventFile).toHaveBeenCalledWith({
-      where: { id: eventFile.id, fileId: eventFile.file.id },
+    expect(mocks.updateManyEventFile).toHaveBeenLastCalledWith({
+      where: { id: eventFile.id, eventId: eventFile.eventId, fileId: eventFile.file.id, indexingStatus: IndexingStatus.ocr_processing },
       data: { indexingStatus: IndexingStatus.failed },
     });
     expect(mocks.createAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      afterStateJson: { eventFileId: eventFile.id, code: 'ROSTER_PARSE_FAILED' },
+      afterStateJson: { eventFileId: eventFile.id, code: 'FILE_TYPE_NOT_ALLOWED' },
     }));
   });
 
@@ -183,7 +184,7 @@ describe('event roster indexing processor', () => {
     });
     mocks.extractStructuredDocument.mockRejectedValueOnce(new Error('provider failure'));
 
-    await expect(processEventRosterIndexingJob(job())).rejects.toThrow('provider failure');
+    await expect(processEventRosterIndexingJob(job())).rejects.toMatchObject({ code: 'ROSTER_PARSE_FAILED' });
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(mocks.updateManyEventFile).toHaveBeenCalledWith(expect.objectContaining({
       data: { indexingStatus: IndexingStatus.failed },

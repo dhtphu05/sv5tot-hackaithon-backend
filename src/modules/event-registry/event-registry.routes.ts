@@ -20,6 +20,8 @@ import {
   searchEvents,
   startRosterIndexing,
   updateEvent,
+  updateEventRosterPreviewRow,
+  revertEventRosterPreviewRowCorrection,
   uploadRosterFile,
 } from './event-registry.controller';
 import {
@@ -34,6 +36,8 @@ import {
   searchEventsQuerySchema,
   startRosterIndexingSchema,
   updateEventSchema,
+  eventRosterCorrectionSchema,
+  eventRosterRowParamsSchema,
 } from './event-registry.validation';
 
 export const eventRegistryRouter = Router();
@@ -157,6 +161,20 @@ eventRegistryRouter.post(
   requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
   validate({ body: confirmIndexSchema }),
   asyncHandler(confirmIndex),
+);
+eventRegistryRouter.patch(
+  '/:id/roster-files/:eventFileId/preview-rows/:rowNumber',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
+  validate({ params: eventRosterRowParamsSchema, body: eventRosterCorrectionSchema }),
+  asyncHandler(updateEventRosterPreviewRow),
+);
+eventRegistryRouter.delete(
+  '/:id/roster-files/:eventFileId/preview-rows/:rowNumber/correction',
+  requireAuth,
+  requireRole(Role.officer, Role.manager, Role.city_officer, Role.city_manager, Role.admin),
+  validate({ params: eventRosterRowParamsSchema }),
+  asyncHandler(revertEventRosterPreviewRowCorrection),
 );
 eventRegistryRouter.post(
   '/:id/check-participant',
