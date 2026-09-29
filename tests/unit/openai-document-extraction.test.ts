@@ -86,6 +86,9 @@ describe('OpenAI structured document extraction core', () => {
     await expect(extractStructuredDocument(input(), client as never)).rejects.toMatchObject({
       code: 'OPENAI_REFUSED',
       statusCode: 422,
+      details: expect.objectContaining({
+        telemetry: expect.objectContaining({ outcome: 'failure', errorCode: 'OPENAI_REFUSED', attempts: 1 }),
+      }),
     });
   });
 
