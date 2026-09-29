@@ -21,7 +21,9 @@ import {
   archiveApplication,
   cancelApplication,
   createCityReviewSeason,
+  deleteCityReviewSeason,
   getCityReviewSeason,
+  listCityReviewSeasons,
   getManagerSubmissionDeadline,
   assignManagerReviewTask,
   finalizeApplication,
@@ -53,6 +55,7 @@ import {
   reopenFinalSchema,
   reopenCancelledApplicationSchema,
   cityReviewSeasonCreateSchema,
+  cityReviewSeasonDeleteSchema,
   cityReviewSeasonParamsSchema,
   cityReviewSeasonUpdateSchema,
   revokeSubmissionWindowExceptionSchema,
@@ -62,6 +65,19 @@ import {
 
 export const managerRouter = Router();
 
+managerRouter.get(
+  '/city-review-seasons',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  asyncHandler(listCityReviewSeasons),
+);
+managerRouter.delete(
+  '/city-review-seasons/:schoolYear',
+  requireAuth,
+  requireRole(Role.city_manager, Role.admin),
+  validate({ params: cityReviewSeasonParamsSchema, body: cityReviewSeasonDeleteSchema }),
+  asyncHandler(deleteCityReviewSeason),
+);
 managerRouter.get(
   '/city-review-seasons/:schoolYear',
   requireAuth,

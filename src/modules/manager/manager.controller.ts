@@ -46,6 +46,20 @@ export async function getCityReviewSeason(req: Request, res: Response): Promise<
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function listCityReviewSeasons(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.listSeasons(req.user!);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function deleteCityReviewSeason(req: Request, res: Response): Promise<void> {
+  const data = await cityReviewSeasonsService.deleteSeason(
+    req.user!,
+    String(req.params.schoolYear),
+    String(req.body.reason),
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function createCityReviewSeason(req: Request, res: Response): Promise<void> {
   const data = await cityReviewSeasonsService.createSeason(req.user!, req.body);
   sendSuccess(res, data, { requestId: req.requestId }, 201);

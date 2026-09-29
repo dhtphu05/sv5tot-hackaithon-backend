@@ -49,6 +49,10 @@ export const cityReviewSeasonParamsSchema = z.object({
   schoolYear: z.string().regex(/^\d{4}-\d{4}$/),
 });
 
+export const cityReviewSeasonDeleteSchema = z.object({
+  reason: z.string().trim().min(1).max(1000),
+});
+
 export const submissionWindowExceptionSchema = z.object({
   validUntil: timestampWithOffset,
   reason: z.string().trim().min(1).max(1000),

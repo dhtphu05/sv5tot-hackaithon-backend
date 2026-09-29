@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
 const mocks = vi.hoisted(() => ({
-  cityReviewSeason: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn() },
+  cityReviewSeason: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), updateMany: vi.fn(), delete: vi.fn() },
   citySubmissionWindowException: { findUnique: vi.fn(), upsert: vi.fn(), update: vi.fn() },
-  application: { findFirst: vi.fn() },
+  application: { findFirst: vi.fn(), count: vi.fn(), groupBy: vi.fn() },
   auditLog: { create: vi.fn() },
   $queryRaw: vi.fn(),
   $transaction: vi.fn(),
@@ -131,6 +131,7 @@ describe('CityReviewSeasonsService', () => {
     vi.clearAllMocks();
     mocks.cityReviewSeason.findUnique.mockResolvedValue(season);
     mocks.application.findFirst.mockResolvedValue(initialApplication());
+    mocks.application.groupBy.mockResolvedValue([]);
     mocks.citySubmissionWindowException.findUnique.mockResolvedValue(null);
     mocks.$queryRaw.mockResolvedValue([]);
     mocks.$transaction.mockImplementation(async (callback: (tx: unknown) => unknown) =>
@@ -150,6 +151,35 @@ describe('CityReviewSeasonsService', () => {
       supplementStatus: 'ON_TRACK',
       finalizationStatus: 'ON_TRACK',
     });
+  });
+
+  it('lists seasons in descending school-year order with computed window status', async () => {
+    mocks.cityReviewSeason.findMany.mockResolvedValue([season]);
+    const result = await new CityReviewSeasonsService().listSeasons(cityManager, new Date('2026-09-15T00:00:00Z'));
+    expect(mocks.cityReviewSeason.findMany).toHaveBeenCalledWith({
+      orderBy: [{ schoolYear: 'desc' }, { createdAt: 'desc' }],
+    });
+    expect(result[0]).toMatchObject({ schoolYear: '2026-2027', submissionStatus: 'OPEN', applicationCount: 0, canDelete: true });
+  });
+
+  it('deletes and audits an unused season so the same year can be recreated', async () => {
+    mocks.application.count.mockResolvedValue(0);
+    mocks.cityReviewSeason.delete.mockResolvedValue(season);
+    await expect(new CityReviewSeasonsService().deleteSeason(cityManager, '2026-2027', 'Unused season'))
+      .resolves.toMatchObject({ schoolYear: '2026-2027' });
+    expect(mocks.application.count).toHaveBeenCalledWith({ where: { schoolYear: '2026-2027' } });
+    expect(mocks.cityReviewSeason.delete).toHaveBeenCalledWith({ where: { schoolYear: '2026-2027' } });
+    expect(mocks.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: 'CITY_REVIEW_SEASON_DELETED', targetType: 'city_review_season' }),
+    }));
+  });
+
+  it('rejects deleting a season with applications without changing the season or application', async () => {
+    mocks.application.count.mockResolvedValue(1);
+    await expect(new CityReviewSeasonsService().deleteSeason(cityManager, '2026-2027', 'Cannot delete in-use season'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'CITY_REVIEW_SEASON_IN_USE' });
+    expect(mocks.cityReviewSeason.delete).not.toHaveBeenCalled();
+    expect(mocks.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('allows City Managers in CITY and admins while denying review, uploader, student, and legacy roles', async () => {

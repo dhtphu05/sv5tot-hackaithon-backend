@@ -39,6 +39,7 @@ type SeasonRecord = {
   version: number;
   updatedAt?: Date;
   createdAt?: Date;
+  applicationCount?: number;
 };
 
 type ApplicationScopeRecord = {
@@ -71,10 +72,62 @@ const preSubmitStatuses = [
 export class CityReviewSeasonsService {
   async getSeason(user: AuthenticatedUser, schoolYear: string, now = new Date()) {
     assertCanManageSeasons(user);
-    const season = (await prisma.cityReviewSeason.findUnique({ where: { schoolYear } })) as
-      | SeasonRecord
-      | null;
-    return season ? toSeasonDto(season, now) : null;
+    const [season, applicationCount] = await Promise.all([
+      prisma.cityReviewSeason.findUnique({ where: { schoolYear } }) as Promise<SeasonRecord | null>,
+      prisma.application.count({ where: { schoolYear } }),
+    ]);
+    return season ? toSeasonDto({ ...season, applicationCount }, now) : null;
+  }
+
+  async listSeasons(user: AuthenticatedUser, now = new Date()) {
+    assertCanManageSeasons(user);
+    const seasons = (await prisma.cityReviewSeason.findMany({
+      orderBy: [{ schoolYear: 'desc' }, { createdAt: 'desc' }],
+    })) as SeasonRecord[];
+    if (seasons.length === 0) return [];
+    const applicationCounts = await prisma.application.groupBy({
+      by: ['schoolYear'],
+      where: { schoolYear: { in: seasons.map((season) => season.schoolYear) } },
+      _count: { _all: true },
+    });
+    const countByYear = new Map(applicationCounts.map((row) => [row.schoolYear, row._count._all]));
+    return seasons.map((season) =>
+      toSeasonDto({ ...season, applicationCount: countByYear.get(season.schoolYear) ?? 0 }, now),
+    );
+  }
+
+  async deleteSeason(user: AuthenticatedUser, schoolYear: string, reason: string) {
+    assertCanManageSeasons(user);
+    return prisma.$transaction(async (tx) => {
+      const season = (await tx.cityReviewSeason.findUnique({ where: { schoolYear } })) as
+        | SeasonRecord
+        | null;
+      if (!season) {
+        throw new AppError(404, ErrorCodes.CITY_REVIEW_SEASON_NOT_FOUND, 'Review season not found');
+      }
+      const applicationCount = await tx.application.count({ where: { schoolYear } });
+      if (applicationCount > 0) {
+        throw new AppError(
+          409,
+          ErrorCodes.CITY_REVIEW_SEASON_IN_USE,
+          'Mùa xét đã phát sinh hồ sơ và không thể xóa. Hãy đóng hoặc cập nhật mùa xét thay vì xóa.',
+        );
+      }
+      await tx.cityReviewSeason.delete({ where: { schoolYear } });
+      await tx.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorRole: user.role,
+          workspaceId: auditWorkspaceId(user),
+          action: auditActions.CITY_REVIEW_SEASON_DELETED,
+          targetType: 'city_review_season',
+          targetId: season.id,
+          beforeStateJson: toSeasonAuditState(season),
+          note: reason,
+        },
+      });
+      return toSeasonDto(season);
+    });
   }
 
   async createSeason(user: AuthenticatedUser, input: CityReviewSeasonCreateInput) {
@@ -147,7 +200,8 @@ export class CityReviewSeasonsService {
           },
         });
       }
-      return toSeasonDto(after);
+      const applicationCount = await tx.application.count({ where: { schoolYear } });
+      return toSeasonDto({ ...after, applicationCount });
     });
   }
 
@@ -435,6 +489,8 @@ function toSeasonDto(season: SeasonRecord, now = new Date()) {
     reviewStatus: deadlineStatus(season.reviewDeadlineAt, now),
     supplementStatus: deadlineStatus(season.supplementDeadlineAt, now),
     finalizationStatus: deadlineStatus(season.finalizationDeadlineAt, now),
+    applicationCount: season.applicationCount ?? 0,
+    canDelete: (season.applicationCount ?? 0) === 0,
   };
 }
 
