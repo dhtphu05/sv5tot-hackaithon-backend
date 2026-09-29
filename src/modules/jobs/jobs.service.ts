@@ -1,5 +1,6 @@
 // Owns indexing and async job visibility plus processor registration.
 import { DecisionImportStatus, EvidenceStatus, IndexingStatus, JobStatus, JobType, Prisma, Role, type IndexingJob } from '@prisma/client';
+import { env } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
@@ -16,6 +17,7 @@ import { processDecisionRosterOcrJob } from './processors/decision-roster-ocr.pr
 import { processEventRosterIndexingJob } from './processors/event-roster-indexing.processor';
 import { processEvidenceOcrJob } from './processors/evidence-ocr.processor';
 import { processAwardRosterIngestionJob } from './processors/award-roster-ingestion.processor';
+import { getJobFailureTransition, isJobFailureRetryable } from './job-retry-policy';
 
 export class JobsService {
   constructor(private readonly jobsRepository = new JobsRepository()) {}
@@ -75,6 +77,9 @@ export class JobsService {
     if (job.status !== JobStatus.failed) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Only failed jobs can be retried');
     }
+    if (!isJobFailureRetryable(job.resultJson)) {
+      throw new AppError(409, ErrorCodes.CONFLICT, 'This job failure is not retryable');
+    }
 
     const evidence = await prisma.evidence.findUnique({
       where: { id: job.targetId },
@@ -89,6 +94,7 @@ export class JobsService {
         where: { id: job.id },
         data: {
           status: JobStatus.queued,
+          attempts: 0,
           errorMessage: null,
           resultJson: Prisma.JsonNull,
         },
@@ -127,13 +133,17 @@ export class JobsService {
   }
 
   async runWorkerTick() {
-    const job = await this.jobsRepository.claimNextQueuedJob();
-    if (!job) {
-      return { processed: 0, job: null };
-    }
+    await this.jobsRepository.recoverStaleJobs();
+    const jobs = await this.jobsRepository.claimQueuedJobs(env.JOB_WORKER_CONCURRENCY);
+    if (!jobs.length) return { processed: 0, job: null, jobs: [] };
 
-    const completed = await processClaimedIndexingJob(job);
-    return { processed: 1, job: completed };
+    const results = await Promise.allSettled(jobs.map((job) => processClaimedIndexingJob(job)));
+    const processed = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+    return {
+      processed: jobs.length,
+      job: processed.at(-1) ?? null,
+      jobs: processed,
+    };
   }
 
   private async getRequiredJob(jobId: string) {
@@ -218,7 +228,7 @@ export class JobsService {
         remainingPages: smartReaderJob?.progressRemainingPages ?? null,
         status: smartReaderJob?.status ?? null,
       },
-      retryable: job.status === JobStatus.failed,
+      retryable: job.status === JobStatus.failed && isJobFailureRetryable(job.resultJson),
       uxStatus,
     };
   }
@@ -350,8 +360,13 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
     }
 
     if (processingJob.jobType === JobType.decision_metadata || processingJob.jobType === JobType.decision_roster_ocr) {
-      await prisma.decisionImport.update({
-        where: { id: processingJob.targetId },
+      await prisma.decisionImport.updateMany({
+        where: {
+          id: processingJob.targetId,
+          ...(processingJob.jobType === JobType.decision_metadata
+            ? { metadataJobId: processingJob.id }
+            : { rosterJobId: processingJob.id }),
+        },
         data: {
           lastErrorCode: null,
           lastErrorMessage: null,
@@ -367,12 +382,25 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
     const retryable = error instanceof AppError
       ? Boolean((error.details as { retryable?: boolean } | undefined)?.retryable)
       : true;
+    const transition = getJobFailureTransition({
+      retryable,
+      attempts: processingJob.attempts,
+      maxAttempts: env.JOB_WORKER_MAX_ATTEMPTS,
+    });
+    const failureTelemetry = error instanceof AppError && error.details && typeof error.details === 'object'
+      ? (error.details as { telemetry?: Prisma.InputJsonValue }).telemetry
+      : undefined;
     const failed = await prisma.indexingJob.update({
       where: { id: processingJob.id },
       data: {
-        status: JobStatus.failed,
+        status: transition.status,
         errorMessage: message,
-        resultJson: { code, retryable, message },
+        resultJson: {
+          code,
+          retryable: transition.retryable,
+          message,
+          ...(failureTelemetry ? { telemetry: failureTelemetry } : {}),
+        },
       },
     });
 
@@ -386,11 +414,13 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
           : false;
         await tx.evidence.update({
           where: { id: evidence.id },
-          data: manualReview
-            ? applicationCancelled
-              ? { indexingStatus: IndexingStatus.needs_manual_review }
-              : { indexingStatus: IndexingStatus.needs_manual_review, status: EvidenceStatus.needs_supplement }
-            : { indexingStatus: IndexingStatus.failed },
+          data: transition.status === JobStatus.queued
+            ? { indexingStatus: IndexingStatus.pending_indexing, status: EvidenceStatus.pending_indexing }
+            : manualReview
+              ? applicationCancelled
+                ? { indexingStatus: IndexingStatus.needs_manual_review }
+                : { indexingStatus: IndexingStatus.needs_manual_review, status: EvidenceStatus.needs_supplement }
+              : { indexingStatus: IndexingStatus.failed },
         });
       });
       await createApplicationAudit(prisma, {
@@ -406,34 +436,60 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
       });
     }
 
+    if (processingJob.jobType === JobType.event_roster_indexing && transition.status === JobStatus.queued) {
+      const currentEventFile = await prisma.eventFile.findUnique({
+        where: { id: processingJob.targetId },
+        select: { fileId: true },
+      });
+      if (currentEventFile) {
+        await prisma.eventFile.updateMany({
+          where: { id: processingJob.targetId, fileId: currentEventFile.fileId, indexingStatus: IndexingStatus.failed },
+          data: { indexingStatus: IndexingStatus.pending_indexing },
+        });
+      }
+    }
+
     if (processingJob.jobType === JobType.decision_metadata || processingJob.jobType === JobType.decision_roster_ocr) {
+      const pointer = processingJob.jobType === JobType.decision_metadata
+        ? { metadataJobId: processingJob.id }
+        : { rosterJobId: processingJob.id };
       const decisionFailureData =
         processingJob.jobType === JobType.decision_metadata
           ? {
               status: DecisionImportStatus.ocr_processing,
               lastErrorCode: code,
               lastErrorMessage: message,
-              lastUserMessage:
-                'Không trích xuất được metadata văn bản hành chính từ VNPT; vẫn tiếp tục OCR danh sách.',
+              lastUserMessage: 'Không trích xuất được thông tin văn bản; vẫn tiếp tục xử lý danh sách.',
               processingStep: 'metadata_failed_roster_pending',
             }
           : {
-              status: DecisionImportStatus.failed,
+              status: transition.status === JobStatus.queued ? DecisionImportStatus.ocr_processing : DecisionImportStatus.failed,
               lastErrorCode: code,
               lastErrorMessage: message,
-              lastUserMessage: message,
-              processingStep: 'failed',
+              lastUserMessage: transition.status === JobStatus.queued
+                ? 'Danh sách đang chờ worker thử lại.'
+                : 'Không thể trích xuất danh sách. Vui lòng thử lại hoặc kiểm tra tệp.',
+              processingStep: transition.status === JobStatus.queued ? 'roster_retry_pending' : 'failed',
             };
-      await prisma.decisionImport.update({
-        where: { id: processingJob.targetId },
+      const currentImport = await prisma.decisionImport.updateMany({
+        where: { id: processingJob.targetId, ...pointer },
         data: decisionFailureData,
       }).catch(() => undefined);
-      await createApplicationAudit(prisma, {
-        action: auditActions.SMARTREADER_OCR_FAILED,
-        targetType: 'decision_import',
-        targetId: processingJob.targetId,
-        afterStateJson: { code, retryable, error: message, jobId: processingJob.id },
-      });
+      if (currentImport?.count) {
+        await createApplicationAudit(prisma, {
+          action: auditActions.DECISION_OPENAI_EXTRACTION_FAILED,
+          targetType: 'decision_import',
+          targetId: processingJob.targetId,
+          afterStateJson: {
+            provider: 'openai',
+            useCase: processingJob.jobType === JobType.decision_metadata ? 'decision_metadata' : 'decision_roster',
+            code,
+            retryable,
+            jobId: processingJob.id,
+            ...(failureTelemetry ? { telemetry: failureTelemetry } : {}),
+          },
+        });
+      }
     }
 
     return failed;

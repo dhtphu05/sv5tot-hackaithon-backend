@@ -21,6 +21,8 @@ const student = {
   workspace: { id: 'school-a', type: 'SCHOOL' },
 } as unknown as AuthenticatedUser;
 
+const admin = { ...student, id: 'admin-a', role: Role.admin } as AuthenticatedUser;
+
 function application() {
   return {
     id: 'application-a',
@@ -55,7 +57,7 @@ describe('ApplicationsService draft write concurrency', () => {
     const { service, tx } = buildService();
 
     await expect(
-      service.updateTargetLevel(student, 'application-a', { targetLevel: Level.city }),
+      service.updateTargetLevel(admin, 'application-a', { targetLevel: Level.city }),
     ).rejects.toMatchObject({ statusCode: 409 });
 
     expect(tx.application.updateMany).toHaveBeenCalledOnce();
@@ -67,7 +69,7 @@ describe('ApplicationsService draft write concurrency', () => {
     const { service, tx } = buildService();
 
     await expect(
-      service.autosaveDraft(student, 'application-a', { targetLevel: Level.city } as never),
+      service.autosaveDraft(admin, 'application-a', { targetLevel: Level.city } as never),
     ).rejects.toMatchObject({ statusCode: 409 });
 
     expect(tx.application.updateMany).toHaveBeenCalledOnce();

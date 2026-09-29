@@ -59,6 +59,16 @@ export async function updateDecisionColumnMapping(req: Request, res: Response): 
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function updateDecisionPreviewRow(req: Request, res: Response): Promise<void> {
+  const data = await service.updatePreviewRow(req.user!, String(req.params.id), String(req.params.rowId), req.body);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function revertDecisionPreviewRowCorrection(req: Request, res: Response): Promise<void> {
+  const data = await service.revertPreviewRowCorrection(req.user!, String(req.params.id), String(req.params.rowId));
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function confirmDecisionImport(req: Request, res: Response): Promise<void> {
   const data = await service.confirm(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });

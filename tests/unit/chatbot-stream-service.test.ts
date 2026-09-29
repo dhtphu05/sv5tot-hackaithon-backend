@@ -17,7 +17,7 @@ const demoUser = {
 };
 
 describe('ChatbotService streaming', () => {
-  it('streams mock RAG answers with delta and final events', async () => {
+  it('streams deterministic criteria guidance with delta and final events', async () => {
     const service = buildNoopChatbotService(new MockSmartbotClient());
     const events: Array<{ event: string; data: unknown }> = [];
 
@@ -48,7 +48,7 @@ describe('ChatbotService streaming', () => {
     expect(events.some((event) => event.event === 'delta')).toBe(true);
     expect(events.at(-1)).toMatchObject({
       event: 'final',
-      data: expect.objectContaining({ answer: expect.stringContaining('tiêu chí Tình nguyện tốt') }),
+      data: expect.objectContaining({ answer: expect.stringContaining('xem danh mục tiêu chí') }),
     });
     expect(JSON.stringify(events)).not.toContain('SMARTBOT_ACCESS_TOKEN');
   });

@@ -49,7 +49,6 @@ export const assistantContextStreamQuerySchema = getCurrentApplicationQuerySchem
 
 export const startApplicationSchema = z.object({
   schoolYear: schoolYearSchema.optional(),
-  targetLevel: z.nativeEnum(Level).default(Level.school),
 });
 
 export const updateTargetLevelSchema = z.object({

@@ -5,6 +5,7 @@ import {
 } from '../src/modules/student-assistant/student-assistant-answer';
 import type { StudentAssistantContext } from '../src/modules/student-assistant/student-assistant.types';
 import { buildOpenAiSafetyIdentifier, getOpenAiClient, mapOpenAiRuntimeError } from '../src/modules/ai/openai-client';
+import { isLiveOpenAiSmokeEnabled } from '../src/modules/ai/openai-smoke-guard';
 
 type SmokeResult = {
   name: string;
@@ -77,6 +78,11 @@ const syntheticContext: StudentAssistantContext = {
 };
 
 async function main() {
+  if (!isLiveOpenAiSmokeEnabled(process.env.OPENAI_LIVE_SMOKE)) {
+    printResult({ name: 'OPENAI_RUNTIME', status: 'SKIPPED', code: 'LIVE_SMOKE_OPT_IN_REQUIRED' });
+    return;
+  }
+
   printConfigurationSummary();
 
   if (!env.OPENAI_API_KEY) {

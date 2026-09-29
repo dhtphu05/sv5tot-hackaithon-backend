@@ -38,7 +38,6 @@ export const openApiDocument = {
     { name: 'Notifications' },
     { name: 'Audit' },
     { name: 'AI' },
-    { name: 'SmartUX' },
     { name: 'Exports' },
   ],
   components: {
@@ -1787,15 +1786,14 @@ export const openApiDocument = {
     '/api/chatbot/message': {
       post: {
         tags: ['AI'],
-        summary: 'Send contextual Smartbot message',
+        summary: 'Send contextual assistant message',
         description:
-          'Backend-only VNPT Smartbot proxy. Mock mode works without VNPT bot credentials. Official results are never decided by Smartbot.',
+          'OpenAI may explain user-authorized backend context. Actions and business status are computed by backend code; OpenAI never decides official results.',
         security: bearerSecurity,
         requestBody: jsonRequest('#/components/schemas/ChatbotMessageRequest'),
-        responses: { '200': jsonResponse('Normalized Smartbot response') },
+        responses: { '200': jsonResponse('Normalized chatbot response') },
       },
     },
-    '/api/smartux/events': placeholderPath('SmartUX', 'Create SmartUX event placeholder'),
     '/api/exports/applications': placeholderPath('Exports', 'Export applications placeholder'),
   },
 };

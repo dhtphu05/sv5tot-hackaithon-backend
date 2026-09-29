@@ -18,6 +18,8 @@ import {
   listDecisionImports,
   startDecisionImport,
   updateDecisionColumnMapping,
+  updateDecisionPreviewRow,
+  revertDecisionPreviewRowCorrection,
   uploadDecisionFile,
 } from './decision-imports.controller';
 import {
@@ -26,6 +28,7 @@ import {
   listDecisionImportsQuerySchema,
   startDecisionImportSchema,
   updateColumnMappingSchema,
+  updateDecisionRosterCorrectionSchema,
 } from './decision-imports.validation';
 
 export const decisionImportsRouter = Router();
@@ -59,6 +62,12 @@ decisionImportsRouter.patch(
   validate({ body: updateColumnMappingSchema }),
   asyncHandler(updateDecisionColumnMapping),
 );
+decisionImportsRouter.patch(
+  '/:id/preview-rows/:rowId',
+  validate({ body: updateDecisionRosterCorrectionSchema }),
+  asyncHandler(updateDecisionPreviewRow),
+);
+decisionImportsRouter.delete('/:id/preview-rows/:rowId/correction', asyncHandler(revertDecisionPreviewRowCorrection));
 decisionImportsRouter.post(
   '/:id/confirm',
   validate({ body: confirmDecisionImportSchema }),

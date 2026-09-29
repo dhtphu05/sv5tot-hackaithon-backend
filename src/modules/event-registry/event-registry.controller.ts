@@ -60,6 +60,29 @@ export async function confirmIndex(req: Request, res: Response): Promise<void> {
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
+export async function updateEventRosterPreviewRow(req: Request, res: Response): Promise<void> {
+  const params = req.params as { id: string; eventFileId: string; rowNumber: string };
+  const data = await service.updateRosterPreviewRow(
+    req.user!,
+    params.id,
+    params.eventFileId,
+    Number(params.rowNumber),
+    req.body,
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
+export async function revertEventRosterPreviewRowCorrection(req: Request, res: Response): Promise<void> {
+  const params = req.params as { id: string; eventFileId: string; rowNumber: string };
+  const data = await service.revertRosterPreviewRowCorrection(
+    req.user!,
+    params.id,
+    params.eventFileId,
+    Number(params.rowNumber),
+  );
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function checkParticipant(req: Request, res: Response): Promise<void> {
   const data = await service.checkParticipant(req.user!, String(req.params.id), req.body);
   sendSuccess(res, data, { requestId: req.requestId });

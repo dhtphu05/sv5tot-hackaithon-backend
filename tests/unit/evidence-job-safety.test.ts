@@ -1,5 +1,5 @@
 import { JobStatus, JobType } from '@prisma/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildEvidenceAnalysisJobInput,
   parseEvidenceAnalysisJobInput,
@@ -96,55 +96,20 @@ describe('evidence analysis job input', () => {
 });
 
 describe('JobsRepository queued job claiming', () => {
-  it('uses compare-and-set status updates so a queued job can be claimed once', async () => {
-    const job: {
-      id: string;
-      workspaceId: string;
-      jobType: JobType;
-      targetId: string;
-      status: JobStatus;
-      attempts: number;
-      inputJson: null;
-      errorMessage: null;
-      resultJson: null;
-      createdAt: Date;
-      updatedAt: Date;
-    } = {
-      id: 'job-1',
-      workspaceId: 'workspace-1',
-      jobType: JobType.evidence_ocr,
-      targetId: 'evidence-1',
-      status: JobStatus.queued,
-      attempts: 0,
-      inputJson: null,
-      errorMessage: null,
-      resultJson: null,
-      createdAt: new Date('2026-01-01T00:00:00.000Z'),
-      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
-    };
+  it('uses one atomic SKIP LOCKED statement to claim a bounded batch once', async () => {
+    const queryRaw = vi.fn().mockResolvedValue([
+      { id: 'job-1', status: JobStatus.processing, jobType: JobType.evidence_ocr },
+    ]);
     const db = {
-      indexingJob: {
-        findFirst: async ({ where }: { where: { status: JobStatus } }) =>
-          job.status === where.status ? job : null,
-        updateMany: async ({ where }: { where: { id: string; status: JobStatus } }) => {
-          if (where.id === job.id && job.status === where.status) {
-            job.status = JobStatus.processing;
-            job.attempts += 1;
-            return { count: 1 };
-          }
-          return { count: 0 };
-        },
-        findUnique: async ({ where }: { where: { id: string } }) =>
-          where.id === job.id ? job : null,
-      },
+      $queryRaw: queryRaw,
     };
     const repository = new JobsRepository(db as never);
 
-    await expect(repository.claimNextQueuedJob()).resolves.toMatchObject({
-      id: 'job-1',
-      status: JobStatus.processing,
-      attempts: 1,
-    });
-    await expect(repository.claimNextQueuedJob()).resolves.toBeNull();
+    await expect(repository.claimQueuedJobs(2)).resolves.toMatchObject([
+      { id: 'job-1', status: JobStatus.processing, jobType: JobType.evidence_ocr },
+    ]);
+    expect(queryRaw).toHaveBeenCalledOnce();
+    expect(queryRaw.mock.calls[0][0].join('')).toContain('FOR UPDATE SKIP LOCKED');
+    expect(queryRaw.mock.calls[0]).toContain(2);
   });
 });

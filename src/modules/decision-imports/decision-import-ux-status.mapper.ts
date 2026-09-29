@@ -38,8 +38,7 @@ export function mapDecisionImportUxStatus(input: {
   }
   if (
     input.status === DecisionImportStatus.extracting_metadata &&
-    (input.metadataJobStatus === JobStatus.queued || input.rosterJobStatus === JobStatus.queued) &&
-    !input.smartReaderStatus
+    (input.metadataJobStatus === JobStatus.queued || input.rosterJobStatus === JobStatus.queued)
   ) {
     return { state: 'queued', label: 'Đã xếp hàng, chờ worker xử lý OCR', retryable: false };
   }
@@ -48,11 +47,9 @@ export function mapDecisionImportUxStatus(input: {
     input.status === DecisionImportStatus.ocr_processing ||
     input.status === DecisionImportStatus.parsing_roster ||
     input.metadataJobStatus === JobStatus.processing ||
-    input.rosterJobStatus === JobStatus.processing ||
-    input.smartReaderStatus === SmartReaderJobStatus.processing ||
-    input.smartReaderStatus === SmartReaderJobStatus.polling
+    input.rosterJobStatus === JobStatus.processing
   ) {
-    return { state: 'processing', label: 'Đang xử lý OCR thật qua VNPT', retryable: false };
+    return { state: 'processing', label: 'Đang xử lý tài liệu', retryable: false };
   }
   return { state: 'draft', label: 'Bản nháp', retryable: false };
 }

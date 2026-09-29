@@ -3,7 +3,9 @@ import {
   EventStatus,
   FileStorageType,
   IndexingStatus,
+  JobStatus,
   JobType,
+  Prisma,
   Role,
   type Application,
   type EventRegistry,
@@ -44,6 +46,15 @@ import type {
 } from './event-registry.validation';
 import { importEventAsEvidence } from '../decision-imports/decision-imports.service';
 import { EvidenceMatchingService } from '../evidence-matching/evidence-matching.service';
+import { getEventRosterFormat } from './event-roster-format';
+import {
+  addEventRosterCorrection,
+  applyEventRosterCorrection,
+  readEventRosterCorrections,
+  rebuildEventRosterPreviewRows,
+  removeEventRosterCorrection,
+  type EventRosterRowCorrection,
+} from './event-roster-corrections';
 
 type UploadedRosterFile = Express.Multer.File;
 
@@ -219,6 +230,7 @@ export class EventRegistryService {
     if (!file) {
       throw new AppError(400, ErrorCodes.EVENT_ROSTER_REQUIRED, 'Roster file is required');
     }
+    getEventRosterFormat(file.originalname, file.mimetype);
 
     const storedFile = await this.storageService.saveFile({
       buffer: file.buffer,
@@ -352,8 +364,15 @@ export class EventRegistryService {
         throw new AppError(404, ErrorCodes.EVENT_FILE_NOT_FOUND, 'Event file not found');
       const job = await this.repository.findLatestCompletedRosterJob(eventFile.id);
       const preview = job?.resultJson as RosterPreviewResult | undefined;
+      const corrections = readEventRosterCorrections(job?.resultJson);
       return {
-        items: preview?.rows ?? [],
+        items: (preview?.rows ?? []).map((row, index) => ({
+          ...row,
+          __rowNumber: index + 2,
+          ...(corrections[String(index + 2)]
+            ? { __manualCorrection: corrections[String(index + 2)] }
+            : {}),
+        })),
         pagination: {
           page: 1,
           limit: preview?.rows.length ?? 0,
@@ -380,39 +399,65 @@ export class EventRegistryService {
   }
 
   async confirmIndex(user: AuthenticatedUser, eventId: string, input: ConfirmIndexInput) {
-    const event = await this.getRequiredEvent(user, eventId);
-    const eventFile = input.eventFileId
-      ? await this.repository.findEventFile(input.eventFileId)
-      : await this.repository.findLatestEventFile(event.id);
-    if (!eventFile || eventFile.eventId !== event.id)
-      throw new AppError(404, ErrorCodes.EVENT_FILE_NOT_FOUND, 'Event file not found');
-
-    const job = await this.repository.findLatestCompletedRosterJob(eventFile.id);
-    if (!job?.resultJson) {
-      throw new AppError(
-        400,
-        ErrorCodes.EVENT_INDEXING_NOT_COMPLETED,
-        'Roster indexing must complete before confirm',
-      );
-    }
-
-    const preview = job.resultJson as RosterPreviewResult;
-    const participants: NormalizedParticipantInput[] = [];
-    const rejectedRows: Array<Record<string, unknown>> = [];
-
-    preview.rows.forEach((row) => {
-      const participant = applyColumnMapping(row, input.columnMapping, {
-        convertedValue: event.convertedValue,
-      });
-      if (!participant) rejectedRows.push(row);
-      else participants.push(participant);
-    });
-
-    if (participants.length === 0) {
-      throw new AppError(400, ErrorCodes.ROSTER_EMPTY, 'Roster has no valid participants');
-    }
-
     await prisma.$transaction(async (tx) => {
+      await lockEventRoster(tx, eventId, input.eventFileId);
+      const event = await tx.eventRegistry.findUnique({ where: { id: eventId } });
+      if (!event) throw new AppError(404, ErrorCodes.EVENT_NOT_FOUND, 'Event not found');
+      assertSameWorkspace(user, event, 'Event not found');
+      const eventFile = input.eventFileId
+        ? await tx.eventFile.findFirst({
+            where: { id: input.eventFileId, eventId },
+            include: { file: true },
+          })
+        : await tx.eventFile.findFirst({
+            where: { eventId },
+            include: { file: true },
+            orderBy: { createdAt: 'desc' },
+          });
+      if (!eventFile || eventFile.file.workspaceId !== event.workspaceId) {
+        throw new AppError(404, ErrorCodes.EVENT_FILE_NOT_FOUND, 'Event file not found');
+      }
+      const confirmableStatuses: IndexingStatus[] = [IndexingStatus.indexed, IndexingStatus.needs_manual_review];
+      if (!confirmableStatuses.includes(eventFile.indexingStatus)) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster extraction is not ready for confirmation');
+      }
+      if (!input.eventFileId) await lockEventFile(tx, eventFile.id);
+      const job = await tx.indexingJob.findFirst({
+        where: { targetId: eventFile.id, jobType: JobType.event_roster_indexing, status: JobStatus.completed },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (!job?.resultJson) {
+        throw new AppError(400, ErrorCodes.EVENT_INDEXING_NOT_COMPLETED, 'Roster indexing must complete before confirm');
+      }
+      const preview = job.resultJson as unknown as RosterPreviewResult;
+      if (preview.rosterFileId && preview.rosterFileId !== eventFile.fileId) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Roster preview belongs to a different source file');
+      }
+      const sourceRows = Array.isArray(preview.sourceRows) ? preview.sourceRows : preview.rows;
+      if (!Array.isArray(sourceRows)) {
+        throw new AppError(400, ErrorCodes.EVENT_INDEXING_NOT_COMPLETED, 'Roster indexing must complete before confirm');
+      }
+      const corrections = readEventRosterCorrections(job.resultJson);
+      const participants: NormalizedParticipantInput[] = [];
+      const rejectedRows: Array<Record<string, unknown>> = [];
+
+      sourceRows.forEach((row, index) => {
+        const correction = corrections[String(index + 2)];
+        const correctedRow = correction?.studentCode
+          ? { ...row, [input.columnMapping.studentCode]: correction.studentCode }
+          : row;
+        const mapped = applyColumnMapping(correctedRow, input.columnMapping, {
+          convertedValue: event.convertedValue,
+        });
+        const participant = mapped ? applyCanonicalCorrection(mapped, correction) : null;
+        if (!participant) rejectedRows.push(row);
+        else participants.push(participant);
+      });
+
+      if (participants.length === 0) {
+        throw new AppError(400, ErrorCodes.ROSTER_EMPTY, 'Roster has no valid participants');
+      }
+
       if (input.replaceExisting) {
         await tx.eventParticipant.deleteMany({ where: { eventId: event.id } });
       }
@@ -481,7 +526,118 @@ export class EventRegistryService {
       });
     });
 
-    return this.getDetail(user, event.id);
+    return this.getDetail(user, eventId);
+  }
+
+  async updateRosterPreviewRow(
+    user: AuthenticatedUser,
+    eventId: string,
+    eventFileId: string,
+    rowNumber: number,
+    input: EventRosterRowCorrection,
+  ) {
+    return this.mutateRosterCorrection(user, eventId, eventFileId, rowNumber, input);
+  }
+
+  async revertRosterPreviewRowCorrection(
+    user: AuthenticatedUser,
+    eventId: string,
+    eventFileId: string,
+    rowNumber: number,
+  ) {
+    return this.mutateRosterCorrection(user, eventId, eventFileId, rowNumber, null);
+  }
+
+  private async mutateRosterCorrection(
+    user: AuthenticatedUser,
+    eventId: string,
+    eventFileId: string,
+    rowNumber: number,
+    input: EventRosterRowCorrection | null,
+  ) {
+    await this.getRequiredEvent(user, eventId);
+    return prisma.$transaction(async (tx) => {
+      await lockEventRoster(tx, eventId, eventFileId);
+      const event = await tx.eventRegistry.findUnique({ where: { id: eventId } });
+      if (!event) throw new AppError(404, ErrorCodes.EVENT_NOT_FOUND, 'Event not found');
+      assertSameWorkspace(user, event, 'Event not found');
+      if (event.rosterIndexed) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot correct a confirmed event roster');
+      }
+      const eventFile = await tx.eventFile.findFirst({
+        where: { id: eventFileId, eventId },
+        include: { file: true },
+      });
+      if (!eventFile || eventFile.file.workspaceId !== event.workspaceId) {
+        throw new AppError(404, ErrorCodes.EVENT_FILE_NOT_FOUND, 'Event roster file not found');
+      }
+      const correctableStatuses: IndexingStatus[] = [IndexingStatus.indexed, IndexingStatus.needs_manual_review];
+      if (!correctableStatuses.includes(eventFile.indexingStatus)) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster extraction is not ready for correction');
+      }
+      const job = await tx.indexingJob.findFirst({
+        where: { targetId: eventFile.id, jobType: JobType.event_roster_indexing, status: JobStatus.completed },
+        orderBy: { createdAt: 'desc' },
+      });
+      const resultJson = job?.resultJson as Record<string, unknown> | null;
+      const sourceRows = Array.isArray(resultJson?.sourceRows) ? resultJson.sourceRows : null;
+      if (!job || !resultJson || !sourceRows || (resultJson.rosterFileId && resultJson.rosterFileId !== eventFile.fileId)) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster extraction is not ready for correction');
+      }
+      const rowIndex = rowNumber - 2;
+      if (rowIndex < 0 || rowIndex >= sourceRows.length) {
+        throw new AppError(404, ErrorCodes.NOT_FOUND, 'Event roster preview row not found');
+      }
+      const corrections = readEventRosterCorrections(resultJson);
+      let nextCorrections;
+      let changedFields: string[];
+      if (input) {
+        nextCorrections = addEventRosterCorrection(corrections, rowNumber, input);
+        changedFields = Object.keys(input);
+      } else {
+        const existing = corrections[String(rowNumber)];
+        if (!existing) throw new AppError(409, ErrorCodes.CONFLICT, 'Roster row has no manual correction');
+        nextCorrections = removeEventRosterCorrection(corrections, rowNumber);
+        changedFields = Object.keys(existing);
+      }
+      const mapping = (resultJson.suggestedMapping ?? {}) as RosterPreviewResult['suggestedMapping'];
+      const rebuilt = rebuildEventRosterPreviewRows(sourceRows as RosterPreviewResult['sourceRows'], nextCorrections, mapping);
+      const nextResult = {
+        ...resultJson,
+        rows: rebuilt.rows,
+        quality: rebuilt.quality,
+        rowCorrections: nextCorrections,
+      } as Prisma.InputJsonValue;
+      await tx.indexingJob.update({ where: { id: job.id }, data: { resultJson: nextResult } });
+      const hasQualityWarnings = rebuilt.quality.rowCount === 0 ||
+        rebuilt.quality.missingStudentCodeRows > 0 || rebuilt.quality.missingStudentNameRows > 0 ||
+        rebuilt.quality.duplicateStudentCodes.length > 0 || rebuilt.quality.confidence < 0.6;
+      await tx.eventFile.update({
+        where: { id: eventFile.id },
+        data: {
+          indexingStatus: hasQualityWarnings ? IndexingStatus.needs_manual_review : IndexingStatus.indexed,
+          indexQualityScore: rebuilt.quality.confidence,
+        },
+      });
+      await createApplicationAudit(tx, {
+        actorId: user.id,
+        actorRole: user.role,
+        workspaceId: event.workspaceId,
+        action: input ? 'EVENT_ROSTER_ROW_CORRECTED' : 'EVENT_ROSTER_ROW_CORRECTION_REVERTED',
+        targetType: 'event',
+        targetId: event.id,
+        afterStateJson: { eventFileId, rowNumber, changedFields },
+      });
+      return {
+        eventId,
+        eventFileId,
+        rowNumber,
+        sourceRow: sourceRows[rowIndex],
+        effectiveRow: rebuilt.rows[rowIndex],
+        correction: nextCorrections[String(rowNumber)] ?? null,
+        quality: rebuilt.quality,
+      };
+    });
   }
 
   async importParticipants(
@@ -744,6 +900,22 @@ export class EventRegistryService {
     };
   }
 
+}
+
+async function lockEventRoster(tx: Prisma.TransactionClient, eventId: string, eventFileId?: string) {
+  await tx.$queryRaw`SELECT "id" FROM "EventRegistry" WHERE "id" = ${eventId}::uuid FOR UPDATE`;
+  if (eventFileId) await lockEventFile(tx, eventFileId);
+}
+
+async function lockEventFile(tx: Prisma.TransactionClient, eventFileId: string) {
+  await tx.$queryRaw`SELECT "id" FROM "EventFile" WHERE "id" = ${eventFileId}::uuid FOR UPDATE`;
+}
+
+function applyCanonicalCorrection(
+  participant: NormalizedParticipantInput,
+  correction?: EventRosterRowCorrection,
+) {
+  return applyEventRosterCorrection(participant, correction);
 }
 
 function maskStudentCode(studentCode: string | null | undefined) {

@@ -33,7 +33,9 @@ export function mapOpenAiRuntimeError(
   const name = typeof record?.name === 'string' ? record.name : '';
   const code = typeof record?.code === 'string' ? record.code : '';
   const message = typeof record?.message === 'string' ? record.message.toLowerCase() : '';
-  if (name === 'AbortError') return ErrorCodes.OPENAI_REQUEST_ABORTED;
+  if (name === 'AbortError') {
+    return message.includes('timeout') ? ErrorCodes.OPENAI_TIMEOUT : ErrorCodes.OPENAI_REQUEST_ABORTED;
+  }
   if (code.includes('timeout') || message.includes('timeout')) return ErrorCodes.OPENAI_TIMEOUT;
   if (status === 401 || status === 403) return ErrorCodes.OPENAI_AUTHENTICATION_FAILED;
   if (status === 404 || message.includes('model')) return ErrorCodes.OPENAI_MODEL_NOT_AVAILABLE;

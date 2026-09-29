@@ -18,6 +18,10 @@ const optionalUrlFromEnv = z.preprocess(
   (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
   z.string().url().optional(),
 );
+const modelFromEnv = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  z.string().min(1).default('gpt-6-luna'),
+);
 
 const rawEnvSchema = z.object({
   NODE_ENV: nodeEnvSchema,
@@ -58,81 +62,44 @@ const rawEnvSchema = z.object({
   R2_PUBLIC_BASE_URL: optionalUrlFromEnv,
   R2_ACCESS_KEY_ID: z.string().optional(),
   R2_SECRET_ACCESS_KEY: z.string().optional(),
-  VNPT_MODE: z.enum(['mock', 'live']).default('mock'),
-  VNPT_ENABLED: booleanFromEnv,
-  VNPT_REQUIRE_REAL_IN_PIPELINE: booleanFromEnv,
-  VNPT_ALLOW_MOCK_RUNTIME: booleanFromEnv,
-  VNPT_BASE_URL: z.string().url().default('https://api.idg.vnpt.vn'),
-  VNPT_API_KEY: z.string().optional().default(''),
-  VNPT_ACCESS_TOKEN: z.string().optional().default(''),
-  VNPT_TOKEN_ID: z.string().optional().default(''),
-  VNPT_TOKEN_KEY: z.string().optional().default(''),
-  VNPT_MAC_ADDRESS: z.string().min(1).default('EGOV-DIGDOC-WEB-API'),
-  VNPT_CLIENT_SESSION: z.string().min(1).default('00-14-22-01-23-45-1548211589291'),
-  VNPT_DEFAULT_TOKEN: z.string().min(1).default('5tot-backend'),
-  VNPT_TIMEOUT_MS: z.coerce.number().int().positive().default(120000),
-  VNPT_RETRY_MAX: z.coerce.number().int().min(0).max(5).default(2),
-  VNPT_UPLOAD_PATH: z.string().min(1).default('/file-service/v1/addFile'),
-  VNPT_OCR_BASIC_PATH: z.string().min(1).default('/rpa-service/aidigdoc/v1/ocr/scan'),
-  VNPT_OCR_ADVANCED_PATH: z.string().min(1).default('/rpa-service/aidigdoc/v1/ocr/scan-table'),
-  VNPT_OCR_ASYNC_START_PATH: z
-    .string()
-    .min(1)
-    .default('/rpa-service/aidigdoc/v1/integration/ocr/scan-table'),
-  VNPT_OCR_ASYNC_RESULT_PATH: z
-    .string()
-    .min(1)
-    .default('/rpa-service/aidigdoc/v1/integration/ocr/scan-table/result'),
-  VNPT_OCR_ASYNC_CANCEL_PATH: z
-    .string()
-    .min(1)
-    .default('/rpa-service/aidigdoc/v1/integration/ocr/scan-table/cancel'),
-  VNPT_ADMIN_DOC_PATH: z
-    .string()
-    .min(1)
-    .default('/rpa-service/aidigdoc/v1/vlm/van-ban-hanh-chinh-vnportal'),
-  VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE: booleanFromEnv,
-  VNPT_SAVE_RAW_RESPONSE: booleanFromEnv,
-  VNPT_LOG_RAW_RESPONSE: booleanFromEnv,
-  SMARTREADER_SMOKE_AUDIT_ENABLED: booleanFromEnv,
-  SMARTREADER_ASYNC_MAX_POLLS: z.coerce.number().int().positive().default(60),
   EVIDENCE_ANALYSIS_PROVIDER: z.enum(['openai', 'smartreader', 'mock']).default('openai'),
   OPENAI_API_KEY: z.string().optional().default(''),
-  OPENAI_EVIDENCE_MODEL: z.string().optional().default(''),
+  OPENAI_EVIDENCE_MODEL: modelFromEnv,
   OPENAI_EVIDENCE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(30000),
   OPENAI_EVIDENCE_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(1),
   OPENAI_STORE_RESPONSES: booleanFromEnv,
   OPENAI_EVIDENCE_PROMPT_VERSION: z.string().min(1).default('evidence-card-v1'),
+  OPENAI_AWARD_ROSTER_MODEL: modelFromEnv,
+  OPENAI_DECISION_MODEL: modelFromEnv,
+  OPENAI_EVENT_ROSTER_MODEL: modelFromEnv,
+  OPENAI_DOCUMENT_EXTRACTION_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(120000),
+  OPENAI_DOCUMENT_EXTRACTION_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(2),
+  OPENAI_AWARD_ROSTER_PROMPT_VERSION: z.string().min(1).default('award-roster-v1'),
+  OPENAI_DECISION_PROMPT_VERSION: z.string().min(1).default('decision-document-v1'),
+  OPENAI_EVENT_ROSTER_PROMPT_VERSION: z.string().min(1).default('event-roster-v1'),
   ASSISTANT_NARRATIVE_PROVIDER: z.enum(['openai', 'mock', 'disabled']).optional(),
-  OPENAI_ASSISTANT_MODEL: z.string().optional().default(''),
+  OPENAI_ASSISTANT_MODEL: modelFromEnv,
   OPENAI_ASSISTANT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(30000),
   OPENAI_ASSISTANT_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(1),
   OPENAI_ASSISTANT_PROMPT_VERSION: z.string().min(1).default('dashboard-assistant-v1'),
   STUDENT_ASSISTANT_PROVIDER: z.enum(['openai', 'mock', 'disabled']).optional(),
-  OPENAI_STUDENT_ASSISTANT_MODEL: z.string().optional().default(''),
+  OPENAI_STUDENT_ASSISTANT_MODEL: modelFromEnv,
   OPENAI_STUDENT_ASSISTANT_PROMPT_VERSION: z.string().min(1).default('student-assistant-v1'),
   ASSISTANT_NARRATIVE_CACHE_TTL_MS: z.coerce.number().int().positive().default(900000),
   ASSISTANT_MOCK_STREAM_DELAY_MS: z.coerce.number().int().min(0).max(5000).default(35),
   JOB_WORKER_ENABLED: booleanFromEnv,
   JOB_WORKER_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+  JOB_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(10).default(3),
+  JOB_WORKER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(4),
+  JOB_WORKER_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(100).max(60000).default(1000),
+  JOB_WORKER_RETRY_MAX_DELAY_MS: z.coerce.number().int().min(1000).max(600000).default(60000),
+  JOB_WORKER_STALE_AFTER_MS: z.coerce.number().int().min(60000).max(3600000).default(900000),
+  JOB_WORKER_STORAGE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300000).default(30000),
   INTERNAL_WORKER_TOKEN: z.string().optional().default(''),
   SMARTBOT_MODE: z.enum(['mock', 'live', 'real']).default('mock'),
-  SMARTBOT_BASE_URL: z.string().url().default('https://assistant-stream.vnpt.vn'),
-  SMARTBOT_BOT_ID: z.string().optional().default(''),
-  SMARTBOT_ACCESS_TOKEN: z.string().optional().default(''),
-  SMARTBOT_TOKEN_ID: z.string().optional().default(''),
-  SMARTBOT_TOKEN_KEY: z.string().optional().default(''),
-  SMARTBOT_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
   SMARTBOT_INPUT_CHANNEL: z.string().min(1).default('livechat'),
-  SMARTBOT_USE_DYNAMIC_PROMPT: booleanFromEnv,
   SMARTBOT_WEBHOOK_TOKEN: z.string().optional().default(''),
-  SMARTBOT_LOG_RAW_RESPONSE: booleanFromEnv,
   ENABLE_DEMO_REVIEW_BYPASS: booleanFromEnv,
-  GEMINI_ENABLED: booleanFromEnv,
-  GEMINI_API_KEY: z.string().optional().default(''),
-  GEMINI_MODEL: z.string().min(1).default('gemini-2.5-flash'),
-  GEMINI_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
-  GEMINI_LOG_RAW_RESPONSE: booleanFromEnv,
   MAIL_ENABLED: booleanFromEnv,
   MAIL_PROVIDER: z.enum(['smtp', 'console']).default('console'),
   SMTP_HOST: z.string().optional().default(''),
@@ -274,36 +241,6 @@ if (!jwtAccessSecret || !jwtRefreshSecret) {
   throw new Error('Invalid environment configuration: JWT_SECRET or both JWT_ACCESS_SECRET/JWT_REFRESH_SECRET are required');
 }
 
-const vnptEnabled =
-  process.env.VNPT_ENABLED === undefined ? rawEnv.VNPT_MODE !== 'mock' : rawEnv.VNPT_ENABLED;
-const vnptRequireRealInPipeline =
-  process.env.VNPT_REQUIRE_REAL_IN_PIPELINE === undefined
-    ? rawEnv.VNPT_MODE !== 'mock'
-    : rawEnv.VNPT_REQUIRE_REAL_IN_PIPELINE;
-const vnptAllowMockRuntime =
-  process.env.VNPT_ALLOW_MOCK_RUNTIME === undefined ? false : rawEnv.VNPT_ALLOW_MOCK_RUNTIME;
-const geminiEnabled =
-  process.env.GEMINI_ENABLED === undefined ? false : rawEnv.GEMINI_ENABLED;
-
-if (
-  vnptEnabled &&
-  (!rawEnv.VNPT_ACCESS_TOKEN || !rawEnv.VNPT_TOKEN_ID || !rawEnv.VNPT_TOKEN_KEY)
-) {
-  throw new Error(
-    'Invalid environment configuration: VNPT_ACCESS_TOKEN, VNPT_TOKEN_ID, and VNPT_TOKEN_KEY are required when VNPT_ENABLED=true',
-  );
-}
-
-if (vnptRequireRealInPipeline && vnptAllowMockRuntime) {
-  throw new Error(
-    'Invalid environment configuration: VNPT_REQUIRE_REAL_IN_PIPELINE=true cannot be combined with VNPT_ALLOW_MOCK_RUNTIME=true',
-  );
-}
-
-if (geminiEnabled && !rawEnv.GEMINI_API_KEY) {
-  throw new Error('Invalid environment configuration: GEMINI_API_KEY is required when GEMINI_ENABLED=true');
-}
-
 if (
   rawEnv.NODE_ENV === 'production' &&
   (jwtAccessSecret === 'change_me' || jwtRefreshSecret === 'change_me')
@@ -327,18 +264,6 @@ export const env = {
   BCRYPT_SALT_ROUNDS: rawEnv.BCRYPT_SALT_ROUNDS,
   UPLOAD_DIR: rawEnv.UPLOAD_DIR ?? rawEnv.LOCAL_UPLOAD_DIR ?? './uploads',
   LOCAL_UPLOAD_DIR: rawEnv.LOCAL_UPLOAD_DIR ?? rawEnv.UPLOAD_DIR ?? './uploads',
-  VNPT_SAVE_RAW_RESPONSE:
-    process.env.VNPT_SAVE_RAW_RESPONSE === undefined ? true : rawEnv.VNPT_SAVE_RAW_RESPONSE,
-  VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE:
-    process.env.VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE === undefined
-      ? false
-      : rawEnv.VNPT_UPLOAD_FORCE_JSON_CONTENT_TYPE,
-  VNPT_LOG_RAW_RESPONSE:
-    process.env.VNPT_LOG_RAW_RESPONSE === undefined ? false : rawEnv.VNPT_LOG_RAW_RESPONSE,
-  SMARTREADER_SMOKE_AUDIT_ENABLED:
-    process.env.SMARTREADER_SMOKE_AUDIT_ENABLED === undefined
-      ? false
-      : rawEnv.SMARTREADER_SMOKE_AUDIT_ENABLED,
   EVIDENCE_ANALYSIS_PROVIDER:
     rawEnv.NODE_ENV === 'test' ? rawEnv.EVIDENCE_ANALYSIS_PROVIDER : 'openai',
   OPENAI_API_KEY: rawEnv.OPENAI_API_KEY,
@@ -348,6 +273,14 @@ export const env = {
   OPENAI_STORE_RESPONSES:
     process.env.OPENAI_STORE_RESPONSES === undefined ? false : rawEnv.OPENAI_STORE_RESPONSES,
   OPENAI_EVIDENCE_PROMPT_VERSION: rawEnv.OPENAI_EVIDENCE_PROMPT_VERSION,
+  OPENAI_AWARD_ROSTER_MODEL: rawEnv.OPENAI_AWARD_ROSTER_MODEL,
+  OPENAI_DECISION_MODEL: rawEnv.OPENAI_DECISION_MODEL,
+  OPENAI_EVENT_ROSTER_MODEL: rawEnv.OPENAI_EVENT_ROSTER_MODEL,
+  OPENAI_DOCUMENT_EXTRACTION_TIMEOUT_MS: rawEnv.OPENAI_DOCUMENT_EXTRACTION_TIMEOUT_MS,
+  OPENAI_DOCUMENT_EXTRACTION_MAX_RETRIES: rawEnv.OPENAI_DOCUMENT_EXTRACTION_MAX_RETRIES,
+  OPENAI_AWARD_ROSTER_PROMPT_VERSION: rawEnv.OPENAI_AWARD_ROSTER_PROMPT_VERSION,
+  OPENAI_DECISION_PROMPT_VERSION: rawEnv.OPENAI_DECISION_PROMPT_VERSION,
+  OPENAI_EVENT_ROSTER_PROMPT_VERSION: rawEnv.OPENAI_EVENT_ROSTER_PROMPT_VERSION,
   ASSISTANT_NARRATIVE_PROVIDER:
     rawEnv.NODE_ENV === 'test' ? (rawEnv.ASSISTANT_NARRATIVE_PROVIDER ?? 'mock') : 'openai',
   OPENAI_ASSISTANT_MODEL: rawEnv.OPENAI_ASSISTANT_MODEL,
@@ -365,18 +298,6 @@ export const env = {
       ? rawEnv.NODE_ENV === 'development'
       : rawEnv.JOB_WORKER_ENABLED,
   MAIL_ENABLED: process.env.MAIL_ENABLED === undefined ? false : rawEnv.MAIL_ENABLED,
-  VNPT_ENABLED: vnptEnabled,
-  VNPT_REQUIRE_REAL_IN_PIPELINE: vnptRequireRealInPipeline,
-  VNPT_ALLOW_MOCK_RUNTIME: vnptAllowMockRuntime,
-  GEMINI_ENABLED: geminiEnabled,
-  GEMINI_LOG_RAW_RESPONSE:
-    process.env.GEMINI_LOG_RAW_RESPONSE === undefined ? false : rawEnv.GEMINI_LOG_RAW_RESPONSE,
-  SMARTBOT_USE_DYNAMIC_PROMPT:
-    process.env.SMARTBOT_USE_DYNAMIC_PROMPT === undefined
-      ? true
-      : rawEnv.SMARTBOT_USE_DYNAMIC_PROMPT,
-  SMARTBOT_LOG_RAW_RESPONSE:
-    process.env.SMARTBOT_LOG_RAW_RESPONSE === undefined ? false : rawEnv.SMARTBOT_LOG_RAW_RESPONSE,
   ENABLE_DEMO_REVIEW_BYPASS: rawEnv.ENABLE_DEMO_REVIEW_BYPASS,
 };
 export type Env = typeof env;
