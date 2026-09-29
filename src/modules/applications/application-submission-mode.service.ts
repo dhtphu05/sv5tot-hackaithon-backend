@@ -30,10 +30,14 @@ export class ApplicationSubmissionModeService {
       return;
     }
 
+    if (application.reviewTasks.length === 1) return;
+
     throw new AppError(
       409,
       ErrorCodes.APPLICATION_NOT_SUBMITTABLE,
-      'Hồ sơ đang có yêu cầu bổ sung. Vui lòng gửi lại từng tiêu chí được yêu cầu bổ sung.',
+      application.reviewTasks.length === 0
+        ? 'Hồ sơ đang ở trạng thái cần bổ sung nhưng không còn yêu cầu bổ sung đang hoạt động. Vui lòng tải lại hồ sơ.'
+        : 'Hồ sơ có nhiều tiêu chí cần bổ sung. Vui lòng gửi lại từng tiêu chí được yêu cầu bổ sung.',
       {
         supplementTasks: application.reviewTasks,
       },
