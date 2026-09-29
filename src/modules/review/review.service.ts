@@ -17,6 +17,7 @@ import {
 import { prisma } from '../../infrastructure/database/prisma';
 import { env } from '../../config/env';
 import { auditActions } from '../../shared/constants/application';
+import { coreCriteria } from '../../shared/constants/criteria';
 import { buildReadableSummary } from '../../shared/dto/evidence-student-status';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -160,7 +161,8 @@ export class ReviewService {
       }).length,
     };
 
-    const bottleneckByCriterion = Object.values(Criterion).map((criterion) => ({
+    const bottleneckCriteria = isCityReviewRole(user.role) ? coreCriteria : Object.values(Criterion);
+    const bottleneckByCriterion = bottleneckCriteria.map((criterion) => ({
       criterion,
       total: listItems.filter((item) => item.criterion === criterion).length,
       waiting: listItems.filter(
@@ -1689,13 +1691,7 @@ export class ReviewService {
 
     // Individual City review is fixed to the five official criteria; elsewhere, preserve
     // legacy behavior by ensuring any additional criteria that have evidence.
-    const criteriaToEnsure = new Set<Criterion>([
-      Criterion.ethics,
-      Criterion.academic,
-      Criterion.physical,
-      Criterion.volunteer,
-      Criterion.integration,
-    ]);
+    const criteriaToEnsure = new Set<Criterion>(coreCriteria);
     if (!cityIndividual) {
       for (const ev of evidences) {
         criteriaToEnsure.add(ev.criterion);

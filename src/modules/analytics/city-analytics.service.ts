@@ -13,18 +13,12 @@ import {
 import { prisma } from '../../infrastructure/database/prisma';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
+import { coreCriteria } from '../../shared/constants/criteria';
 import type { AuthenticatedUser } from '../../shared/types/auth';
 import type { CityApplicationListItem } from './city-analytics.dto';
 import type { CityAnalyticsApplicationsQuery, CityAnalyticsQuery } from './city-analytics.validation';
 
-const cityCriteria = [
-  Criterion.ethics,
-  Criterion.academic,
-  Criterion.physical,
-  Criterion.volunteer,
-  Criterion.integration,
-] as const;
-const cityCriterionSet = new Set<Criterion>(cityCriteria);
+const cityCriterionSet = new Set<Criterion>(coreCriteria);
 const terminalTaskStatuses = new Set<ReviewTaskStatus>([
   ReviewTaskStatus.accepted,
   ReviewTaskStatus.rejected,
@@ -292,7 +286,7 @@ function summarize(
     unexpectedTaskCount: 0,
     missingCriterionSlots: 0,
   };
-  const criteria = cityCriteria.map((criterion) => ({
+  const criteria = coreCriteria.map((criterion) => ({
     criterion,
     totalTasks: 0,
     pending: 0,
@@ -449,7 +443,7 @@ function reviewProgress(tasks: ReviewTaskRow[]) {
   for (const rows of byCriterion.values()) unexpectedTasks += Math.max(0, rows.length - 1);
   let reviewed = 0;
   let missingSlots = 0;
-  for (const criterion of cityCriteria) {
+  for (const criterion of coreCriteria) {
     const rows = byCriterion.get(criterion) ?? [];
     if (rows.length === 0) missingSlots += 1;
     if (rows.length === 1 && terminalTaskStatuses.has(rows[0].status)) reviewed += 1;
