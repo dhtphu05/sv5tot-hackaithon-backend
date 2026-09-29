@@ -70,7 +70,10 @@ function activeTask() {
   };
 }
 
-function buildDb(remainingSupplementTasks: number, supplementDeadlineAt = new Date('2099-03-01T00:00:00.000Z')) {
+function buildDb(
+  remainingSupplementTasks: number,
+  supplementDeadlineAt = new Date('2099-03-01T00:00:00.000Z'),
+) {
   const task = activeTask();
   const tx = {
     $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
@@ -108,21 +111,42 @@ function buildDb(remainingSupplementTasks: number, supplementDeadlineAt = new Da
   return { db, tx, task };
 }
 
+function genericSupplementApplication(criteria: Criterion[]) {
+  return {
+    status: ApplicationStatus.supplement_required,
+    submittedAt: new Date('2026-09-01T00:00:00.000Z'),
+    reviewTasks: criteria.map((criterion) => ({
+      id: `task-${criterion}`,
+      criterion,
+      status: ReviewTaskStatus.supplement_required,
+    })),
+  };
+}
+
 describe('canonical supplement resubmit', () => {
-  it('rejects generic application submit once an existing application is waiting for supplement', async () => {
+  it('keeps generic submit compatibility when exactly one supplement task is active', async () => {
     const db = {
       application: {
-        findFirst: vi.fn().mockResolvedValue({
-          status: ApplicationStatus.supplement_required,
-          submittedAt: new Date('2026-09-01T00:00:00.000Z'),
-          reviewTasks: [
-            {
-              id: 'task-volunteer',
-              criterion: Criterion.volunteer,
-              status: ReviewTaskStatus.supplement_required,
-            },
-          ],
-        }),
+        findFirst: vi
+          .fn()
+          .mockResolvedValue(genericSupplementApplication([Criterion.volunteer])),
+      },
+    };
+    const service = new ApplicationSubmissionModeService(db as never);
+
+    await expect(
+      service.assertGenericSubmitAllowed(student, 'application-a'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects generic application submit when multiple supplement tasks are active', async () => {
+    const db = {
+      application: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValue(
+            genericSupplementApplication([Criterion.volunteer, Criterion.integration]),
+          ),
       },
     };
     const service = new ApplicationSubmissionModeService(db as never);
