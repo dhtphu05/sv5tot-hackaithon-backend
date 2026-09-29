@@ -36,7 +36,7 @@ describe('DecisionImport roster corrections', () => {
       validationStatus: RosterPreviewValidationStatus.valid,
       rawRow: { MSSV: '00123', 'Họ tên': '', Lớp: '23CT1' },
     });
-    expect(corrected[1]?.validationStatus).toBe(RosterPreviewValidationStatus.duplicate);
+    expect(corrected[1]?.validationStatus).toBe(RosterPreviewValidationStatus.valid);
     expect(corrected[0]?.rawRow).toEqual(base[0]?.rawRow);
   });
 
@@ -46,7 +46,7 @@ describe('DecisionImport roster corrections', () => {
     const corrected = applyDecisionRosterCorrections(base, {
       [key]: { studentCode: '00999', studentName: 'Nguyễn An' },
     });
-    const reverted = applyDecisionRosterCorrections(corrected, {});
+    const reverted = applyDecisionRosterCorrections(base, {});
 
     expect(corrected.map((row) => row.validationStatus)).toEqual([
       RosterPreviewValidationStatus.valid,

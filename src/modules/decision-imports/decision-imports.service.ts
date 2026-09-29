@@ -1,6 +1,3 @@
-import { promises as fs } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import {
   ApplicationStatus,
   DecisionImportStatus,
@@ -45,7 +42,6 @@ import {
   resolveExactParticipantNameMatch,
 } from '../event-registry/event-participant-matching';
 import { runIndexingJob } from '../jobs/jobs.service';
-import { getSmartReaderAdapter, redactSmartReaderSecrets } from '../smartreader';
 import { StorageService } from '../storage/storage.service';
 import { sanitizeFileName } from '../storage/storage.types';
 import { mapDecisionImportUxStatus } from './decision-import-ux-status.mapper';
@@ -56,11 +52,18 @@ import type {
   CreateDecisionImportInput,
   ListDecisionImportsQuery,
   StartDecisionImportInput,
+  UpdateDecisionRosterCorrectionInput,
   UpdateColumnMappingInput,
 } from './decision-imports.validation';
 import { detectDecisionTableType } from './roster-table.detector';
 import { suggestRosterColumnMapping, type DecisionColumnMapping } from './roster-column-mapping.service';
 import { markDuplicateRows, normalizeRosterRow, type NormalizedRosterPreviewRow } from './roster-row.normalizer';
+import {
+  applyDecisionRosterCorrections,
+  decisionRosterCorrectionKey,
+  readDecisionRosterCorrections,
+  type DecisionRosterCorrections,
+} from './decision-roster-corrections';
 
 type DecisionImportRecord = Prisma.DecisionImportGetPayload<{ include: typeof decisionImportInclude }>;
 type DecisionImportListRecord = Prisma.DecisionImportGetPayload<{
@@ -129,9 +132,7 @@ export class DecisionImportsService {
 
   async uploadFile(user: AuthenticatedUser, id: string, file?: UploadedDecisionFile) {
     const record = await this.getRequiredImport(id, user);
-    if (record.status === DecisionImportStatus.confirmed) {
-      throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot replace file after decision import is confirmed');
-    }
+    assertDecisionImportMutable(record, 'Cannot replace file after confirmation or cancellation');
     if (!file) throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Decision document file is required');
     if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) {
       throw new AppError(400, ErrorCodes.FILE_TYPE_NOT_ALLOWED, 'Decision import supports PDF and image files only');
@@ -140,66 +141,59 @@ export class DecisionImportsService {
     const safeName = sanitizeFileName(file.originalname);
     const key = `decision-imports/${record.id}/${Date.now()}-${safeName}`;
     await storageService.uploadObject({ key, buffer: file.buffer, contentType: file.mimetype });
-
-    const fileRecord = await prisma.file.create({
-      data: {
-        ownerId: user.id,
-        storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
-        filePath: key,
-        originalName: file.originalname,
-        mimeType: file.mimetype,
-        fileSize: file.size,
-        workspaceId: record.workspaceId,
-        uploadedBy: user.id,
-      },
-    });
-
-    await auditService.log({
-      actorId: user.id,
-      actorRole: user.role,
-      action: auditActions.DECISION_IMPORT_FILE_UPLOADED,
-      entityType: 'decision_import',
-      entityId: record.id,
-      decisionImportId: record.id,
-      metadata: { fileId: fileRecord.id, mimeType: file.mimetype, size: file.size },
-    });
-
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), '5tot-decision-import-'));
-    const tempPath = path.join(tempDir, safeName || 'decision-upload');
     try {
-      await fs.writeFile(tempPath, file.buffer);
-      const uploaded = await getSmartReaderAdapter().uploadFile({
-        filePath: tempPath,
-        originalName: file.originalname,
-        title: file.originalname,
-        description: `5TOT decision import ${record.id}`,
+      await prisma.$transaction(async (tx) => {
+        await lockDecisionImport(tx, record.id);
+        const current = await tx.decisionImport.findUnique({ where: { id: record.id } });
+        if (!current) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+        assertSameWorkspace(user, current, 'Decision import not found');
+        assertDecisionImportMutable(current, 'Cannot replace file after confirmation or cancellation');
+
+        const fileRecord = await tx.file.create({
+          data: {
+            ownerId: user.id,
+            storageType: env.STORAGE_DRIVER === 'r2' ? FileStorageType.r2 : FileStorageType.local,
+            filePath: key,
+            originalName: file.originalname,
+            mimeType: file.mimetype,
+            fileSize: file.size,
+            workspaceId: current.workspaceId,
+            uploadedBy: user.id,
+          },
+        });
+        await tx.decisionTable.deleteMany({ where: { decisionImportId: record.id } });
+        await tx.decisionRosterPreviewRow.deleteMany({ where: { decisionImportId: record.id } });
+        await tx.decisionDocument.deleteMany({ where: { decisionImportId: record.id } });
+        await tx.decisionImport.update({
+          where: { id: record.id },
+          data: {
+            sourceFileId: fileRecord.id,
+            vnptHash: null,
+            vnptFileType: null,
+            metadataJobId: null,
+            rosterJobId: null,
+            columnMappingJson: Prisma.DbNull,
+            status: DecisionImportStatus.uploaded,
+            lastErrorCode: null,
+            lastErrorMessage: null,
+            lastUserMessage: null,
+            processingStep: 'source_file_uploaded',
+          },
+        });
+        await auditService.log({
+          tx,
+          actorId: user.id,
+          actorRole: user.role,
+          action: auditActions.DECISION_IMPORT_FILE_UPLOADED,
+          entityType: 'decision_import',
+          entityId: record.id,
+          decisionImportId: record.id,
+          metadata: { fileId: fileRecord.id, mimeType: file.mimetype, size: file.size },
+        });
       });
-      const updatedFile = await prisma.file.update({
-        where: { id: fileRecord.id },
-        data: {
-          vnptHash: uploaded.hash,
-          vnptFileType: uploaded.fileType,
-          vnptUploadedAt: new Date(),
-          vnptUploadRawJson: env.VNPT_SAVE_RAW_RESPONSE
-            ? (redactSmartReaderSecrets(uploaded.raw) as Prisma.InputJsonValue)
-            : undefined,
-        },
-      });
-      await prisma.decisionImport.update({
-        where: { id: record.id },
-        data: {
-          sourceFileId: updatedFile.id,
-          vnptHash: uploaded.hash,
-          vnptFileType: uploaded.fileType,
-          status: DecisionImportStatus.uploaded,
-          lastErrorCode: null,
-          lastErrorMessage: null,
-          lastUserMessage: null,
-          processingStep: 'file_uploaded_to_vnpt',
-        },
-      });
-    } finally {
-      await fs.rm(tempDir, { recursive: true, force: true });
+    } catch (error) {
+      await storageService.deleteObject(key, env.STORAGE_DRIVER).catch(() => undefined);
+      throw error;
     }
 
     return this.getDetail(user, record.id);
@@ -207,33 +201,41 @@ export class DecisionImportsService {
 
   async start(user: AuthenticatedUser, id: string, input: StartDecisionImportInput) {
     const record = await this.getRequiredImport(id, user);
-    if (!record.sourceFileId || !record.vnptHash || !record.vnptFileType) {
-      throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Upload decision file to VNPT before starting import');
-    }
-    if (record.status === DecisionImportStatus.confirmed) {
-      throw new AppError(409, ErrorCodes.CONFLICT, 'Decision import is already confirmed');
-    }
+    if (!record.sourceFileId) throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Upload a decision file before starting import');
+    assertDecisionImportMutable(record, 'Decision import cannot be processed after confirmation or cancellation');
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockDecisionImport(tx, record.id);
+      const current = await tx.decisionImport.findUnique({ where: { id: record.id } });
+      if (!current) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+      assertSameWorkspace(user, current, 'Decision import not found');
+      if (!current.sourceFileId) throw new AppError(400, ErrorCodes.EVIDENCE_FILE_REQUIRED, 'Upload a decision file before starting import');
+      assertDecisionImportMutable(current, 'Decision import cannot be processed after confirmation or cancellation');
+
       const metadataJob = await findOrCreateDecisionJob(
         tx,
-        record.id,
+        current.id,
         JobType.decision_metadata,
-        record.workspaceId,
+        current.workspaceId,
       );
       const rosterJob = await findOrCreateDecisionJob(
         tx,
-        record.id,
+        current.id,
         JobType.decision_roster_ocr,
-        record.workspaceId,
+        current.workspaceId,
       );
+      await tx.decisionTable.deleteMany({ where: { decisionImportId: current.id } });
+      await tx.decisionRosterPreviewRow.deleteMany({ where: { decisionImportId: current.id } });
       const updated = await tx.decisionImport.update({
-        where: { id: record.id },
+        where: { id: current.id },
         data: {
           metadataJobId: metadataJob.id,
           rosterJobId: rosterJob.id,
           status: DecisionImportStatus.extracting_metadata,
           processingStep: 'metadata_and_roster_jobs_queued',
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          lastUserMessage: null,
         },
       });
       await auditService.log({
@@ -242,8 +244,8 @@ export class DecisionImportsService {
         actorRole: user.role,
         action: auditActions.DECISION_IMPORT_STARTED,
         entityType: 'decision_import',
-        entityId: record.id,
-        decisionImportId: record.id,
+        entityId: current.id,
+        decisionImportId: current.id,
         metadata: { metadataJobId: metadataJob.id, rosterJobId: rosterJob.id },
       });
       return { updated, metadataJob, rosterJob };
@@ -298,24 +300,31 @@ export class DecisionImportsService {
   }
 
   async updateColumnMapping(user: AuthenticatedUser, id: string, input: UpdateColumnMappingInput) {
-    const record = await this.getRequiredImport(id, user);
-    if (record.status === DecisionImportStatus.confirmed) {
-      throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot update mapping after confirmation');
-    }
-
-    const rosterTables = record.tables.filter((table) => table.detectedType === 'roster');
-    const previewRows = buildPreviewRowsFromTables({
-      tables: rosterTables.map((table) => table.rawTableJson as unknown as NormalizedDecisionTable),
-      mapping: input.columnMapping,
-      fallbackCriterion: record.criterion,
-      fallbackConvertedValue: record.convertedValue,
-      fallbackConvertedUnit: record.convertedUnit,
-    });
-    if (!previewRows.length) {
-      throw new AppError(422, ErrorCodes.ROSTER_PARSE_FAILED, 'Column mapping produced no roster rows');
-    }
-
+    const visibleRecord = await this.getRequiredImport(id, user);
+    assertDecisionImportMutable(visibleRecord, 'Cannot update mapping after confirmation or cancellation');
     await prisma.$transaction(async (tx) => {
+      await lockDecisionImport(tx, id);
+      const record = await tx.decisionImport.findUnique({ where: { id }, include: decisionImportInclude });
+      if (!record) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+      assertSameWorkspace(user, record, 'Decision import not found');
+      assertDecisionImportMutable(record, 'Cannot update mapping after confirmation or cancellation');
+      const rosterTables = record.tables.filter((table) => table.detectedType === 'roster');
+      const baseRows = buildPreviewRowsFromTables({
+        tables: rosterTables.map((table) => table.rawTableJson as unknown as NormalizedDecisionTable),
+        mapping: input.columnMapping,
+        fallbackCriterion: record.criterion,
+        fallbackConvertedValue: record.convertedValue,
+        fallbackConvertedUnit: record.convertedUnit,
+      });
+      if (!baseRows.length) {
+        throw new AppError(422, ErrorCodes.ROSTER_PARSE_FAILED, 'Column mapping produced no roster rows');
+      }
+      const rosterJob = record.rosterJobId
+        ? await tx.indexingJob.findUnique({ where: { id: record.rosterJobId } })
+        : null;
+      const corrections = readDecisionRosterCorrections(rosterJob?.resultJson);
+      const previewRows = applyDecisionRosterCorrections(baseRows, corrections);
+
       await tx.decisionRosterPreviewRow.deleteMany({ where: { decisionImportId: id } });
       await createPreviewRows(tx, id, previewRows);
       await tx.decisionImport.update({
@@ -333,29 +342,133 @@ export class DecisionImportsService {
         entityType: 'decision_import',
         entityId: id,
         decisionImportId: id,
-        metadata: { rowCount: previewRows.length },
+        metadata: { rowCount: previewRows.length, preservedCorrectionCount: Object.keys(corrections).length },
       });
     });
 
     return this.preview(user, id);
   }
 
-  async cancel(user: AuthenticatedUser, id: string) {
-    const record = await this.getRequiredImport(id, user);
-    if (record.status === DecisionImportStatus.confirmed) {
-      throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot cancel confirmed import');
-    }
-    await prisma.decisionImport.update({
-      where: { id },
-      data: { status: DecisionImportStatus.cancelled, processingStep: 'cancelled_by_user' },
+  async updatePreviewRow(user: AuthenticatedUser, id: string, rowId: string, input: UpdateDecisionRosterCorrectionInput) {
+    const visibleRecord = await this.getRequiredImport(id, user);
+    assertDecisionImportMutable(visibleRecord, 'Cannot correct rows after confirmation or cancellation');
+    await prisma.$transaction(async (tx) => {
+      await lockDecisionImport(tx, id);
+      const record = await tx.decisionImport.findUnique({ where: { id }, include: decisionImportInclude });
+      if (!record) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+      assertSameWorkspace(user, record, 'Decision import not found');
+      assertDecisionImportMutable(record, 'Cannot correct rows after confirmation or cancellation');
+      const target = record.previewRows.find((row) => row.id === rowId);
+      if (!target) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision roster preview row not found');
+      const rosterJob = record.rosterJobId
+        ? await tx.indexingJob.findUnique({ where: { id: record.rosterJobId } })
+        : null;
+      if (!rosterJob || rosterJob.status !== JobStatus.completed) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster extraction is not ready for correction');
+      }
+
+      const corrections = readDecisionRosterCorrections(rosterJob.resultJson);
+      const key = decisionRosterCorrectionKey(toNormalizedPreviewRow(target));
+      const nextCorrections: DecisionRosterCorrections = {
+        ...corrections,
+        [key]: { ...(corrections[key] ?? {}), ...input },
+      };
+      const previewRows = rebuildDecisionPreview(record, nextCorrections);
+      await tx.decisionRosterPreviewRow.deleteMany({ where: { decisionImportId: id } });
+      await createPreviewRows(tx, id, previewRows);
+      await tx.indexingJob.update({
+        where: { id: rosterJob.id },
+        data: { resultJson: withRowCorrections(rosterJob.resultJson, nextCorrections) },
+      });
+      await auditService.log({
+        tx,
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.DECISION_ROSTER_ROW_CORRECTED,
+        entityType: 'decision_import',
+        entityId: id,
+        decisionImportId: id,
+        metadata: {
+          sourcePage: target.sourcePage,
+          sourceTableIndex: target.sourceTableIndex,
+          sourceRowIndex: target.sourceRowIndex,
+          changedFields: Object.keys(input),
+        },
+      });
     });
-    await auditService.log({
-      actorId: user.id,
-      actorRole: user.role,
-      action: auditActions.DECISION_IMPORT_CANCELLED,
-      entityType: 'decision_import',
-      entityId: id,
-      decisionImportId: id,
+    return this.preview(user, id);
+  }
+
+  async revertPreviewRowCorrection(user: AuthenticatedUser, id: string, rowId: string) {
+    const visibleRecord = await this.getRequiredImport(id, user);
+    assertDecisionImportMutable(visibleRecord, 'Cannot revert rows after confirmation or cancellation');
+    await prisma.$transaction(async (tx) => {
+      await lockDecisionImport(tx, id);
+      const record = await tx.decisionImport.findUnique({ where: { id }, include: decisionImportInclude });
+      if (!record) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+      assertSameWorkspace(user, record, 'Decision import not found');
+      assertDecisionImportMutable(record, 'Cannot revert rows after confirmation or cancellation');
+      const target = record.previewRows.find((row) => row.id === rowId);
+      if (!target) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision roster preview row not found');
+      if (!record.rosterJobId) throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster extraction is unavailable');
+      const rosterJob = await tx.indexingJob.findUnique({ where: { id: record.rosterJobId } });
+      if (!rosterJob || rosterJob.status !== JobStatus.completed) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Current roster extraction is not ready for correction');
+      }
+
+      const corrections = readDecisionRosterCorrections(rosterJob.resultJson);
+      const key = decisionRosterCorrectionKey(toNormalizedPreviewRow(target));
+      const { [key]: removed, ...remainingCorrections } = corrections;
+      if (!removed) throw new AppError(409, ErrorCodes.CONFLICT, 'Roster row has no manual correction');
+      const previewRows = rebuildDecisionPreview(record, remainingCorrections);
+      await tx.decisionRosterPreviewRow.deleteMany({ where: { decisionImportId: id } });
+      await createPreviewRows(tx, id, previewRows);
+      await tx.indexingJob.update({
+        where: { id: rosterJob.id },
+        data: { resultJson: withRowCorrections(rosterJob.resultJson, remainingCorrections) },
+      });
+      await auditService.log({
+        tx,
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.DECISION_ROSTER_ROW_CORRECTION_REVERTED,
+        entityType: 'decision_import',
+        entityId: id,
+        decisionImportId: id,
+        metadata: {
+          sourcePage: target.sourcePage,
+          sourceTableIndex: target.sourceTableIndex,
+          sourceRowIndex: target.sourceRowIndex,
+          revertedFields: Object.keys(removed),
+        },
+      });
+    });
+    return this.preview(user, id);
+  }
+
+  async cancel(user: AuthenticatedUser, id: string) {
+    await this.getRequiredImport(id, user);
+    await prisma.$transaction(async (tx) => {
+      await lockDecisionImport(tx, id);
+      const record = await tx.decisionImport.findUnique({ where: { id } });
+      if (!record) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+      assertSameWorkspace(user, record, 'Decision import not found');
+      if (record.status === DecisionImportStatus.confirmed) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Cannot cancel confirmed import');
+      }
+      await tx.decisionImport.update({
+        where: { id },
+        data: { status: DecisionImportStatus.cancelled, processingStep: 'cancelled_by_user' },
+      });
+      await auditService.log({
+        tx,
+        actorId: user.id,
+        actorRole: user.role,
+        action: auditActions.DECISION_IMPORT_CANCELLED,
+        entityType: 'decision_import',
+        entityId: id,
+        decisionImportId: id,
+      });
     });
     return this.getDetail(user, id);
   }
@@ -365,27 +478,35 @@ export class DecisionImportsService {
     if (record.status === DecisionImportStatus.confirmed) {
       throw new AppError(409, ErrorCodes.CONFLICT, 'Decision import is already confirmed');
     }
-    if (!record.previewRows.length) {
-      throw new AppError(400, ErrorCodes.CONFIRM_WITHOUT_PREVIEW, 'Roster preview must exist before confirmation');
-    }
-
-    const document = record.documents[0];
-    const eventName = input.eventName ?? record.eventName ?? record.title;
-    const criterion = input.criterion ?? record.criterion;
-    const organizer = input.organizer ?? record.organizer ?? document?.issuer ?? 'Đơn vị quản lý import';
-    const organizerLevel = input.organizerLevel ?? record.organizerLevel ?? Level.university;
-    if (!criterion) {
-      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'criterion is required to classify the imported decision');
-    }
-
-    const rows = selectRowsForConfirm(record.previewRows, input, user.role);
-    if (!rows.length) {
-      throw new AppError(400, ErrorCodes.ROSTER_EMPTY, 'No valid roster rows selected for confirmation');
-    }
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockDecisionImport(tx, id);
+      const current = await tx.decisionImport.findUnique({ where: { id }, include: decisionImportInclude });
+      if (!current) throw new AppError(404, ErrorCodes.NOT_FOUND, 'Decision import not found');
+      assertSameWorkspace(user, current, 'Decision import not found');
+      if (current.status === DecisionImportStatus.confirmed || current.status === DecisionImportStatus.cancelled) {
+        throw new AppError(409, ErrorCodes.CONFLICT, 'Decision import cannot be confirmed in its current state');
+      }
+      if (!current.previewRows.length) {
+        throw new AppError(400, ErrorCodes.CONFIRM_WITHOUT_PREVIEW, 'Roster preview must exist before confirmation');
+      }
+
+      const document = current.documents[0];
+      const eventName = input.eventName ?? current.eventName ?? current.title;
+      const criterion = input.criterion ?? current.criterion;
+      const organizer = input.organizer ?? current.organizer ?? document?.issuer ?? 'Đơn vị quản lý import';
+      const organizerLevel = input.organizerLevel ?? current.organizerLevel ?? Level.university;
+      if (!criterion) {
+        throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'criterion is required to classify the imported decision');
+      }
+
+      const rows = selectRowsForConfirm(current.previewRows, input, user.role);
+      if (!rows.length) {
+        throw new AppError(400, ErrorCodes.ROSTER_EMPTY, 'No valid roster rows selected for confirmation');
+      }
+
       const existing = await tx.eventRegistry.findFirst({
-        where: { sourceDecisionImportId: id, workspaceId: record.workspaceId },
+        where: { sourceDecisionImportId: id, workspaceId: current.workspaceId },
       });
       const event = existing
         ? await tx.eventRegistry.update({
@@ -395,11 +516,11 @@ export class DecisionImportsService {
               criterion,
               organizer,
               organizerLevel,
-              startDate: input.startDate ? new Date(input.startDate) : record.startDate,
-              endDate: input.endDate ? new Date(input.endDate) : record.endDate,
-              convertedValue: input.convertedValue ?? record.convertedValue,
-              convertedUnit: input.convertedUnit ?? record.convertedUnit,
-              eligibleLevelsJson: input.eligibleLevels ?? record.eligibleLevelsJson ?? undefined,
+              startDate: input.startDate ? new Date(input.startDate) : current.startDate,
+              endDate: input.endDate ? new Date(input.endDate) : current.endDate,
+              convertedValue: input.convertedValue ?? current.convertedValue,
+              convertedUnit: input.convertedUnit ?? current.convertedUnit,
+              eligibleLevelsJson: input.eligibleLevels ?? current.eligibleLevelsJson ?? undefined,
               participantCount: rows.length,
               rosterIndexed: true,
               status: EventStatus.active,
@@ -416,15 +537,15 @@ export class DecisionImportsService {
               criterion,
               organizer,
               organizerLevel,
-              startDate: input.startDate ? new Date(input.startDate) : record.startDate,
-              endDate: input.endDate ? new Date(input.endDate) : record.endDate,
-              convertedValue: input.convertedValue ?? record.convertedValue,
-              convertedUnit: input.convertedUnit ?? record.convertedUnit,
-              eligibleLevelsJson: input.eligibleLevels ?? record.eligibleLevelsJson ?? undefined,
+              startDate: input.startDate ? new Date(input.startDate) : current.startDate,
+              endDate: input.endDate ? new Date(input.endDate) : current.endDate,
+              convertedValue: input.convertedValue ?? current.convertedValue,
+              convertedUnit: input.convertedUnit ?? current.convertedUnit,
+              eligibleLevelsJson: input.eligibleLevels ?? current.eligibleLevelsJson ?? undefined,
               participantCount: rows.length,
               rosterIndexed: true,
               status: EventStatus.active,
-              workspaceId: record.workspaceId,
+              workspaceId: current.workspaceId,
               createdBy: user.id,
               decisionDocumentId: document?.id,
               sourceDecisionImportId: id,
@@ -435,15 +556,15 @@ export class DecisionImportsService {
             },
           });
 
-      if (record.sourceFileId) {
+      if (current.sourceFileId) {
         await tx.eventFile.upsert({
-          where: { eventId_fileId: { eventId: event.id, fileId: record.sourceFileId } },
+          where: { eventId_fileId: { eventId: event.id, fileId: current.sourceFileId } },
           update: { indexingStatus: IndexingStatus.indexed },
           create: {
             eventId: event.id,
-            fileId: record.sourceFileId,
+            fileId: current.sourceFileId,
             indexingStatus: IndexingStatus.indexed,
-            columnMappingJson: record.columnMappingJson ?? undefined,
+            columnMappingJson: current.columnMappingJson ?? undefined,
           },
         });
       }
@@ -456,7 +577,7 @@ export class DecisionImportsService {
         participationStatus: row.participationStatus ?? 'confirmed',
         indexedRow: index + 1,
         convertedValue: row.convertedValue ?? event.convertedValue,
-        sourceFileId: record.sourceFileId,
+        sourceFileId: current.sourceFileId,
         sourceDecisionDocumentId: document?.id,
         sourcePage: row.sourcePage,
         sourceTableIndex: row.sourceTableIndex,
@@ -754,6 +875,66 @@ export async function persistDecisionRosterExtraction(input: {
       columnMappingJson: input.mapping as Prisma.InputJsonValue | undefined,
     },
   });
+}
+
+async function lockDecisionImport(tx: Prisma.TransactionClient, id: string) {
+  await tx.$queryRaw`SELECT "id" FROM "DecisionImport" WHERE "id" = ${id}::uuid FOR UPDATE`;
+}
+
+function assertDecisionImportMutable(
+  record: { status: DecisionImportStatus },
+  message: string,
+) {
+  if (record.status === DecisionImportStatus.confirmed || record.status === DecisionImportStatus.cancelled) {
+    throw new AppError(409, ErrorCodes.CONFLICT, message);
+  }
+}
+
+function toNormalizedPreviewRow(row: DecisionImportRecord['previewRows'][number]): NormalizedRosterPreviewRow {
+  return {
+    studentCode: row.studentCode ?? undefined,
+    studentName: row.studentName ?? undefined,
+    className: row.className ?? undefined,
+    faculty: row.faculty ?? undefined,
+    criterion: row.criterion ?? undefined,
+    convertedValue: row.convertedValue ?? undefined,
+    convertedUnit: row.convertedUnit ?? undefined,
+    participationStatus: row.participationStatus ?? undefined,
+    sourcePage: row.sourcePage ?? undefined,
+    sourceTableIndex: row.sourceTableIndex ?? undefined,
+    sourceRowIndex: row.sourceRowIndex ?? undefined,
+    validationStatus: row.validationStatus,
+    validationWarnings: Array.isArray(row.validationWarningsJson)
+      ? row.validationWarningsJson as unknown as NormalizedRosterPreviewRow['validationWarnings']
+      : [],
+    rawRow: row.rawRowJson && typeof row.rawRowJson === 'object' && !Array.isArray(row.rawRowJson)
+      ? row.rawRowJson as Record<string, unknown>
+      : {},
+  };
+}
+
+function rebuildDecisionPreview(
+  record: Pick<DecisionImportRecord, 'tables' | 'columnMappingJson' | 'criterion' | 'convertedValue' | 'convertedUnit'>,
+  corrections: DecisionRosterCorrections,
+) {
+  const rosterTables = record.tables.filter((table) => table.detectedType === 'roster');
+  const mapping = record.columnMappingJson as DecisionColumnMapping | null;
+  if (!mapping) throw new AppError(409, ErrorCodes.CONFLICT, 'Roster mapping is unavailable');
+  const baseRows = buildPreviewRowsFromTables({
+    tables: rosterTables.map((table) => table.rawTableJson as unknown as NormalizedDecisionTable),
+    mapping,
+    fallbackCriterion: record.criterion,
+    fallbackConvertedValue: record.convertedValue,
+    fallbackConvertedUnit: record.convertedUnit,
+  });
+  return applyDecisionRosterCorrections(baseRows, corrections);
+}
+
+function withRowCorrections(resultJson: Prisma.JsonValue | null, corrections: DecisionRosterCorrections): Prisma.InputJsonValue {
+  const existing = resultJson && typeof resultJson === 'object' && !Array.isArray(resultJson)
+    ? resultJson as Prisma.JsonObject
+    : {};
+  return { ...existing, rowCorrections: corrections } as Prisma.InputJsonValue;
 }
 
 function createPreviewRows(

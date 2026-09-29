@@ -133,7 +133,33 @@ export async function extractStructuredDocument<T>(
         continue;
       }
 
-      if (error instanceof AppError) throw error;
+      const errorRequestId = readRequestId(error) ?? readAppErrorRequestId(error) ?? requestId;
+      const telemetry = {
+        provider: 'openai' as const,
+        useCase: input.useCase,
+        model: input.model,
+        promptVersion: input.promptVersion,
+        requestId: errorRequestId,
+        entityType: input.entity?.type,
+        entityRef,
+        latencyMs: Date.now() - startedAt,
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: null,
+        attempts,
+        retries: attempts - 1,
+        outcome: 'failure' as const,
+        errorCode: code,
+      } satisfies DocumentExtractionTelemetry;
+      if (error instanceof AppError) {
+        const details = asRecord(error.details);
+        throw new AppError(error.statusCode, error.code, error.message, {
+          retryable,
+          requestId: errorRequestId,
+          ...(Array.isArray(details?.issues) ? { issues: details.issues } : {}),
+          telemetry,
+        });
+      }
       const statusCode =
         code === ErrorCodes.OPENAI_TIMEOUT || code === ErrorCodes.OPENAI_REQUEST_ABORTED
           ? 504
@@ -142,24 +168,8 @@ export async function extractStructuredDocument<T>(
             : 502;
       throw new AppError(statusCode, code, 'OpenAI document extraction failed', {
         retryable,
-        requestId: readRequestId(error) ?? requestId,
-        telemetry: {
-          provider: 'openai',
-          useCase: input.useCase,
-          model: input.model,
-          promptVersion: input.promptVersion,
-          requestId: readRequestId(error) ?? requestId,
-          entityType: input.entity?.type,
-          entityRef,
-          latencyMs: Date.now() - startedAt,
-          inputTokens: null,
-          outputTokens: null,
-          totalTokens: null,
-          attempts,
-          retries: attempts - 1,
-          outcome: 'failure',
-          errorCode: code,
-        } satisfies DocumentExtractionTelemetry,
+        requestId: errorRequestId,
+        telemetry,
       });
     }
   }
@@ -225,6 +235,12 @@ function readValidationIssues(error: unknown) {
 function readRequestId(value: unknown): string | undefined {
   const record = asRecord(value);
   return typeof record?._request_id === 'string' ? record._request_id : undefined;
+}
+
+function readAppErrorRequestId(value: unknown): string | undefined {
+  if (!(value instanceof AppError)) return undefined;
+  const details = asRecord(value.details);
+  return typeof details?.requestId === 'string' ? details.requestId : undefined;
 }
 
 function isRetryableProviderCode(code: string) {

@@ -171,6 +171,7 @@ describe('DecisionImport row corrections', () => {
     });
     mocks.findRosterJob.mockResolvedValue({
       id: rosterJobId,
+      status: JobStatus.completed,
       resultJson: { telemetry: { provider: 'openai' }, rowCorrections: { '0:0:1': { studentName: 'Nguyễn An' } } },
     });
 

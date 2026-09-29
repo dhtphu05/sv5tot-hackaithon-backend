@@ -121,4 +121,29 @@ describe('DecisionImport metadata OpenAI processor', () => {
       data: expect.objectContaining({ status: DecisionImportStatus.preview_ready }),
     }));
   });
+
+  it('uses image input for image source files', async () => {
+    mocks.findImport.mockResolvedValue({
+      ...decisionImport(),
+      sourceFile: { ...decisionImport().sourceFile, mimeType: 'image/png', originalName: 'private-roster.png' },
+    });
+
+    await processDecisionMetadataJob(job());
+
+    expect(mocks.extractStructuredDocument).toHaveBeenCalledWith(expect.objectContaining({
+      content: [expect.objectContaining({ type: 'input_image', detail: 'auto' })],
+    }));
+    expect(JSON.stringify(mocks.extractStructuredDocument.mock.calls[0]?.[0])).not.toContain('private-roster.png');
+  });
+
+  it('rejects a source file attached to a different workspace before calling OpenAI', async () => {
+    mocks.findImport.mockResolvedValue({
+      ...decisionImport(),
+      sourceFile: { ...decisionImport().sourceFile, workspaceId: 'other-workspace' },
+    });
+
+    await expect(processDecisionMetadataJob(job())).rejects.toMatchObject({ statusCode: 404 });
+    expect(mocks.extractStructuredDocument).not.toHaveBeenCalled();
+    expect(mocks.upsertDocument).not.toHaveBeenCalled();
+  });
 });

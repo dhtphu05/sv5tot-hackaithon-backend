@@ -127,4 +127,14 @@ describe('DecisionImport roster OpenAI processor', () => {
     expect(mocks.createTable).not.toHaveBeenCalled();
     expect(mocks.createRows).not.toHaveBeenCalled();
   });
+
+  it('does not persist results from a job superseded by a newer roster job', async () => {
+    mocks.findImport
+      .mockResolvedValueOnce(decisionImport())
+      .mockResolvedValueOnce({ ...decisionImport(), rosterJobId: 'newer-job-id' });
+
+    await expect(processDecisionRosterOcrJob(job())).rejects.toMatchObject({ statusCode: 409 });
+    expect(mocks.createTable).not.toHaveBeenCalled();
+    expect(mocks.createRows).not.toHaveBeenCalled();
+  });
 });

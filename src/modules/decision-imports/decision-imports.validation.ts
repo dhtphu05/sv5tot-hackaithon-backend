@@ -59,6 +59,22 @@ export const updateColumnMappingSchema = z.object({
   }),
 });
 
+export const updateDecisionRosterCorrectionSchema = z.object({
+  studentCode: z.string().trim().min(1).max(128).nullable().optional(),
+  studentName: z.string().trim().min(1).max(255).nullable().optional(),
+  className: z.string().trim().min(1).max(128).nullable().optional(),
+  faculty: z.string().trim().min(1).max(255).nullable().optional(),
+  criterion: z.nativeEnum(Criterion).nullable().optional(),
+  convertedValue: z.number().finite().nonnegative().nullable().optional(),
+  convertedUnit: z.string().trim().min(1).max(64).nullable().optional(),
+  participationStatus: z.string().trim().min(1).max(128).nullable().optional(),
+}).strict().refine((input) => Object.keys(input).length > 0, 'At least one roster field is required');
+
+export const revertDecisionRosterCorrectionSchema = z.union([
+  z.undefined(),
+  z.object({}).strict(),
+]);
+
 export const confirmDecisionImportSchema = z.object({
   eventName: optionalTrimmedString(z.string().trim().min(3).max(255)),
   criterion: z.nativeEnum(Criterion).optional(),
@@ -79,4 +95,5 @@ export type ListDecisionImportsQuery = z.infer<typeof listDecisionImportsQuerySc
 export type CreateDecisionImportInput = z.infer<typeof createDecisionImportSchema>;
 export type StartDecisionImportInput = z.infer<typeof startDecisionImportSchema>;
 export type UpdateColumnMappingInput = z.infer<typeof updateColumnMappingSchema>;
+export type UpdateDecisionRosterCorrectionInput = z.infer<typeof updateDecisionRosterCorrectionSchema>;
 export type ConfirmDecisionImportInput = z.infer<typeof confirmDecisionImportSchema>;

@@ -350,8 +350,13 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
     }
 
     if (processingJob.jobType === JobType.decision_metadata || processingJob.jobType === JobType.decision_roster_ocr) {
-      await prisma.decisionImport.update({
-        where: { id: processingJob.targetId },
+      await prisma.decisionImport.updateMany({
+        where: {
+          id: processingJob.targetId,
+          ...(processingJob.jobType === JobType.decision_metadata
+            ? { metadataJobId: processingJob.id }
+            : { rosterJobId: processingJob.id }),
+        },
         data: {
           lastErrorCode: null,
           lastErrorMessage: null,
@@ -367,12 +372,15 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
     const retryable = error instanceof AppError
       ? Boolean((error.details as { retryable?: boolean } | undefined)?.retryable)
       : true;
+    const failureTelemetry = error instanceof AppError && error.details && typeof error.details === 'object'
+      ? (error.details as { telemetry?: Prisma.InputJsonValue }).telemetry
+      : undefined;
     const failed = await prisma.indexingJob.update({
       where: { id: processingJob.id },
       data: {
         status: JobStatus.failed,
         errorMessage: message,
-        resultJson: { code, retryable, message },
+        resultJson: { code, retryable, message, ...(failureTelemetry ? { telemetry: failureTelemetry } : {}) },
       },
     });
 
@@ -407,33 +415,44 @@ async function processClaimedIndexingJob(processingJob: IndexingJob) {
     }
 
     if (processingJob.jobType === JobType.decision_metadata || processingJob.jobType === JobType.decision_roster_ocr) {
+      const pointer = processingJob.jobType === JobType.decision_metadata
+        ? { metadataJobId: processingJob.id }
+        : { rosterJobId: processingJob.id };
       const decisionFailureData =
         processingJob.jobType === JobType.decision_metadata
           ? {
               status: DecisionImportStatus.ocr_processing,
               lastErrorCode: code,
               lastErrorMessage: message,
-              lastUserMessage:
-                'Không trích xuất được metadata văn bản hành chính từ VNPT; vẫn tiếp tục OCR danh sách.',
+              lastUserMessage: 'Không trích xuất được thông tin văn bản; vẫn tiếp tục xử lý danh sách.',
               processingStep: 'metadata_failed_roster_pending',
             }
           : {
               status: DecisionImportStatus.failed,
               lastErrorCode: code,
               lastErrorMessage: message,
-              lastUserMessage: message,
+              lastUserMessage: 'Không thể trích xuất danh sách. Vui lòng thử lại hoặc kiểm tra tệp.',
               processingStep: 'failed',
             };
-      await prisma.decisionImport.update({
-        where: { id: processingJob.targetId },
+      const currentImport = await prisma.decisionImport.updateMany({
+        where: { id: processingJob.targetId, ...pointer },
         data: decisionFailureData,
       }).catch(() => undefined);
-      await createApplicationAudit(prisma, {
-        action: auditActions.SMARTREADER_OCR_FAILED,
-        targetType: 'decision_import',
-        targetId: processingJob.targetId,
-        afterStateJson: { code, retryable, error: message, jobId: processingJob.id },
-      });
+      if (currentImport?.count) {
+        await createApplicationAudit(prisma, {
+          action: auditActions.DECISION_OPENAI_EXTRACTION_FAILED,
+          targetType: 'decision_import',
+          targetId: processingJob.targetId,
+          afterStateJson: {
+            provider: 'openai',
+            useCase: processingJob.jobType === JobType.decision_metadata ? 'decision_metadata' : 'decision_roster',
+            code,
+            retryable,
+            jobId: processingJob.id,
+            ...(failureTelemetry ? { telemetry: failureTelemetry } : {}),
+          },
+        });
+      }
     }
 
     return failed;
