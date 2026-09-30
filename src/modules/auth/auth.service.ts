@@ -1,3 +1,4 @@
+import { Role, WorkspaceType } from '@prisma/client';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { sha256 } from '../../shared/utils/hash';
@@ -25,6 +26,14 @@ export class AuthService {
       throw new AppError(403, ErrorCodes.WORKSPACE_INACTIVE, 'Workspace is inactive');
     }
 
+    if (workspace.type !== WorkspaceType.SCHOOL) {
+      throw new AppError(
+        403,
+        ErrorCodes.WORKSPACE_REGISTRATION_CLOSED,
+        'Student registration is only available for School workspaces',
+      );
+    }
+
     if (!workspace.registrationEnabled) {
       throw new AppError(
         403,
@@ -49,17 +58,24 @@ export class AuthService {
     }
 
     const passwordHash = await this.passwordService.hashPassword(input.password);
-    const user = await this.authRepository.createStudentUser({
-      workspaceId: input.workspaceId,
-      fullName: input.fullName,
-      email: input.email,
-      passwordHash,
-      studentCode: input.studentCode,
-      className: input.className,
-      faculty: input.faculty,
-      phone: input.phone,
-      lastLoginAt: new Date(),
-    });
+    let user;
+    try {
+      user = await this.authRepository.createStudentUser({
+        workspaceId: input.workspaceId,
+        fullName: input.fullName,
+        email: input.email,
+        passwordHash,
+        studentCode: input.studentCode,
+        className: input.className,
+        faculty: input.faculty,
+        phone: input.phone,
+        lastLoginAt: new Date(),
+      });
+    } catch (error) {
+      const conflict = registrationUniqueConstraintError(error);
+      if (conflict) throw conflict;
+      throw error;
+    }
 
     const accessToken = this.tokenService.createAccessToken(user.id);
     const refreshToken = this.tokenService.createRefreshToken(user.id);
@@ -100,8 +116,15 @@ export class AuthService {
       throw new AppError(403, ErrorCodes.USER_INACTIVE, 'User account is inactive');
     }
 
+    this.assertWorkspaceAvailable(user);
+
     await this.authRepository.updateLastLogin(user.id);
     const freshUser = await this.authRepository.findUserById(user.id);
+    const currentUser = freshUser ?? user;
+    if (!currentUser.isActive) {
+      throw new AppError(403, ErrorCodes.USER_INACTIVE, 'User account is inactive');
+    }
+    this.assertWorkspaceAvailable(currentUser);
     const accessToken = this.tokenService.createAccessToken(user.id);
     const refreshToken = this.tokenService.createRefreshToken(user.id);
 
@@ -139,15 +162,25 @@ export class AuthService {
       throw new AppError(401, ErrorCodes.TOKEN_EXPIRED, 'Refresh token has expired');
     }
 
-    await this.authRepository.revokeRefreshToken(tokenRecord.id);
-    const accessToken = this.tokenService.createAccessToken(payload.sub);
     const refreshToken = this.tokenService.createRefreshToken(payload.sub);
+    const user = await this.authRepository.findUserById(payload.sub);
+    if (!user) {
+      throw new AppError(401, ErrorCodes.TOKEN_INVALID, 'Refresh token is invalid');
+    }
+    if (!user.isActive) {
+      throw new AppError(403, ErrorCodes.USER_INACTIVE, 'User account is inactive');
+    }
+    this.assertWorkspaceAvailable(user);
 
-    await this.authRepository.createRefreshToken({
+    const rotated = await this.authRepository.rotateRefreshToken(tokenRecord.id, {
       userId: payload.sub,
       tokenHash: sha256(refreshToken.token),
       expiresAt: refreshToken.expiresAt,
     });
+    if (!rotated) {
+      throw new AppError(401, ErrorCodes.REFRESH_TOKEN_REVOKED, 'Refresh token is revoked');
+    }
+    const accessToken = this.tokenService.createAccessToken(payload.sub);
 
     return {
       accessToken,
@@ -185,4 +218,41 @@ export class AuthService {
       accessTokenExpiresAt: expiresAt.toISOString(),
     };
   }
+
+  private assertWorkspaceAvailable(user: {
+    role: Role;
+    workspaceId: string | null;
+    workspace?: { isActive: boolean } | null;
+  }) {
+    if (user.role === Role.admin) return;
+    if (!user.workspaceId || !user.workspace) {
+      throw new AppError(
+        403,
+        ErrorCodes.USER_WORKSPACE_REQUIRED,
+        'User account is missing workspace configuration',
+      );
+    }
+    if (!user.workspace.isActive) {
+      throw new AppError(403, ErrorCodes.WORKSPACE_INACTIVE, 'Workspace is inactive');
+    }
+  }
+}
+
+function registrationUniqueConstraintError(error: unknown): AppError | null {
+  if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'P2002') {
+    return null;
+  }
+  const meta =
+    'meta' in error && error.meta && typeof error.meta === 'object' ? error.meta : null;
+  const rawTarget = meta && 'target' in meta ? meta.target : null;
+  const target = Array.isArray(rawTarget)
+    ? rawTarget.join('_').toLowerCase()
+    : String(rawTarget ?? '').toLowerCase();
+  if (target.includes('email')) {
+    return new AppError(409, ErrorCodes.CONFLICT, 'Email is already registered');
+  }
+  if (target.includes('studentcode') || target.includes('workspaceid')) {
+    return new AppError(409, ErrorCodes.CONFLICT, 'Student code is already registered');
+  }
+  return null;
 }

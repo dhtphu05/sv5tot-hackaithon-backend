@@ -2,9 +2,10 @@ import { Role, type User, type Workspace } from '@prisma/client';
 import { WorkspaceType } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 import { AuthService } from '../../src/modules/auth/auth.service';
-import { registerSchema } from '../../src/modules/auth/auth.validation';
+import { loginSchema, registerSchema } from '../../src/modules/auth/auth.validation';
 import { UsersService } from '../../src/modules/users/users.service';
 import { WorkspacesService } from '../../src/modules/workspaces/workspaces.service';
+import { sha256 } from '../../src/shared/utils/hash';
 
 const baseWorkspace: Workspace = {
   id: '11111111-1111-4111-8111-111111111111',
@@ -122,6 +123,7 @@ describe('AuthService.register', () => {
     expect(repository.createRefreshToken).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: baseUser.id,
+        tokenHash: sha256('refresh-token'),
         userAgent: 'vitest',
         ipAddress: '127.0.0.1',
       }),
@@ -143,11 +145,23 @@ describe('AuthService.register', () => {
       },
     });
     expect(result.user).not.toHaveProperty('passwordHash');
+    expect(result.user).not.toHaveProperty('refreshTokens');
+    expect(result.user).not.toHaveProperty('tokenHash');
   });
 
   it('rejects missing workspaceId through validation expectations', () => {
     const { workspaceId: _workspaceId, ...input } = registerInput;
     expect(() => registerSchema.parse(input)).toThrow();
+  });
+
+  it('strips client-supplied role and active status from public registration input', () => {
+    const parsed = registerSchema.parse({ ...registerInput, role: Role.admin, isActive: false });
+    expect(parsed).not.toHaveProperty('role');
+    expect(parsed).not.toHaveProperty('isActive');
+  });
+
+  it('enforces the same password maximum on login input', () => {
+    expect(() => loginSchema.parse({ email: 'student@example.test', password: 'x'.repeat(129) })).toThrow();
   });
 
   it('rejects a workspace that does not exist', async () => {
@@ -186,6 +200,22 @@ describe('AuthService.register', () => {
     });
   });
 
+  it.each([WorkspaceType.CITY, WorkspaceType.UNIVERSITY_SYSTEM])(
+    'rejects public student registration for %s workspaces',
+    async (type) => {
+      const { service, repository } = buildService({
+        findWorkspaceById: vi.fn().mockResolvedValue({ ...baseWorkspace, type }),
+      });
+
+      await expect(service.register(registerInput, {})).rejects.toMatchObject({
+        statusCode: 403,
+        code: 'WORKSPACE_REGISTRATION_CLOSED',
+      });
+      expect(repository.createStudentUser).not.toHaveBeenCalled();
+      expect(repository.createRefreshToken).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects an already registered email across workspaces', async () => {
     const { service } = buildService({
       findUserByEmail: vi.fn().mockResolvedValue({ ...baseUser, workspace: secondWorkspace }),
@@ -196,6 +226,7 @@ describe('AuthService.register', () => {
     ).rejects.toMatchObject({
       statusCode: 409,
       code: 'CONFLICT',
+      message: 'Email is already registered',
     });
   });
 
@@ -207,7 +238,24 @@ describe('AuthService.register', () => {
     await expect(service.register(registerInput, {})).rejects.toMatchObject({
       statusCode: 409,
       code: 'CONFLICT',
+      message: 'Student code is already registered',
     });
+  });
+
+  it('maps a unique-constraint race to the matching public registration conflict', async () => {
+    const { service, repository } = buildService({
+      createStudentUser: vi.fn().mockRejectedValue({
+        code: 'P2002',
+        meta: { target: ['workspaceId', 'studentCode'] },
+      }),
+    });
+
+    await expect(service.register(registerInput, {})).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CONFLICT',
+      message: 'Student code is already registered',
+    });
+    expect(repository.createRefreshToken).not.toHaveBeenCalled();
   });
 
   it('allows the same student code in a different workspace', async () => {
@@ -231,6 +279,43 @@ describe('AuthService.register', () => {
 });
 
 describe('AuthService.login', () => {
+  it('uses the same invalid-credentials response for a wrong password', async () => {
+    const { repository } = buildService({
+      findUserByEmail: vi.fn().mockResolvedValue(baseUser),
+    });
+    const passwordService = { verifyPassword: vi.fn().mockResolvedValue(false) };
+    const isolatedService = new AuthService(repository as never, passwordService as never, {} as never);
+
+    await expect(
+      isolatedService.login({ email: baseUser.email, password: validPassphrase }, {}),
+    ).rejects.toMatchObject({ statusCode: 401, code: 'INVALID_CREDENTIALS' });
+    expect(repository.updateLastLogin).not.toHaveBeenCalled();
+  });
+
+  it('rejects inactive users without creating a session', async () => {
+    const { service, repository } = buildService({
+      findUserByEmail: vi.fn().mockResolvedValue({ ...baseUser, isActive: false }),
+    });
+
+    await expect(
+      service.login({ email: baseUser.email, password: validPassphrase }, {}),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'USER_INACTIVE' });
+    expect(repository.updateLastLogin).not.toHaveBeenCalled();
+    expect(repository.createRefreshToken).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the account after updating last login before issuing tokens', async () => {
+    const { service, repository } = buildService({
+      findUserByEmail: vi.fn().mockResolvedValue(baseUser),
+      findUserById: vi.fn().mockResolvedValue({ ...baseUser, isActive: false }),
+    });
+
+    await expect(
+      service.login({ email: baseUser.email, password: validPassphrase }, {}),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'USER_INACTIVE' });
+    expect(repository.createRefreshToken).not.toHaveBeenCalled();
+  });
+
   it('returns SafeUser with workspace summary', async () => {
     const { service } = buildService({
       findUserByEmail: vi.fn().mockResolvedValue(baseUser),
@@ -252,6 +337,33 @@ describe('AuthService.login', () => {
       },
     });
   });
+
+  it('rejects login for active users whose workspace is inactive', async () => {
+    const { service, repository } = buildService({
+      findUserByEmail: vi.fn().mockResolvedValue({
+        ...baseUser,
+        workspace: { ...baseWorkspace, isActive: false },
+      }),
+    });
+
+    await expect(
+      service.login({ email: baseUser.email, password: validPassphrase }, {}),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'WORKSPACE_INACTIVE' });
+    expect(repository.updateLastLogin).not.toHaveBeenCalled();
+    expect(repository.createRefreshToken).not.toHaveBeenCalled();
+  });
+
+  it('allows existing students to login when only registration is closed', async () => {
+    const closedWorkspace = { ...baseWorkspace, registrationEnabled: false };
+    const { service } = buildService({
+      findUserByEmail: vi.fn().mockResolvedValue({ ...baseUser, workspace: closedWorkspace }),
+      findUserById: vi.fn().mockResolvedValue({ ...baseUser, workspace: closedWorkspace }),
+    });
+
+    await expect(
+      service.login({ email: baseUser.email, password: validPassphrase }, {}),
+    ).resolves.toMatchObject({ user: { role: Role.student } });
+  });
 });
 
 describe('UsersService.getMe', () => {
@@ -271,6 +383,8 @@ describe('UsersService.getMe', () => {
         code: baseWorkspace.code,
       },
     });
+    expect(result).not.toHaveProperty('passwordHash');
+    expect(result).not.toHaveProperty('refreshTokens');
   });
 });
 
@@ -286,6 +400,7 @@ describe('WorkspacesService.list', () => {
     expect(repository.list).toHaveBeenCalledWith({
       isActive: true,
       registrationEnabled: true,
+      type: WorkspaceType.SCHOOL,
     });
     expect(result).toEqual([
       {

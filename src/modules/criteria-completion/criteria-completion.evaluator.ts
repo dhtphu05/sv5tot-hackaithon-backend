@@ -223,7 +223,14 @@ function evaluateRequirement(
   input: CompletionEvaluationInput,
 ): RequirementDto {
   const explicit = input.responses
-    .filter((response) => response.requirementKey === requirement.key)
+    .filter(
+      (response) =>
+        response.requirementKey === requirement.key ||
+        (input.criterion === Criterion.academic &&
+          response.requirementKey === 'academic_gpa' &&
+          requirement.type === 'metric' &&
+          requirement.config?.metricType === MetricType.gpa),
+    )
     .map((response) => toExplicitResponseDto(response, requirement));
   const legacy = buildLegacyResponses(requirement, input);
   const currentResponses = [...explicit, ...legacy];

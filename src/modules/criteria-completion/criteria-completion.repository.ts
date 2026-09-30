@@ -33,6 +33,22 @@ export class CriteriaCompletionRepository {
     });
   }
 
+  findApplicationForGpaDeclaration(applicationId: string) {
+    return this.db.application.findUnique({
+      where: { id: applicationId },
+      select: {
+        id: true,
+        studentId: true,
+        workspaceId: true,
+        schoolYear: true,
+        targetLevel: true,
+        applicationType: true,
+        status: true,
+        cancelledAt: true,
+      },
+    });
+  }
+
   findResponseById(responseId: string) {
     return this.db.applicationRequirementResponse.findUnique({
       where: { id: responseId },
