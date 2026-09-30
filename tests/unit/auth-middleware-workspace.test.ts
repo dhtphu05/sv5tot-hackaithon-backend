@@ -128,4 +128,27 @@ describe('requireAuth workspace enforcement', () => {
       },
     });
   });
+
+  it('rejects authenticated requests when a non-admin workspace is inactive', async () => {
+    mocks.findUnique.mockResolvedValue({
+      id: 'student-1',
+      workspaceId: workspace.id,
+      email: 'student@dut.udn.vn',
+      role: Role.student,
+      fullName: 'Student',
+      studentCode: 'SV001',
+      className: null,
+      faculty: null,
+      avatarUrl: null,
+      isActive: true,
+      workspace: { ...workspace, isActive: false },
+    });
+    const next = vi.fn() as NextFunction;
+
+    await requireAuth(buildReq(), {} as Response, next);
+
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ statusCode: 403, code: 'WORKSPACE_INACTIVE' }),
+    );
+  });
 });

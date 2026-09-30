@@ -11,6 +11,8 @@ export class AuthRepository {
         code: true,
         name: true,
         shortName: true,
+        type: true,
+        isActive: true,
       },
     },
   } as const;
@@ -96,6 +98,21 @@ export class AuthRepository {
     return this.db.refreshToken.update({
       where: { id },
       data: { revokedAt: new Date() },
+    });
+  }
+
+  async rotateRefreshToken(
+    id: string,
+    input: { userId: string; tokenHash: string; expiresAt: Date },
+  ): Promise<boolean> {
+    return this.db.$transaction(async (tx) => {
+      const revoked = await tx.refreshToken.updateMany({
+        where: { id, revokedAt: null, expiresAt: { gt: new Date() } },
+        data: { revokedAt: new Date() },
+      });
+      if (revoked.count !== 1) return false;
+      await tx.refreshToken.create({ data: input });
+      return true;
     });
   }
 

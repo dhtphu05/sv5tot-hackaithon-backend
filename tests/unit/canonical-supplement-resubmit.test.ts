@@ -19,7 +19,7 @@ const student = {
   workspaceId: 'school-a',
 } as unknown as AuthenticatedUser;
 
-function activeTask() {
+function activeTask(targetLevel: Level = Level.city) {
   return {
     id: 'task-volunteer',
     applicationId: 'application-a',
@@ -47,7 +47,7 @@ function activeTask() {
       studentId: 'student-a',
       schoolYear: '2025-2026',
       applicationType: ApplicationType.individual,
-      targetLevel: Level.city,
+      targetLevel,
       status: ApplicationStatus.supplement_required,
       submittedAt: new Date('2026-09-01T00:00:00.000Z'),
       cancelledAt: null,
@@ -73,8 +73,9 @@ function activeTask() {
 function buildDb(
   remainingSupplementTasks: number,
   supplementDeadlineAt = new Date('2099-03-01T00:00:00.000Z'),
+  targetLevel: Level = Level.city,
 ) {
-  const task = activeTask();
+  const task = activeTask(targetLevel);
   const tx = {
     $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
       const sql = parts.join('');
@@ -219,5 +220,19 @@ describe('canonical supplement resubmit', () => {
     });
     expect(tx.reviewTask.updateMany).not.toHaveBeenCalled();
     expect(tx.application.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects supplement resubmission for a legacy school-level individual application', async () => {
+    const { db, tx } = buildDb(0, undefined, Level.school);
+    const notifications = { create: vi.fn().mockResolvedValue({ id: 'notification-a' }) };
+    const service = new SupplementResubmitService(db as never, notifications as never);
+
+    await expect(service.resubmit(student, 'task-volunteer')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'APPLICATION_NOT_SUBMITTABLE',
+    });
+    expect(tx.reviewTask.updateMany).not.toHaveBeenCalled();
+    expect(tx.application.update).not.toHaveBeenCalled();
+    expect(notifications.create).not.toHaveBeenCalled();
   });
 });

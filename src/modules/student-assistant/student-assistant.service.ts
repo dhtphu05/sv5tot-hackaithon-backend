@@ -23,6 +23,10 @@ import type { AuthenticatedUser } from '../../shared/types/auth';
 import { sha256 } from '../../shared/utils/hash';
 import { normalizeSchoolYear } from '../../shared/utils/school-year';
 import { createApplicationAudit } from '../applications/application.helpers';
+import {
+  assertStudentApplicationIsCity,
+  STUDENT_CITY_ONLY_SUBMISSION_MESSAGE,
+} from '../applications/application-submission.policy';
 import { StudentAssistantService as DashboardAssistantService } from '../applications/student-assistant/student-assistant.service';
 import { buildOpenAiSafetyIdentifier } from '../ai/openai-client';
 import { CriteriaService, criteriaStatusLabel, scopeLabel } from '../criteria/criteria.service';
@@ -264,6 +268,7 @@ export class StudentCommunicationAssistantService {
   async resubmitSupplement(user: AuthenticatedUser, reviewTaskId: string) {
     assertStudentOnly(user);
     const task = await this.getOwnedSupplementTask(user, reviewTaskId);
+    assertStudentApplicationIsCity(user, task.application!);
     const request = activeSupplementRequest(task);
     if (!request) {
       throw new AppError(
@@ -914,6 +919,15 @@ export class StudentCommunicationAssistantService {
     const request = activeSupplementRequest(task);
     if (!request) throwNotFound();
     const readiness = evaluateSupplementReadiness(task);
+    const isBlockedNonCityApplication = Boolean(
+      user.role === Role.student &&
+        task.application &&
+        task.application.targetLevel !== Level.city,
+    );
+    const resubmitDisabledReason = isBlockedNonCityApplication
+      ? STUDENT_CITY_ONLY_SUBMISSION_MESSAGE
+      : readiness.reason;
+    const canResubmit = readiness.canResubmit && !isBlockedNonCityApplication;
     const actions: StudentAssistantAction[] = [
       {
         id: `add-evidence:${task.criterion}`,
@@ -933,8 +947,8 @@ export class StudentCommunicationAssistantService {
           route: '/app/application',
           query: { criterion: task.criterion, mode: 'supplement', reviewTaskId: task.id },
         },
-        allowed: readiness.canResubmit,
-        disabledReason: readiness.reason ?? undefined,
+        allowed: canResubmit,
+        disabledReason: resubmitDisabledReason ?? undefined,
       },
       {
         id: `contact-officer:${task.id}`,
@@ -951,7 +965,10 @@ export class StudentCommunicationAssistantService {
       contextType: 'supplement',
       contextId: task.id,
       title: `Trợ lý bổ sung hồ sơ: ${criterionLabel(task.criterion)}`,
-      deterministicSummary: supplementSummary(request, readiness),
+      deterministicSummary: supplementSummary(request, {
+        canResubmit,
+        reason: resubmitDisabledReason,
+      }),
       facts: [
         fact(
           'supplement-message',
@@ -971,17 +988,17 @@ export class StudentCommunicationAssistantService {
           'supplement-progress',
           'supplement_progress',
           'Tiến độ',
-          readiness.canResubmit ? 'Có thể gửi lại' : (readiness.reason ?? 'Chưa sẵn sàng gửi lại'),
+          canResubmit ? 'Có thể gửi lại' : (resubmitDisabledReason ?? 'Chưa sẵn sàng gửi lại'),
           true,
         ),
       ],
-      warnings: readiness.canResubmit
+      warnings: canResubmit
         ? []
         : [
             {
               code: 'SUPPLEMENT_NOT_READY_TO_RESUBMIT',
               severity: 'blocking',
-              message: readiness.reason ?? 'Yêu cầu bổ sung chưa sẵn sàng gửi lại.',
+              message: resubmitDisabledReason ?? 'Yêu cầu bổ sung chưa sẵn sàng gửi lại.',
               sourceId: 'supplement-progress',
             },
           ],

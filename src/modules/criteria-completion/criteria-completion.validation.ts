@@ -100,28 +100,12 @@ export const confirmNoFGradeSchema = z.object({
 
 export const addEthicsAchievementSchema = z.object({
   evidenceId: uuidSchema,
-  achievementType: z.enum([
-    'political_theory_competition',
-    'exemplary_youth',
-    'good_person_good_deed',
-    'recognized_courageous_action',
-    'other_ethics_achievement',
-  ]),
+  achievementType: z.string().min(1).max(200),
 });
 
 export const addAcademicAchievementSchema = z.object({
   evidenceId: uuidSchema,
-  achievementType: z.enum([
-    'student_research',
-    'academic_competition',
-    'journal_article',
-    'conference_paper',
-    'thesis_or_capstone',
-    'innovation_product',
-    'academic_team',
-    'academic_award',
-    'other_academic_achievement',
-  ]),
+  achievementType: z.string().min(1).max(200),
 });
 
 export const declarePhysicalCourseResultSchema = z
@@ -152,12 +136,7 @@ export const declarePhysicalCourseResultSchema = z
   });
 
 export const addPhysicalPathEvidenceSchema = z.object({
-  requirementKey: z.enum([
-    'healthy_student_title',
-    'sports_activity_or_award',
-    'sports_team_member',
-    'regular_sports_training',
-  ]),
+  requirementKey: z.string().min(1).max(200),
   evidenceId: uuidSchema,
   sourceType: z.enum(['manual_evidence', 'official_event']).default('manual_evidence'),
   payloadJson: z.record(z.unknown()).optional(),
@@ -193,20 +172,14 @@ export const addVolunteerActivitySchema = z
   });
 
 export const addVolunteerPathEvidenceSchema = z.object({
-  requirementKey: z.enum(['recognized_campaign', 'volunteer_award']),
+  requirementKey: z.string().min(1).max(200),
   evidenceId: uuidSchema,
   sourceType: z.enum(['manual_evidence', 'official_event']).default('manual_evidence'),
   payloadJson: z.record(z.unknown()).optional(),
 });
 
 export const addIntegrationPathResponseSchema = z.object({
-  requirementKey: z.enum([
-    'foreign_language',
-    'skills_or_union_training',
-    'international_exchange',
-    'foreign_language_or_integration_competition',
-    'student_union_achievement',
-  ]),
+  requirementKey: z.string().min(1).max(200),
   evidenceId: uuidSchema.optional(),
   sourceType: z.enum(['manual_evidence', 'official_event']).default('manual_evidence'),
   payloadJson: z.record(z.unknown()).default({}),

@@ -536,7 +536,7 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
   });
 
-  it('rejects if the target level changed from School to City while submit was preparing', async () => {
+  it('rejects if a City collective target level changed while submit was preparing', async () => {
     const { service: eligibility, repository } = eligibilityService({
       parentWorkspaceId: 'udn',
       recipients: [],
@@ -544,19 +544,48 @@ describe('ApplicationsService City submission eligibility gate', () => {
     mocks.prisma.application.findUnique
       .mockResolvedValueOnce(
         application({
-          targetLevel: Level.school,
+          applicationType: ApplicationType.collective,
+          targetLevel: Level.city,
           status: ApplicationStatus.draft,
           updatedAt: new Date('2026-09-01T00:00:00.000Z'),
         }),
       )
       .mockResolvedValueOnce(
         application({
-          targetLevel: Level.city,
+          applicationType: ApplicationType.collective,
+          targetLevel: Level.school,
           status: ApplicationStatus.ready_to_submit,
-          currentDraftVersion: 2,
+          currentDraftVersion: 1,
           updatedAt: new Date('2026-09-02T00:00:00.000Z'),
         }),
       );
+    mocks.precheck.prepareForSubmission.mockResolvedValue({
+      application: application({ targetLevel: Level.city }),
+      level: Level.city,
+      criteria: {
+        criteriaVersionId: null,
+        versionName: 'fallback-city',
+        schoolYear: '2025-2026',
+        unitScope: 'default',
+        level: Level.city,
+        isFallback: true,
+        warnings: [],
+        rules: [],
+      },
+      completion: [],
+      result: {
+        applicationId: 'application-a',
+        level: Level.city,
+        readinessScore: 100,
+        readyToSubmit: true,
+        criteriaResults: [],
+        missingItems: [],
+        warnings: [],
+        nextBestAction: '',
+        nextAction: null,
+        humanConfirmationRequired: true,
+      },
+    });
     mocks.prisma.precheckResult.findFirst.mockResolvedValue({
       createdAt: new Date('2026-09-01T00:00:00.000Z'),
       resultJson: null,
@@ -572,10 +601,11 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(mocks.notifications.create).not.toHaveBeenCalled();
   });
 
-  it('uses the application version updated by its own stale precheck refresh outside City submission', async () => {
+  it('uses the application version updated by its own stale precheck refresh for a City collective', async () => {
     const { service: eligibility } = eligibilityService({ parentWorkspaceId: null, recipients: [] });
     const beforePrecheck = application({
-      targetLevel: Level.school,
+      applicationType: ApplicationType.collective,
+      targetLevel: Level.city,
       status: ApplicationStatus.draft,
       updatedAt: new Date('2026-09-01T00:00:00.000Z'),
       reviewTasks: [
@@ -583,7 +613,8 @@ describe('ApplicationsService City submission eligibility gate', () => {
       ],
     });
     const afterPrecheck = application({
-      targetLevel: Level.school,
+      applicationType: ApplicationType.collective,
+      targetLevel: Level.city,
       status: ApplicationStatus.ready_to_submit,
       updatedAt: new Date('2026-09-03T00:00:00.000Z'),
       reviewTasks: [
@@ -977,11 +1008,29 @@ describe('ApplicationsService City submission eligibility gate', () => {
     });
   });
 
+  it('rejects Student submission of a legacy school-level individual application', async () => {
+    const { service: eligibility, repository } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [],
+    });
+    mocks.prisma.application.findUnique.mockResolvedValue(
+      application({ targetLevel: Level.school }),
+    );
+
+    await expect(
+      buildService(eligibility).submit(student, 'application-a', {
+        allowSubmitWithWarnings: true,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'APPLICATION_NOT_SUBMITTABLE' });
+
+    expect(repository.findApplication).not.toHaveBeenCalled();
+    expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
+  });
+
   it.each([
-    ['school-level individual submission', student, { targetLevel: Level.school }],
     ['collective City submission', student, { applicationType: ApplicationType.collective }],
-    ['admin utility submission', { ...student, role: Role.admin }, {}],
-  ] as const)('does not gate %s', async (_caseName, actor, applicationChanges) => {
+    ['admin utility submission', { ...student, role: Role.admin }, { targetLevel: Level.school }],
+  ] as const)('preserves %s compatibility', async (_caseName, actor, applicationChanges) => {
     const { service: eligibility, repository } = eligibilityService({
       parentWorkspaceId: 'udn',
       recipients: [],
@@ -996,5 +1045,22 @@ describe('ApplicationsService City submission eligibility gate', () => {
 
     expect(repository.findApplication).not.toHaveBeenCalled();
     expect(mocks.prisma.$transaction).toHaveBeenCalledOnce();
+  });
+
+  it('rejects Student submission of a legacy school-level collective application', async () => {
+    const { service: eligibility } = eligibilityService({
+      parentWorkspaceId: 'udn',
+      recipients: [],
+    });
+    mocks.prisma.application.findUnique.mockResolvedValue(
+      application({ applicationType: ApplicationType.collective, targetLevel: Level.school }),
+    );
+
+    await expect(
+      buildService(eligibility).submit(student, 'application-a', {
+        allowSubmitWithWarnings: true,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'APPLICATION_NOT_SUBMITTABLE' });
+    expect(mocks.prisma.$transaction).not.toHaveBeenCalled();
   });
 });
