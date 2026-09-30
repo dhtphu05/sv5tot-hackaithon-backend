@@ -111,7 +111,7 @@ function buildDb(remainingSupplementTasks: number, updateCount = 1) {
   const db = {
     reviewTask: { findUnique: vi.fn().mockResolvedValue(task) },
     application: { findFirst: vi.fn() },
-    $transaction: vi.fn(async (callback: (tx: typeof tx) => unknown) => callback(tx)),
+    $transaction: vi.fn(async (callback: (transaction: unknown) => unknown) => callback(tx)),
   };
   return { db, tx, task };
 }
