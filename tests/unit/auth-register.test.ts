@@ -172,6 +172,21 @@ describe('AuthService.register', () => {
     });
   });
 
+  it.each([WorkspaceType.CITY, WorkspaceType.UNIVERSITY_SYSTEM])(
+    'rejects a registration-enabled %s workspace',
+    async (type) => {
+      const { service, repository } = buildService({
+        findWorkspaceById: vi.fn().mockResolvedValue({ ...baseWorkspace, type }),
+      });
+
+      await expect(service.register(registerInput, {})).rejects.toMatchObject({
+        statusCode: 403,
+        code: 'WORKSPACE_TYPE_INVALID',
+      });
+      expect(repository.createStudentUser).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects a workspace closed for registration', async () => {
     const { service } = buildService({
       findWorkspaceById: vi.fn().mockResolvedValue({
@@ -284,6 +299,7 @@ describe('WorkspacesService.list', () => {
     const result = await service.list({ registration: true });
 
     expect(repository.list).toHaveBeenCalledWith({
+      type: WorkspaceType.SCHOOL,
       isActive: true,
       registrationEnabled: true,
     });

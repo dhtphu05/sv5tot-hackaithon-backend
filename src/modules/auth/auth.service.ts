@@ -1,3 +1,4 @@
+import { WorkspaceType } from '@prisma/client';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { sha256 } from '../../shared/utils/hash';
@@ -19,6 +20,14 @@ export class AuthService {
 
     if (!workspace) {
       throw new AppError(404, ErrorCodes.WORKSPACE_NOT_FOUND, 'Workspace not found');
+    }
+
+    if (workspace.type !== WorkspaceType.SCHOOL) {
+      throw new AppError(
+        403,
+        ErrorCodes.WORKSPACE_TYPE_INVALID,
+        'Student registration is only available for school workspaces',
+      );
     }
 
     if (!workspace.isActive) {

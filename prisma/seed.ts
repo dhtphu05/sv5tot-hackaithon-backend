@@ -1,70 +1,26 @@
-import { Criterion, Level, Prisma, Role, WorkspaceType } from '@prisma/client';
+import { Criterion, Level, Prisma, Role } from '@prisma/client';
 import { env } from '../src/config/env';
 import { logger } from '../src/config/logger';
 import { prisma } from '../src/infrastructure/database/prisma';
 import { PasswordService } from '../src/modules/auth/password.service';
 import { defaultCriteriaUnitScope, fallbackRulesByLevel } from '../src/modules/rules/criteria.constants';
 import { seedNormalizedCriteria } from './seeds/criteria/seed-criteria';
+import {
+  CITY_WORKSPACE_CODE,
+  DEFAULT_SCHOOL_CODE,
+  ECONOMICS_SCHOOL_CODE,
+  UNIVERSITY_SYSTEM_CODE,
+  WORKSPACE_REGISTRY,
+  seedWorkspaceRegistry,
+} from './seed-workspaces';
 
 const passwordService = new PasswordService();
-const defaultWorkspaceCode = 'DHBK-DHDN';
-const economicsWorkspaceCode = 'DHKTE-DHDN';
-const cityWorkspaceCode = 'DANANG_CITY';
-const universityWorkspaceCode = 'UDN';
+const defaultWorkspaceCode = DEFAULT_SCHOOL_CODE;
+const economicsWorkspaceCode = ECONOMICS_SCHOOL_CODE;
+const cityWorkspaceCode = CITY_WORKSPACE_CODE;
+const universityWorkspaceCode = UNIVERSITY_SYSTEM_CODE;
 const economicsTrialCriteriaVersionName =
   'Bộ tiêu chí thử nghiệm - không sử dụng cho xét duyệt chính thức';
-
-const udnWorkspaces = [
-  {
-    code: defaultWorkspaceCode,
-    name: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
-    shortName: 'DHBK',
-    isActive: true,
-    registrationEnabled: true,
-  },
-  {
-    code: economicsWorkspaceCode,
-    name: 'Trường Đại học Kinh tế - Đại học Đà Nẵng',
-    shortName: 'DHKTE',
-    isActive: true,
-    registrationEnabled: true,
-  },
-  {
-    code: 'DHSP-DHDN',
-    name: 'Trường Đại học Sư phạm - Đại học Đà Nẵng',
-    shortName: 'DHSP',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'DHNN-DHDN',
-    name: 'Trường Đại học Ngoại ngữ - Đại học Đà Nẵng',
-    shortName: 'DHNN',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'DHSPKT-DHDN',
-    name: 'Trường Đại học Sư phạm Kỹ thuật - Đại học Đà Nẵng',
-    shortName: 'DHSPKT',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'VKU-DHDN',
-    name: 'Trường Đại học Công nghệ Thông tin và Truyền thông Việt - Hàn - Đại học Đà Nẵng',
-    shortName: 'VKU',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'TYD-DHDN',
-    name: 'Trường Y Dược - Đại học Đà Nẵng',
-    shortName: 'TYD',
-    isActive: true,
-    registrationEnabled: false,
-  },
-] as const;
 
 type SeedUser = {
   email: string;
@@ -234,81 +190,24 @@ const criteriaRules = Object.entries(fallbackRulesByLevel).flatMap(([level, rule
 );
 
 async function seedWorkspaces() {
-  const workspaces = new Map<string, Awaited<ReturnType<typeof prisma.workspace.upsert>>>();
+  const result = await seedWorkspaceRegistry(prisma);
+  const cityWorkspace = result.workspaces.get(cityWorkspaceCode);
+  const universityWorkspace = result.workspaces.get(universityWorkspaceCode);
+  const defaultWorkspace = result.workspaces.get(defaultWorkspaceCode);
+  const economicsWorkspace = result.workspaces.get(economicsWorkspaceCode);
 
-  const cityWorkspace = await prisma.workspace.upsert({
-    where: { code: cityWorkspaceCode },
-    update: {
-      name: 'Thành phố Đà Nẵng',
-      shortName: 'Đà Nẵng',
-      type: WorkspaceType.CITY,
-      parentWorkspaceId: null,
-      isActive: true,
-      registrationEnabled: false,
-    },
-    create: {
-      code: cityWorkspaceCode,
-      name: 'Thành phố Đà Nẵng',
-      shortName: 'Đà Nẵng',
-      type: WorkspaceType.CITY,
-      isActive: true,
-      registrationEnabled: false,
-    },
-  });
-  const universityWorkspace = await prisma.workspace.upsert({
-    where: { code: universityWorkspaceCode },
-    update: {
-      name: 'Đại học Đà Nẵng',
-      shortName: 'ĐHĐN',
-      type: WorkspaceType.UNIVERSITY_SYSTEM,
-      parentWorkspaceId: cityWorkspace.id,
-      isActive: true,
-      registrationEnabled: false,
-    },
-    create: {
-      code: universityWorkspaceCode,
-      name: 'Đại học Đà Nẵng',
-      shortName: 'ĐHĐN',
-      type: WorkspaceType.UNIVERSITY_SYSTEM,
-      parentWorkspaceId: cityWorkspace.id,
-      isActive: true,
-      registrationEnabled: false,
-    },
-  });
-
-  for (const workspaceSeed of udnWorkspaces) {
-    const isUdnSchool =
-      workspaceSeed.code === defaultWorkspaceCode || workspaceSeed.code === economicsWorkspaceCode;
-    const school = {
-      ...workspaceSeed,
-      type: WorkspaceType.SCHOOL,
-      parentWorkspaceId: isUdnSchool ? universityWorkspace.id : null,
-    };
-    const workspace = await prisma.workspace.upsert({
-      where: { code: workspaceSeed.code },
-      update: school,
-      create: school,
-    });
-    workspaces.set(workspace.code, workspace);
+  if (!cityWorkspace || !universityWorkspace || !defaultWorkspace || !economicsWorkspace) {
+    throw new Error('Required workspace registry entries were not seeded');
   }
 
   return {
     cityWorkspace,
     universityWorkspace,
-    defaultWorkspace: getSeededWorkspace(workspaces, defaultWorkspaceCode),
-    economicsWorkspace: getSeededWorkspace(workspaces, economicsWorkspaceCode),
+    defaultWorkspace,
+    economicsWorkspace,
+    hierarchyRepairs: result.hierarchyRepairs,
+    hierarchyRepairsSkipped: result.hierarchyRepairsSkipped,
   };
-}
-
-function getSeededWorkspace(
-  workspaces: Map<string, Awaited<ReturnType<typeof prisma.workspace.upsert>>>,
-  code: string,
-) {
-  const workspace = workspaces.get(code);
-  if (!workspace) {
-    throw new Error(`Workspace ${code} was not seeded`);
-  }
-  return workspace;
 }
 
 async function seedUserList(users: SeedUser[], workspaceId: string | null): Promise<void> {
@@ -374,13 +273,17 @@ async function seedUserList(users: SeedUser[], workspaceId: string | null): Prom
   }
 }
 
-async function seedUsers(): Promise<void> {
-  const { cityWorkspace, universityWorkspace, defaultWorkspace, economicsWorkspace } =
-    await seedWorkspaces();
+async function seedUsers() {
+  const workspaceSeed = await seedWorkspaces();
+  const { cityWorkspace, universityWorkspace, defaultWorkspace, economicsWorkspace } = workspaceSeed;
   await seedUserList(demoUsers, defaultWorkspace.id);
   await seedUserList(economicsDemoUsers, economicsWorkspace.id);
   await seedUserList(cityDemoUsers, cityWorkspace.id);
   await seedUserList(universityDemoUsers, universityWorkspace.id);
+  return {
+    hierarchyRepairs: workspaceSeed.hierarchyRepairs,
+    hierarchyRepairsSkipped: workspaceSeed.hierarchyRepairsSkipped,
+  };
 }
 
 async function seedCriteriaRules(): Promise<void> {
@@ -516,16 +419,22 @@ function toSeedJson(value: unknown): Prisma.InputJsonValue | undefined {
 }
 
 async function main(): Promise<void> {
-  await seedUsers();
+  if (env.NODE_ENV === 'production') {
+    throw new Error('The demo seed is disabled in production.');
+  }
+
+  const workspaceSeed = await seedUsers();
   await seedCriteriaRules();
   const normalizedCriteriaSeed = await seedNormalizedCriteria(prisma);
   logger.info(
     {
-      workspaceCount: udnWorkspaces.length,
+      workspaceCount: WORKSPACE_REGISTRY.length,
       defaultWorkspaceCode,
-      registrationEnabledWorkspaceCodes: udnWorkspaces
+      registrationEnabledWorkspaceCodes: WORKSPACE_REGISTRY
         .filter((workspace) => workspace.registrationEnabled)
         .map((workspace) => workspace.code),
+      hierarchyRepairs: workspaceSeed.hierarchyRepairs,
+      hierarchyRepairsSkipped: workspaceSeed.hierarchyRepairsSkipped,
       demoUserCount: demoUsers.length + economicsDemoUsers.length,
       economicsDemoUserCount: economicsDemoUsers.length,
       economicsTrialCriteriaVersionName,

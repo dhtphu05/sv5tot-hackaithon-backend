@@ -34,7 +34,7 @@ export class WorkspacesService {
 
   async list(query: ListWorkspacesQuery) {
     const where: Prisma.WorkspaceWhereInput = query.registration
-      ? { isActive: true, registrationEnabled: true }
+      ? { type: WorkspaceType.SCHOOL, isActive: true, registrationEnabled: true }
       : {};
 
     const workspaces = await this.workspacesRepository.list(where);
