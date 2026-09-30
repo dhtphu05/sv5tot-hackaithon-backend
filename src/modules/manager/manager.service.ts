@@ -14,6 +14,7 @@ import {
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { auditActions } from '../../shared/constants/application';
+import { coreCriteria } from '../../shared/constants/criteria';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -776,8 +777,16 @@ export class ManagerService {
       },
       student: pickStudent(application.student),
       metrics: application.metrics,
-      evidences: groupByCriterion(application.evidences, (evidence) => evidence.criterion),
-      reviewTasks: groupByCriterion(application.reviewTasks, (task) => task.criterion),
+      evidences: groupByCriterion(
+        application.evidences,
+        (evidence) => evidence.criterion,
+        criteriaForApplicationPresentation(application),
+      ),
+      reviewTasks: groupByCriterion(
+        application.reviewTasks,
+        (task) => task.criterion,
+        criteriaForApplicationPresentation(application),
+      ),
       resolutionCases: application.resolutionCases,
       notificationCount,
       auditTimeline,
@@ -822,8 +831,9 @@ export class ManagerService {
       }),
     ]);
 
+    const workloadCriteria = cityManager ? coreCriteria : Object.values(Criterion);
     const unassignedByCriterion = Object.fromEntries(
-      Object.values(Criterion).map((criterion) => [
+      workloadCriteria.map((criterion) => [
         criterion,
         unassignedTasks.filter((task) => task.criterion === criterion).length,
       ]),
@@ -2395,8 +2405,9 @@ function toResultEvidence(evidence: ResultEvidenceSource) {
 }
 
 function buildCriterionSummary(application: ApplicationDetail) {
+  const criteria = criteriaForApplicationPresentation(application);
   return Object.fromEntries(
-    Object.values(Criterion).map((criterion) => {
+    criteria.map((criterion) => {
       const task = application.reviewTasks.find((item) => item.criterion === criterion);
       const evidences = application.evidences.filter((item) => item.criterion === criterion);
       const acceptedEvidenceCount = evidences.filter((item) => item.status === 'accepted').length;
@@ -2415,6 +2426,16 @@ function buildCriterionSummary(application: ApplicationDetail) {
       ];
     }),
   );
+}
+
+function criteriaForApplicationPresentation(application: {
+  applicationType: ApplicationType;
+  targetLevel: Level;
+}) {
+  return application.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city
+    ? coreCriteria
+    : Object.values(Criterion);
 }
 
 function buildCriterionSummaryText(
@@ -2545,8 +2566,12 @@ function pickStudent(student: {
   };
 }
 
-function groupByCriterion<T>(items: T[], getCriterion: (item: T) => Criterion) {
-  return Object.values(Criterion).reduce(
+function groupByCriterion<T>(
+  items: T[],
+  getCriterion: (item: T) => Criterion,
+  criteria: readonly Criterion[] = Object.values(Criterion),
+) {
+  return criteria.reduce(
     (acc, criterion) => {
       acc[criterion] = items.filter((item) => getCriterion(item) === criterion);
       return acc;
