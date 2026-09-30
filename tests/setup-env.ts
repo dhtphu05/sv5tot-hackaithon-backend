@@ -1,7 +1,7 @@
 process.env.NODE_ENV = process.env.NODE_ENV ?? 'test';
 process.env.PORT = process.env.PORT ?? '8080';
 process.env.DATABASE_URL =
-  process.env.DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5432/sv5tot_test';
+  process.env.TEST_DATABASE_URL ?? 'postgresql://postgres:postgres@localhost:5432/sv5tot_test';
 process.env.DEFAULT_SCHOOL_YEAR = process.env.DEFAULT_SCHOOL_YEAR ?? '2025-2026';
 process.env.JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET ?? 'test_access_secret';
 process.env.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET ?? 'test_refresh_secret';
