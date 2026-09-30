@@ -1,18 +1,18 @@
 // Owns file metadata and storage integration boundaries.
-import { ReviewTaskStatus, Role } from '@prisma/client';
+import { Role, WorkspaceType } from '@prisma/client';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-import { prisma } from '../../infrastructure/database/prisma';
 import { requireUserWorkspace } from '../../shared/utils/workspace-scope';
-import { WorkspaceType } from '@prisma/client';
 import { FilesRepository } from './files.repository';
 import { StorageService } from '../storage/storage.service';
+import { ReviewService, type ReviewTaskVisibilityContext } from '../review/review.service';
 
 export class FilesService {
   constructor(
     private readonly filesRepository = new FilesRepository(),
     private readonly storageService = new StorageService(),
+    private readonly reviewService = new ReviewService(),
   ) {}
 
   async getMetadata(user: AuthenticatedUser, fileId: string) {
@@ -83,70 +83,51 @@ export class FilesService {
 
     for (const link of evidenceLinks) {
       const evidence = link.evidence;
-      const applicationWorkspaceId = evidence.application?.workspaceId ?? file.workspaceId ?? null;
-      const cityReviewer = user.role === Role.city_officer;
       const reviewSource = evidence.application ?? evidence.collectiveProfile;
-      const inScope = cityReviewer
-        ? user.workspace?.type === WorkspaceType.CITY &&
-          user.workspaceId === user.workspace.id &&
-          reviewSource?.workspace?.type === WorkspaceType.SCHOOL &&
-          reviewSource.workspace.isActive
-        : this.sameWorkspace(user, applicationWorkspaceId);
-      if (!inScope) {
-        continue;
-      }
+      if (!reviewSource) continue;
       const tasks = reviewSource?.reviewTasks ?? [];
-      if (cityReviewer) {
-        const hasFinalLinkedTask = tasks.some(
-          (task) =>
-            task.assignedOfficerId === user.id &&
-            task.criterion === evidence.criterion &&
-            (task.status === ReviewTaskStatus.accepted ||
-              task.status === ReviewTaskStatus.rejected) &&
-            task.evidences?.some((link) => link.evidenceId === evidence.id),
-        );
-        if (!hasFinalLinkedTask) {
-          continue;
-        }
-        const specialization = await prisma.officerSpecialization.findFirst({
-          where: {
-            officerId: user.id,
-            criterion: evidence.criterion,
-            isActive: true,
-            officer: {
-              role: Role.city_officer,
-              isActive: true,
-              workspaceId: user.workspaceId,
-            },
-          },
-        });
-        if (specialization) return true;
-        continue;
+      for (const task of tasks) {
+        if (task.criterion !== evidence.criterion) continue;
+        if (!task.evidences?.some((link) => link.evidenceId === evidence.id)) continue;
+
+        const taskContext = this.buildTaskVisibilityContext(evidence, reviewSource, task);
+        if (await this.reviewService.canViewTask(user, taskContext)) return true;
       }
-      if (evidence.assignedOfficerId === user.id) return true;
-      if (
-        tasks.some(
-          (task) => task.assignedOfficerId === user.id && task.criterion === evidence.criterion,
-        )
-      ) {
-        return true;
-      }
-      const spec = await prisma.officerSpecialization.findFirst({
-        where: {
-          officerId: user.id,
-          criterion: evidence.criterion,
-          isActive: true,
-          officer: {
-            role: Role.officer,
-            isActive: true,
-            workspaceId: user.workspaceId,
-          },
-        },
-      });
-      if (spec) return true;
     }
 
     return false;
+  }
+
+  private buildTaskVisibilityContext(
+    evidence: NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>['evidenceFiles'][number]['evidence'],
+    reviewSource: NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>['evidenceFiles'][number]['evidence']['application'] | NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>['evidenceFiles'][number]['evidence']['collectiveProfile'],
+    task: NonNullable<typeof reviewSource>['reviewTasks'][number],
+  ): ReviewTaskVisibilityContext {
+    const application = evidence.application
+      ? {
+          applicationType: evidence.application.applicationType,
+          targetLevel: evidence.application.targetLevel,
+          student: { faculty: evidence.application.student?.faculty ?? null },
+        }
+      : null;
+    const collectiveProfile = evidence.collectiveProfile
+      ? {
+          targetLevel: evidence.collectiveProfile.targetLevel,
+          representative: {
+            faculty: evidence.collectiveProfile.representative?.faculty ?? null,
+          },
+        }
+      : null;
+
+    return {
+      workspaceId: reviewSource!.workspaceId,
+      workspace: reviewSource!.workspace,
+      assignedOfficerId: task.assignedOfficerId,
+      status: task.status,
+      criterion: task.criterion,
+      application,
+      collectiveProfile,
+    };
   }
 
   private canViewWorkspaceFile(

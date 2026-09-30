@@ -92,9 +92,7 @@ describe('security baseline workspace boundaries', () => {
     } as never);
 
     expect(where).toMatchObject({
-      AND: expect.arrayContaining([
-        { workspace: { is: { type: 'SCHOOL', isActive: true } } },
-      ]),
+      AND: expect.arrayContaining([{ workspace: { is: { type: 'SCHOOL', isActive: true } } }]),
       criterion: { in: [Criterion.academic] },
     });
   });
@@ -177,25 +175,61 @@ describe('security baseline workspace boundaries', () => {
     await service.claimTask(cityOfficer, schoolTask.id);
 
     expect(prismaMock.reviewTask.updateMany).toHaveBeenCalledWith({
-      where: { id: schoolTask.id, assignedOfficerId: null },
+      where: {
+        id: schoolTask.id,
+        assignedOfficerId: null,
+        status: 'waiting',
+        decision: null,
+        updatedAt: schoolTask.updatedAt,
+      },
       data: { assignedOfficerId: cityOfficer.id, status: 'reviewing' },
     });
   });
 
-  it.each([
-    ['assigned', 'other-officer', ReviewTaskStatus.reviewing],
-    ['final', null, ReviewTaskStatus.accepted],
-  ])('rejects City Officer claims for %s School tasks before mutation', async (_case, assignedOfficerId, status) => {
-    const task = {
-      id: 'task-school-a',
+  it('returns a conflict when the review-task claim compare-and-swap misses', async () => {
+    const schoolTask = {
+      id: 'task-school-race',
       workspaceId: workspaceA,
-      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
-      assignedOfficerId,
-      status,
+      workspace: { type: 'SCHOOL', isActive: true },
+      applicationId: 'application-race',
+      collectiveProfileId: null,
+      assignedOfficerId: null,
       criterion: Criterion.academic,
-      application: { student: { faculty: 'Faculty A' } },
+      status: 'waiting',
+      decision: null,
+      officerNote: null,
+      officerSuggestedLevel: null,
+      levelAssessmentJson: null,
+      decisionReason: null,
+      supplementRequestJson: null,
+      dueDate: null,
+      createdAt: new Date('2026-09-30T00:00:00.000Z'),
+      updatedAt: new Date('2026-09-30T00:01:00.000Z'),
+      assignedOfficer: null,
       collectiveProfile: null,
+      _count: { evidences: 0 },
+      application: {
+        id: 'application-race',
+        workspaceId: workspaceA,
+        schoolYear: '2025-2026',
+        targetLevel: 'city',
+        applicationType: 'individual',
+        status: 'under_review',
+        student: { faculty: 'Faculty A' },
+      },
     };
+    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-race' });
+    prismaMock.reviewTask.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.$transaction.mockImplementation((callback: (transaction: unknown) => unknown) =>
+      callback({
+        $queryRaw: vi.fn().mockResolvedValue([{ id: 'application-race', cancelledAt: null }]),
+        reviewTask: { updateMany: prismaMock.reviewTask.updateMany },
+      }),
+    );
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(schoolTask) } as never,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
+    );
     const cityOfficer = {
       ...user(Role.city_officer, 'city-workspace'),
       workspace: {
@@ -206,14 +240,59 @@ describe('security baseline workspace boundaries', () => {
         shortName: 'DN',
       },
     };
-    const service = new ReviewService(
-      { findDetail: vi.fn().mockResolvedValue(task) } as never,
-      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
-    );
 
-    await expect(service.claimTask(cityOfficer, task.id)).rejects.toMatchObject({ statusCode: 403 });
-    expect(prismaMock.reviewTask.updateMany).not.toHaveBeenCalled();
+    await expect(service.claimTask(cityOfficer, schoolTask.id)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+    expect(prismaMock.reviewTask.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: schoolTask.id,
+        assignedOfficerId: null,
+        status: 'waiting',
+        decision: null,
+        updatedAt: schoolTask.updatedAt,
+      },
+      data: { assignedOfficerId: cityOfficer.id, status: 'reviewing' },
+    });
   });
+
+  it.each([
+    ['assigned', 'other-officer', ReviewTaskStatus.reviewing],
+    ['final', null, ReviewTaskStatus.accepted],
+  ])(
+    'rejects City Officer claims for %s School tasks before mutation',
+    async (_case, assignedOfficerId, status) => {
+      const task = {
+        id: 'task-school-a',
+        workspaceId: workspaceA,
+        workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+        assignedOfficerId,
+        status,
+        criterion: Criterion.academic,
+        application: { student: { faculty: 'Faculty A' } },
+        collectiveProfile: null,
+      };
+      const cityOfficer = {
+        ...user(Role.city_officer, 'city-workspace'),
+        workspace: {
+          id: 'city-workspace',
+          code: 'DANANG_CITY',
+          type: WorkspaceType.CITY,
+          name: 'Da Nang',
+          shortName: 'DN',
+        },
+      };
+      const service = new ReviewService(
+        { findDetail: vi.fn().mockResolvedValue(task) } as never,
+        { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
+      );
+
+      await expect(service.claimTask(cityOfficer, task.id)).rejects.toMatchObject({
+        statusCode: 403,
+      });
+      expect(prismaMock.reviewTask.updateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects staff evidence upload before storage or database side effects', async () => {
     const evidence = {
@@ -321,10 +400,16 @@ describe('security baseline workspace boundaries', () => {
   });
 
   it.each([
-    ['status update', (service: ResolutionService, actor: AuthenticatedUser) =>
-      service.updateCaseStatus(actor, 'case-b', { status: 'closed', note: 'test' } as never)],
-    ['reopen', (service: ResolutionService, actor: AuthenticatedUser) =>
-      service.reopenCase(actor, 'case-b', { reason: 'test' } as never)],
+    [
+      'status update',
+      (service: ResolutionService, actor: AuthenticatedUser) =>
+        service.updateCaseStatus(actor, 'case-b', { status: 'closed', note: 'test' } as never),
+    ],
+    [
+      'reopen',
+      (service: ResolutionService, actor: AuthenticatedUser) =>
+        service.reopenCase(actor, 'case-b', { reason: 'test' } as never),
+    ],
   ])('rejects cross-workspace resolution %s before mutation', async (_name, invoke) => {
     prismaMock.resolutionCase.findUnique.mockResolvedValue({
       id: 'case-b',
@@ -347,18 +432,20 @@ describe('security baseline workspace boundaries', () => {
   it('rejects an event file belonging to another event before loading its roster job', async () => {
     const tx = {
       $queryRaw: vi.fn().mockResolvedValue([]),
-      eventRegistry: { findUnique: vi.fn().mockResolvedValue({
-        id: 'event-a',
-        workspaceId: workspaceA,
-        status: EventStatus.active,
-        convertedValue: 1,
-      }) },
+      eventRegistry: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'event-a',
+          workspaceId: workspaceA,
+          status: EventStatus.active,
+          convertedValue: 1,
+        }),
+      },
       eventFile: { findFirst: vi.fn().mockResolvedValue(null) },
       eventParticipant: { deleteMany: vi.fn(), upsert: vi.fn() },
     };
-    prismaMock.$transaction.mockImplementation(
-      ((callback: (transaction: unknown) => Promise<unknown>) => callback(tx)) as never,
-    );
+    prismaMock.$transaction.mockImplementation(((
+      callback: (transaction: unknown) => Promise<unknown>,
+    ) => callback(tx)) as never);
     const service = new EventRegistryService({} as never, {} as never, {} as never);
 
     await expect(
@@ -377,9 +464,15 @@ describe('security baseline workspace boundaries', () => {
 
   it('filters automatic-assignment candidates to the task workspace', async () => {
     const service = new ReviewService({} as never, {} as never);
-    const findAssignedOfficer = (service as unknown as {
-      findAssignedOfficer: (criterion: Criterion, faculty: string, workspaceId: string) => Promise<string | null>;
-    }).findAssignedOfficer.bind(service);
+    const findAssignedOfficer = (
+      service as unknown as {
+        findAssignedOfficer: (
+          criterion: Criterion,
+          faculty: string,
+          workspaceId: string,
+        ) => Promise<string | null>;
+      }
+    ).findAssignedOfficer.bind(service);
 
     await findAssignedOfficer(Criterion.ethics, 'Faculty A', workspaceA);
 
@@ -428,5 +521,40 @@ describe('security baseline workspace boundaries', () => {
     await expect(
       service.canOfficerHandleCriterion('officer-a', Criterion.ethics, 'Faculty A'),
     ).resolves.toBe(true);
+  });
+
+  it('rejects a direct City Officer claim outside the canonical specialization', async () => {
+    const task = {
+      id: 'task-outside-specialization',
+      workspaceId: workspaceA,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      applicationId: 'application-a',
+      collectiveProfileId: null,
+      assignedOfficerId: null,
+      criterion: Criterion.physical,
+      status: ReviewTaskStatus.waiting,
+      decision: null,
+      application: { applicationType: 'individual', student: { faculty: 'Faculty A' } },
+      collectiveProfile: null,
+    };
+    const cityOfficer = {
+      ...user(Role.city_officer, 'city-workspace'),
+      workspace: {
+        id: 'city-workspace',
+        code: 'DANANG_CITY',
+        type: WorkspaceType.CITY,
+        name: 'Da Nang',
+        shortName: 'DN',
+      },
+    };
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(task) } as never,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(false) } as never,
+    );
+
+    await expect(service.claimTask(cityOfficer, task.id)).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    expect(prismaMock.reviewTask.updateMany).not.toHaveBeenCalled();
   });
 });

@@ -74,6 +74,7 @@ function buildDb(
   remainingSupplementTasks: number,
   supplementDeadlineAt = new Date('2099-03-01T00:00:00.000Z'),
   targetLevel: Level = Level.city,
+  updateCount = 1,
 ) {
   const task = activeTask(targetLevel);
   const tx = {
@@ -89,7 +90,7 @@ function buildDb(
     }),
     reviewTask: {
       findUnique: vi.fn().mockResolvedValue(task),
-      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
       count: vi.fn().mockResolvedValue(remainingSupplementTasks),
     },
     supplementRequest: {
@@ -219,6 +220,23 @@ describe('canonical supplement resubmit', () => {
       code: 'CITY_SUPPLEMENT_WINDOW_CLOSED',
     });
     expect(tx.reviewTask.updateMany).not.toHaveBeenCalled();
+    expect(tx.application.update).not.toHaveBeenCalled();
+  });
+
+  it('does not update application state when the selected task changed before resubmit', async () => {
+    const { db, tx } = buildDb(
+      0,
+      new Date('2099-03-01T00:00:00.000Z'),
+      Level.city,
+      0,
+    );
+    const notifications = { create: vi.fn().mockResolvedValue({ id: 'notification-a' }) };
+    const service = new SupplementResubmitService(db as never, notifications as never);
+
+    await expect(service.resubmit(student, 'task-volunteer')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'APPLICATION_LOCKED',
+    });
     expect(tx.application.update).not.toHaveBeenCalled();
   });
 

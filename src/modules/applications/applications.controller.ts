@@ -1,8 +1,8 @@
 // Owns individual application draft, submission, timeline, supplement lifecycle.
 import type { Request, Response } from 'express';
 import { sendSuccess } from '../../shared/responses/api-response';
-import { ApplicationsService } from './applications.service';
 import { ApplicationSubmissionModeService } from './application-submission-mode.service';
+import { ApplicationsService } from './applications.service';
 import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
 import { CityReviewSeasonsService } from '../manager/city-review-seasons.service';
 

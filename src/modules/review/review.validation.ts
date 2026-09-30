@@ -1,27 +1,46 @@
 import { Criterion, EvidenceStatus, Level, ReviewDecision, ReviewTaskStatus } from '@prisma/client';
 import { z } from 'zod';
 
-export const listReviewTasksQuerySchema = z.object({
-  status: z.nativeEnum(ReviewTaskStatus).optional(),
-  criterion: z.nativeEnum(Criterion).optional(),
-  targetLevel: z.nativeEnum(Level).optional(),
-  faculty: z.string().trim().optional(),
-  className: z.string().trim().optional(),
-  search: z.string().trim().optional(),
-  riskLevel: z.enum(['low', 'medium', 'high']).optional(),
-  aiConfidenceMax: z.coerce.number().min(0).max(1).optional(),
-  dueSoon: z.coerce.boolean().optional(),
-  overdue: z.coerce.boolean().optional(),
-  supplementRequired: z.coerce.boolean().optional(),
-  resolutionNeeded: z.coerce.boolean().optional(),
-  assignedToMe: z.coerce.boolean().optional(),
-  assignedOfficerId: z.string().uuid().optional(),
-  applicationId: z.string().uuid().optional(),
-  q: z.string().trim().optional(),
-  page: z.coerce.number().int().positive().default(1),
-  pageSize: z.coerce.number().int().positive().max(100).optional(),
-  limit: z.coerce.number().int().positive().max(100).default(20),
-});
+const reviewTaskStatusesQuerySchema = z
+  .string()
+  .transform((value) => Array.from(new Set(value.split(',').map((item) => item.trim()))))
+  .pipe(z.array(z.nativeEnum(ReviewTaskStatus)).min(1));
+
+const reviewTaskOwnershipQuerySchema = z.enum(['my_tasks', 'claimable', 'visible_scope']);
+
+export const listReviewTasksQuerySchema = z
+  .object({
+    status: z.nativeEnum(ReviewTaskStatus).optional(),
+    statuses: reviewTaskStatusesQuerySchema.optional(),
+    criterion: z.nativeEnum(Criterion).optional(),
+    targetLevel: z.nativeEnum(Level).optional(),
+    faculty: z.string().trim().optional(),
+    className: z.string().trim().optional(),
+    search: z.string().trim().optional(),
+    riskLevel: z.enum(['low', 'medium', 'high']).optional(),
+    aiConfidenceMax: z.coerce.number().min(0).max(1).optional(),
+    dueSoon: z.coerce.boolean().optional(),
+    overdue: z.coerce.boolean().optional(),
+    supplementRequired: z.coerce.boolean().optional(),
+    resolutionNeeded: z.coerce.boolean().optional(),
+    assignedToMe: z.coerce.boolean().optional(),
+    ownership: reviewTaskOwnershipQuerySchema.optional(),
+    assignedOfficerId: z.string().uuid().optional(),
+    applicationId: z.string().uuid().optional(),
+    q: z.string().trim().optional(),
+    page: z.coerce.number().int().positive().default(1),
+    pageSize: z.coerce.number().int().positive().max(100).optional(),
+    limit: z.coerce.number().int().positive().max(100).default(20),
+  })
+  .superRefine((value, ctx) => {
+    if (value.status && value.statuses) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['statuses'],
+        message: 'status and statuses cannot be used together',
+      });
+    }
+  });
 
 export const ensureTasksSchema = z.object({
   mode: z.enum(['missing_only', 'all']).default('missing_only'),
