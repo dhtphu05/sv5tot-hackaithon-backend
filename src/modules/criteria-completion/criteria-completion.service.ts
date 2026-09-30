@@ -453,9 +453,22 @@ export class CriteriaCompletionService {
     applicationId: string,
     input: DeclareAcademicGpaInput,
   ) {
-    const application = await this.getApplication(applicationId);
+    const application = await this.getApplicationForGpaDeclaration(applicationId);
     await this.assertCanMutateResponse(user, application, Criterion.academic);
-    await this.assertRequirementKey(application, Criterion.academic, 'academic_gpa');
+    const academicRequirements = (
+      await this.getRequirementGroups(application, Criterion.academic)
+    ).flatMap((group) => group.requirements);
+    const hasGpaRequirement = academicRequirements.some(
+      (requirement) =>
+        requirement.type === 'metric' && requirement.config?.metricType === MetricType.gpa,
+    );
+    if (!hasGpaRequirement) {
+      throw new AppError(
+        400,
+        ErrorCodes.INVALID_RULE_CONFIG,
+        'Academic criteria version does not define a GPA metric requirement',
+      );
+    }
     if (input.schoolYear !== application.schoolYear) {
       throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'GPA schoolYear must match application');
     }
@@ -479,6 +492,9 @@ export class CriteriaCompletionService {
         update: {
           value: input.value,
           scale: input.scale,
+          schoolYear: input.schoolYear,
+          source: input.sourceType,
+          supportingEvidenceId: input.evidenceId ?? null,
           verificationStatus: VerificationStatus.unverified,
         },
         create: {
@@ -486,16 +502,12 @@ export class CriteriaCompletionService {
           metricType: MetricType.gpa,
           value: input.value,
           scale: input.scale,
+          schoolYear: input.schoolYear,
+          source: input.sourceType,
+          supportingEvidenceId: input.evidenceId ?? null,
           verificationStatus: VerificationStatus.unverified,
         },
       });
-      await tx.$executeRaw`
-        UPDATE "ApplicationMetric"
-        SET "schoolYear" = ${input.schoolYear},
-            "source" = ${input.sourceType},
-            "supportingEvidenceId" = ${input.evidenceId ?? null}
-        WHERE "id" = ${metric.id}::uuid
-      `;
       const saved = await this.repository.createResponse(
         {
           workspace: { connect: { id: application.workspaceId } },
@@ -1021,6 +1033,14 @@ export class CriteriaCompletionService {
     return application;
   }
 
+  private async getApplicationForGpaDeclaration(applicationId: string) {
+    const application = await this.repository.findApplicationForGpaDeclaration(applicationId);
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    return application;
+  }
+
   private async getResponse(responseId: string) {
     const response = await this.repository.findResponseById(responseId);
     if (!response) {
@@ -1031,7 +1051,16 @@ export class CriteriaCompletionService {
 
   private async assertCanMutateResponse(
     user: AuthenticatedUser,
-    application: Application & { student: User },
+    application: Pick<
+      Application,
+      | 'workspaceId'
+      | 'cancelledAt'
+      | 'applicationType'
+      | 'targetLevel'
+      | 'studentId'
+      | 'status'
+      | 'id'
+    >,
     criterion: Criterion,
   ) {
     assertSameWorkspace(user, application, 'Application not found');
@@ -1072,12 +1101,7 @@ export class CriteriaCompletionService {
     criterion: Criterion,
     requirementKey: string,
   ) {
-    const criteria = await loadCriteriaRules({
-      workspaceId: application.workspaceId,
-      schoolYear: application.schoolYear,
-      level: application.targetLevel,
-    });
-    const groups = buildRequirementGroupsByCriterion(criteria.rules)[criterion] ?? [];
+    const groups = await this.getRequirementGroups(application, criterion);
     const keys = new Set(groups.flatMap((group) => group.requirements.map((item) => item.key)));
     if (!keys.has(requirementKey)) {
       throw new AppError(
@@ -1086,6 +1110,18 @@ export class CriteriaCompletionService {
         'requirementKey does not belong to application criteria version',
       );
     }
+  }
+
+  private async getRequirementGroups(
+    application: Pick<Application, 'workspaceId' | 'schoolYear' | 'targetLevel'>,
+    criterion: Criterion,
+  ) {
+    const criteria = await loadCriteriaRules({
+      workspaceId: application.workspaceId,
+      schoolYear: application.schoolYear,
+      level: application.targetLevel,
+    });
+    return buildRequirementGroupsByCriterion(criteria.rules)[criterion] ?? [];
   }
 
   private async assertLinkedRecords(

@@ -21,7 +21,17 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     const payload = tokenService.verifyAccessToken(token);
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      include: {
+      select: {
+        id: true,
+        workspaceId: true,
+        email: true,
+        role: true,
+        fullName: true,
+        studentCode: true,
+        className: true,
+        faculty: true,
+        avatarUrl: true,
+        isActive: true,
         workspace: {
           select: {
             id: true,

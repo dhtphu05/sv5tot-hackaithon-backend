@@ -39,7 +39,7 @@ import {
   lockApplicationAndAssertNotCancelled,
 } from '../applications/application-lifecycle.policy';
 import { AuditService } from '../audit/audit.service';
-import { buildEvidenceAnalysisJobInput, parseEvidenceAnalysisJobInput } from '../jobs/evidence-analysis-job-input';
+import { buildEvidenceAnalysisJobInput } from '../jobs/evidence-analysis-job-input';
 import { JobsService } from '../jobs/jobs.service';
 import {
   buildEffectiveEvidenceCardFields,
@@ -51,7 +51,7 @@ import {
 } from './evidence-card-confirmation';
 import { buildEvidenceCardFieldLayers } from './evidence-card-field-presenter';
 import { mapEvidenceUxStatus } from './evidence-ux-status.mapper';
-import { EvidencesRepository } from './evidences.repository';
+import { EvidencesRepository, type EvidenceListRecord } from './evidences.repository';
 import type {
   ConfirmEvidenceCardInput,
   CreateEvidenceInput,
@@ -133,8 +133,9 @@ export class EvidencesService {
       });
 
       // Optionally create an EvidenceCard with description/metadata to store them without schema changes
+      let evidenceCard = null;
       if (input.description || input.metadata) {
-        await tx.evidenceCard.create({
+        evidenceCard = await tx.evidenceCard.create({
           data: {
             evidenceId: created.id,
             ocrText: input.description ?? 'Minh chứng được nhập thủ công.',
@@ -165,10 +166,10 @@ export class EvidencesService {
         },
       });
 
-      return created;
+      return { ...created, evidenceFiles: [], evidenceCard };
     });
 
-    return this.getRequiredEvidenceDto(evidence.id, user);
+    return this.toEvidenceDto(evidence, user);
   }
 
   async update(user: AuthenticatedUser, evidenceId: string, input: UpdateEvidenceInput) {
@@ -202,7 +203,7 @@ export class EvidencesService {
       );
     }
 
-    await prisma.$transaction(async (tx) => {
+    const updatedEvidence = await prisma.$transaction(async (tx) => {
       await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
       const updated = await tx.evidence.update({
         where: { id: evidence.id },
@@ -226,9 +227,10 @@ export class EvidencesService {
           criterion: updated.criterion,
         },
       });
+      return updated;
     });
 
-    return this.getRequiredEvidenceDto(evidence.id, user);
+    return this.toEvidenceDto({ ...evidence, ...updatedEvidence }, user);
   }
 
   async get(user: AuthenticatedUser, evidenceId: string) {
@@ -472,37 +474,18 @@ export class EvidencesService {
         evidenceFileId: evidenceFile.id,
         fileId: fileRecord.id,
       });
-      const activeJobs = await tx.indexingJob.findMany({
-        where: {
+      // Each upload just created new file and evidence-file IDs, so no existing
+      // job can already reference this exact input.
+      const job = await tx.indexingJob.create({
+        data: {
+          workspaceId: evidence.application!.workspaceId,
           targetId: evidence.id,
           jobType: JobType.evidence_ocr,
-          status: { in: [JobStatus.queued, JobStatus.processing] },
+          status: JobStatus.queued,
+          attempts: 0,
+          inputJson: jobInput,
         },
-        orderBy: { createdAt: 'desc' },
       });
-      const existingJob = activeJobs.find((activeJob) => {
-        try {
-          const activeInput = parseEvidenceAnalysisJobInput(activeJob.inputJson);
-          return (
-            activeInput.evidenceFileId === jobInput.evidenceFileId &&
-            activeInput.fileId === jobInput.fileId
-          );
-        } catch {
-          return false;
-        }
-      });
-      const job =
-        existingJob ??
-        (await tx.indexingJob.create({
-          data: {
-            workspaceId: evidence.application!.workspaceId,
-            targetId: evidence.id,
-            jobType: JobType.evidence_ocr,
-            status: JobStatus.queued,
-            attempts: 0,
-            inputJson: jobInput,
-          },
-        }));
 
       if (evidence.sourceType === EvidenceSourceType.manual_upload && evidence.evidenceCard) {
         await tx.evidenceCard.update({
@@ -594,7 +577,7 @@ export class EvidencesService {
           jobId: job.id,
           jobType: job.jobType,
           status: job.status,
-          reused: !!existingJob,
+          reused: false,
         },
         tx,
       });
@@ -642,7 +625,7 @@ export class EvidencesService {
       evidenceFileId: currentFile.id,
       fileId: currentFile.fileId,
     });
-    const { job, reused } = await prisma.$transaction(async (tx) => {
+    const { job, reused, updatedEvidence } = await prisma.$transaction(async (tx) => {
       await lockApplicationAndAssertNotCancelled(tx, evidence.application!.id);
       const result = await this.jobsService.enqueueIndexingJob(
         evidence.id,
@@ -651,19 +634,18 @@ export class EvidencesService {
         jobInput as Prisma.InputJsonValue,
         tx,
       );
-      await tx.evidence.update({
+      const updatedEvidence = await tx.evidence.update({
         where: { id: evidence.id },
         data: {
           status: EvidenceStatus.pending_indexing,
           indexingStatus: IndexingStatus.pending_indexing,
         },
       });
-      return result;
+      return { ...result, updatedEvidence };
     });
 
-    const updatedEvidence = await this.getRequiredEvidence(evidence.id);
     return {
-      evidence: this.toEvidenceDto(updatedEvidence, user),
+      evidence: this.toEvidenceDto({ ...evidence, ...updatedEvidence }, user),
       job,
       jobId: job.id,
       mode: reused ? 'ocr_job_reused' : 'ocr_queued',
@@ -676,9 +658,11 @@ export class EvidencesService {
     this.assertCanViewEvidence(user, evidence);
 
     const isPrivileged = this.isPrivileged(user);
-    const latestJob = await this.findLatestEvidenceJob(evidence.id);
-    const latestSmartReaderJob = await this.findLatestSmartReaderJob(evidence.id);
-    const auditSummary = await this.getEvidenceAuditSummary(evidence.id);
+    const [latestJob, latestSmartReaderJob, auditSummary] = await Promise.all([
+      this.findLatestEvidenceJob(evidence.id),
+      this.findLatestSmartReaderJob(evidence.id),
+      this.getEvidenceAuditSummary(evidence.id),
+    ]);
     const uxStatus = mapEvidenceUxStatus({
       evidenceStatus: evidence.status,
       indexingStatus: evidence.indexingStatus,
@@ -878,11 +862,6 @@ export class EvidencesService {
     return evidence;
   }
 
-  private async getRequiredEvidenceDto(evidenceId: string, user: AuthenticatedUser) {
-    const evidence = await this.getRequiredEvidence(evidenceId);
-    return this.toEvidenceDto(evidence, user);
-  }
-
   private assertCanViewApplication(user: AuthenticatedUser, application: { studentId: string }) {
     if (application.studentId === user.id) return;
     if (user.role === Role.manager || user.role === Role.committee || user.role === Role.admin) {
@@ -939,7 +918,7 @@ export class EvidencesService {
   }
 
   private toEvidenceDto(
-    evidence: NonNullable<Awaited<ReturnType<EvidencesRepository['findEvidence']>>>,
+    evidence: EvidenceListRecord,
     user: AuthenticatedUser,
   ) {
     const isPrivileged = this.isPrivileged(user);

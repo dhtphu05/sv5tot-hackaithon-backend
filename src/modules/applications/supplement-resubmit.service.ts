@@ -23,6 +23,7 @@ import {
   assertApplicationNotCancelled,
   lockApplicationAndAssertNotCancelled,
 } from './application-lifecycle.policy';
+import { assertStudentApplicationIsCity } from './application-submission.policy';
 
 const activeProcessingStatuses = new Set<IndexingStatus>([
   IndexingStatus.pending_indexing,
@@ -63,6 +64,7 @@ export class SupplementResubmitService {
       await lockApplicationAndAssertNotCancelled(tx, initialTask.applicationId!);
       const task = await this.getOwnedSupplementTask(tx, user, reviewTaskId);
       const application = task.application!;
+      assertStudentApplicationIsCity(user, application);
       const request = activeSupplementRequest(task);
       if (!request) {
         throw new AppError(

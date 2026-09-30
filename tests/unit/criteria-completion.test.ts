@@ -11,6 +11,7 @@ import {
 import { describe, expect, it } from 'vitest';
 import { evaluateCriterionCompletion } from '../../src/modules/criteria-completion/criteria-completion.evaluator';
 import { buildRequirementGroupsByCriterion } from '../../src/modules/criteria-completion/criteria-requirement.parser';
+import { cityRules } from '../../src/modules/rules/city.rules';
 import {
   assertNoDuplicateVolunteerEvent,
   assertRequirementStatusMutationAllowed,
@@ -442,6 +443,33 @@ describe('criteria completion evaluator', () => {
       threshold: 3,
       thresholdScale: 4,
     });
+  });
+
+  it('evaluates one canonical GPA declaration against each configured City study track', () => {
+    const cityAcademicGroups = buildRequirementGroupsByCriterion(
+      cityRules.filter((rule) => rule.criterion === Criterion.academic),
+    )[Criterion.academic];
+    const result = evaluate({
+      criterion: Criterion.academic,
+      groups: cityAcademicGroups,
+      responses: [
+        explicitMetricResponse(
+          'academic_gpa',
+          3,
+          RequirementResponseStatus.declared,
+          Criterion.academic,
+          4,
+          '2025-2026',
+        ),
+      ],
+    });
+
+    expect(findRequirementInResult(result, 'gpa_university')?.currentResponses[0]?.status).toBe(
+      'rejected',
+    );
+    expect(findRequirementInResult(result, 'gpa_college')?.currentResponses[0]?.status).toBe(
+      'declared',
+    );
   });
 
   it('keeps academic ready for precheck when only reviewer no_f_grade confirmation remains', () => {

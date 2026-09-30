@@ -34,6 +34,7 @@ import { findProcessingEvidence, isApplicationPrecheckStale } from './applicatio
 import { ApplicationsRepository } from './applications.repository';
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
+import { assertStudentApplicationIsCity } from './application-submission.policy';
 import {
   assertApplicationNotCancelled,
   lockApplicationAndAssertNotCancelled,
@@ -370,6 +371,8 @@ export class ApplicationsService {
         { reviewTasks: application.reviewTasks.map(toSubmitTaskDto) },
       );
     }
+
+    assertStudentApplicationIsCity(user, application);
 
     const isInitialCitySubmission = requiresInitialCityEligibility(user, application);
     if (isInitialCitySubmission) {

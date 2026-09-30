@@ -16,6 +16,41 @@ export const evidenceInclude = {
   evidenceCard: true,
 } satisfies Prisma.EvidenceInclude;
 
+export const evidenceListInclude = {
+  evidenceFiles: {
+    include: {
+      file: {
+        select: {
+          id: true,
+          originalName: true,
+          mimeType: true,
+          fileSize: true,
+          publicUrl: true,
+        },
+      },
+    },
+    orderBy: { id: 'asc' },
+  },
+  evidenceCard: {
+    select: {
+      id: true,
+      ocrText: true,
+      extractedFieldsJson: true,
+      normalizedFieldsJson: true,
+      warningsJson: true,
+      matchedEventId: true,
+      matchedParticipantId: true,
+      confidence: true,
+      requiresHumanConfirmation: true,
+      confirmationStatus: true,
+    },
+  },
+} satisfies Prisma.EvidenceInclude;
+
+export type EvidenceListRecord = Prisma.EvidenceGetPayload<{
+  include: typeof evidenceListInclude;
+}>;
+
 export class EvidencesRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
 
@@ -84,7 +119,7 @@ export class EvidencesRepository {
     const [items, total] = await this.db.$transaction([
       this.db.evidence.findMany({
         where,
-        include: evidenceInclude,
+        include: evidenceListInclude,
         orderBy: { createdAt: 'desc' },
         skip,
         take: query.limit,
