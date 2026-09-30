@@ -2094,7 +2094,7 @@ async function notifyManagers(
   );
 }
 
-function toTaskListItem(task: {
+export function toTaskListItem(task: {
   id: string;
   criterion: Criterion;
   status: ReviewTaskStatus;
@@ -2102,6 +2102,10 @@ function toTaskListItem(task: {
   dueDate: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  workspace?: {
+    name: string;
+    shortName: string | null;
+  };
   officerSuggestedLevel?: Level | null;
   application: {
     id: string;
@@ -2160,6 +2164,7 @@ function toTaskListItem(task: {
       task.collectiveProfile?.className ??
       '',
     studentCode: task.application?.student.studentCode ?? '',
+    institutionName: task.workspace?.name ?? null,
     className: task.application?.student.className ?? task.collectiveProfile?.className ?? null,
     faculty:
       task.application?.student.faculty ?? task.collectiveProfile?.representative.faculty ?? null,

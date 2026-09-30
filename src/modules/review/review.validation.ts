@@ -6,6 +6,8 @@ const reviewTaskStatusesQuerySchema = z
   .transform((value) => Array.from(new Set(value.split(',').map((item) => item.trim()))))
   .pipe(z.array(z.nativeEnum(ReviewTaskStatus)).min(1));
 
+const reviewTaskOwnershipQuerySchema = z.enum(['my_tasks', 'claimable', 'visible_scope']);
+
 export const listReviewTasksQuerySchema = z
   .object({
     status: z.nativeEnum(ReviewTaskStatus).optional(),
@@ -22,6 +24,7 @@ export const listReviewTasksQuerySchema = z
     supplementRequired: z.coerce.boolean().optional(),
     resolutionNeeded: z.coerce.boolean().optional(),
     assignedToMe: z.coerce.boolean().optional(),
+    ownership: reviewTaskOwnershipQuerySchema.optional(),
     assignedOfficerId: z.string().uuid().optional(),
     applicationId: z.string().uuid().optional(),
     q: z.string().trim().optional(),

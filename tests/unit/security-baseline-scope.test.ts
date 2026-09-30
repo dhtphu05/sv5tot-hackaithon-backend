@@ -522,4 +522,39 @@ describe('security baseline workspace boundaries', () => {
       service.canOfficerHandleCriterion('officer-a', Criterion.ethics, 'Faculty A'),
     ).resolves.toBe(true);
   });
+
+  it('rejects a direct City Officer claim outside the canonical specialization', async () => {
+    const task = {
+      id: 'task-outside-specialization',
+      workspaceId: workspaceA,
+      workspace: { type: WorkspaceType.SCHOOL, isActive: true },
+      applicationId: 'application-a',
+      collectiveProfileId: null,
+      assignedOfficerId: null,
+      criterion: Criterion.physical,
+      status: ReviewTaskStatus.waiting,
+      decision: null,
+      application: { applicationType: 'individual', student: { faculty: 'Faculty A' } },
+      collectiveProfile: null,
+    };
+    const cityOfficer = {
+      ...user(Role.city_officer, 'city-workspace'),
+      workspace: {
+        id: 'city-workspace',
+        code: 'DANANG_CITY',
+        type: WorkspaceType.CITY,
+        name: 'Da Nang',
+        shortName: 'DN',
+      },
+    };
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(task) } as never,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(false) } as never,
+    );
+
+    await expect(service.claimTask(cityOfficer, task.id)).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    expect(prismaMock.reviewTask.updateMany).not.toHaveBeenCalled();
+  });
 });

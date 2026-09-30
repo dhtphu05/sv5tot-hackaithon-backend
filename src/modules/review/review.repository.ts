@@ -9,7 +9,7 @@ import {
 import type { ListReviewTasksQuery } from './review.validation';
 
 export const reviewTaskListInclude = {
-  workspace: { select: { type: true, isActive: true } },
+  workspace: { select: { name: true, shortName: true, type: true, isActive: true } },
   application: { include: { student: true } },
   collectiveProfile: { include: { representative: true } },
   assignedOfficer: { select: { id: true, fullName: true } },
@@ -72,6 +72,7 @@ export class ReviewRepository {
     const now = new Date();
     const dueSoonLimit = new Date(now);
     dueSoonLimit.setDate(dueSoonLimit.getDate() + 3);
+    const ownership = query.ownership ?? (query.assignedToMe ? 'my_tasks' : undefined);
 
     const andFilters: Prisma.ReviewTaskWhereInput[] = [];
     andFilters.push(reviewWorkspaceFilterFor(user));
@@ -82,7 +83,9 @@ export class ReviewRepository {
     if (query.resolutionNeeded) andFilters.push({ status: 'resolution_needed' });
     if (query.criterion) andFilters.push({ criterion: query.criterion });
     if (query.applicationId) andFilters.push({ applicationId: query.applicationId });
-    if (query.assignedOfficerId) andFilters.push({ assignedOfficerId: query.assignedOfficerId });
+    if (query.assignedOfficerId && ownership !== 'my_tasks') {
+      andFilters.push({ assignedOfficerId: query.assignedOfficerId });
+    }
     if (query.targetLevel) {
       andFilters.push({
         OR: [
@@ -149,7 +152,25 @@ export class ReviewRepository {
         ],
       });
     }
+    if (ownership === 'my_tasks') {
+      andFilters.push({ assignedOfficerId: user.id });
+    }
+    if (ownership === 'claimable') {
+      andFilters.push(
+        { status: 'waiting' },
+        { assignedOfficerId: null },
+        { decision: null },
+      );
+    }
     const base: Prisma.ReviewTaskWhereInput = andFilters.length ? { AND: andFilters } : {};
+
+    if (
+      ownership === 'claimable' &&
+      user.role !== Role.officer &&
+      user.role !== Role.city_officer
+    ) {
+      return { ...base, id: { in: [] } };
+    }
 
     if (user.role === Role.manager || user.role === Role.city_manager || user.role === Role.admin) {
       return query.assignedToMe ? { ...base, assignedOfficerId: user.id } : base;
@@ -166,6 +187,14 @@ export class ReviewRepository {
     const criteria = Array.from(new Set(specializations.map((item) => item.criterion)));
 
     if (user.role === Role.city_officer) {
+      return { ...base, criterion: { in: criteria } };
+    }
+
+    if (ownership === 'my_tasks') {
+      return base;
+    }
+
+    if (ownership === 'claimable') {
       return { ...base, criterion: { in: criteria } };
     }
 
