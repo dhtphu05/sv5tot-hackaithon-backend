@@ -58,12 +58,8 @@ type ApplicationRow = {
 export class CityAnalyticsService {
   async getSummary(user: AuthenticatedUser, query: CityAnalyticsQuery) {
     authorizeCityAnalytics(user);
-    const [yearGroups, schools, officers] = await Promise.all([
-      prisma.application.groupBy({
-        by: ['schoolYear'],
-        where: cityApplicationWhere({}, 'all'),
-        orderBy: { schoolYear: 'desc' },
-      }),
+    const [yearSelection, schools, officers] = await Promise.all([
+      getCitySchoolYears(),
       prisma.workspace.findMany({
         where: { type: WorkspaceType.SCHOOL, isActive: true },
         select: { id: true, code: true, name: true },
@@ -81,8 +77,9 @@ export class CityAnalyticsService {
       }),
     ]);
 
-    const availableSchoolYears = yearGroups.map((item) => item.schoolYear);
-    const schoolYear = query.schoolYear ?? availableSchoolYears[0] ?? null;
+    const { availableSchoolYears, latestConfiguredSchoolYear } = yearSelection;
+    const schoolYear =
+      query.schoolYear ?? latestConfiguredSchoolYear ?? availableSchoolYears[0] ?? null;
     const filters = { ...query, schoolYear: schoolYear ?? undefined };
     let rows: ApplicationRow[] = [];
     let cancelledCount = 0;
@@ -119,12 +116,9 @@ export class CityAnalyticsService {
 
   async listApplications(user: AuthenticatedUser, query: CityAnalyticsApplicationsQuery) {
     authorizeCityAnalytics(user);
-    const yearGroups = await prisma.application.groupBy({
-      by: ['schoolYear'],
-      where: cityApplicationWhere({}, 'all'),
-      orderBy: { schoolYear: 'desc' },
-    });
-    const schoolYear = query.schoolYear ?? yearGroups[0]?.schoolYear;
+    const { availableSchoolYears, latestConfiguredSchoolYear } = await getCitySchoolYears();
+    const schoolYear =
+      query.schoolYear ?? latestConfiguredSchoolYear ?? availableSchoolYears[0];
     const where = cityApplicationWhere({ ...query, schoolYear });
     if (query.finalStatus) where.finalStatus = query.finalStatus;
     const andFilters: Prisma.ApplicationWhereInput[] = [];
@@ -230,6 +224,31 @@ export class CityAnalyticsService {
       },
     };
   }
+}
+
+async function getCitySchoolYears() {
+  const [yearGroups, latestSeason] = await Promise.all([
+    prisma.application.groupBy({
+      by: ['schoolYear'],
+      where: cityApplicationWhere({}, 'all'),
+      orderBy: { schoolYear: 'desc' },
+    }),
+    prisma.cityReviewSeason.findFirst({
+      orderBy: { schoolYear: 'desc' },
+      select: { schoolYear: true },
+    }),
+  ]);
+  const availableSchoolYears = [
+    ...new Set([
+      ...(latestSeason ? [latestSeason.schoolYear] : []),
+      ...yearGroups.map((item) => item.schoolYear),
+    ]),
+  ].sort((left, right) => right.localeCompare(left));
+
+  return {
+    availableSchoolYears,
+    latestConfiguredSchoolYear: latestSeason?.schoolYear ?? null,
+  };
 }
 
 function authorizeCityAnalytics(user: AuthenticatedUser): void {

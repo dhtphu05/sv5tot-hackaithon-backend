@@ -14,6 +14,7 @@ import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
 const prismaMock = vi.hoisted(() => ({
   application: { findMany: vi.fn(), count: vi.fn(), groupBy: vi.fn() },
+  cityReviewSeason: { findFirst: vi.fn() },
   workspace: { findMany: vi.fn() },
   user: { findMany: vi.fn() },
 }));
@@ -104,6 +105,7 @@ describe('CityAnalyticsService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.application.groupBy.mockResolvedValue([{ schoolYear: '2025-2026' }]);
+    prismaMock.cityReviewSeason.findFirst.mockResolvedValue({ schoolYear: '2026-2027' });
     prismaMock.workspace.findMany.mockResolvedValue([
       { id: schoolAId, code: 'SCHOOL-A', name: 'School A' },
       { id: 'school-b', code: 'SCHOOL-B', name: 'School B' },
@@ -152,7 +154,7 @@ describe('CityAnalyticsService', () => {
 
     const summary = await service.getSummary(admin, {});
 
-    expect(summary.filters.schoolYear).toBe('2025-2026');
+    expect(summary.filters.schoolYear).toBe('2026-2027');
     expect(prismaMock.application.findMany).toHaveBeenCalledTimes(1);
     const [applicationQuery] = prismaMock.application.findMany.mock.calls[0];
     expect(applicationQuery.where).toMatchObject({
@@ -302,6 +304,7 @@ describe('CityAnalyticsService', () => {
 
   it('returns a null selected year and zero metrics when no City applications exist', async () => {
     prismaMock.application.groupBy.mockResolvedValue([]);
+    prismaMock.cityReviewSeason.findFirst.mockResolvedValue(null);
     prismaMock.workspace.findMany.mockResolvedValue([]);
     prismaMock.user.findMany.mockResolvedValue([]);
     const service = new CityAnalyticsService();
@@ -312,6 +315,24 @@ describe('CityAnalyticsService', () => {
     expect(summary.availableSchoolYears).toEqual([]);
     expect(summary.applications.created).toBe(0);
     expect(summary.finalResults.notFinalized).toBe(0);
+  });
+
+  it('defaults summary and drill-down to the latest configured season when that season has no applications yet', async () => {
+    prismaMock.application.groupBy.mockResolvedValue([{ schoolYear: '2025-2026' }]);
+    prismaMock.application.findMany.mockResolvedValue([]);
+    const service = new CityAnalyticsService();
+
+    const summary = await service.getSummary(cityManager, {});
+    const summaryQuery = prismaMock.application.findMany.mock.calls[0][0];
+
+    await service.listApplications(cityManager, { page: 1, limit: 20 });
+    const drillDownQuery = prismaMock.application.findMany.mock.calls[1][0];
+
+    expect(summary.filters.schoolYear).toBe('2026-2027');
+    expect(summary.availableSchoolYears).toEqual(['2026-2027', '2025-2026']);
+    expect(summary.applications.created).toBe(0);
+    expect(summaryQuery.where.schoolYear).toBe('2026-2027');
+    expect(drillDownQuery.where.schoolYear).toBe('2026-2027');
   });
 
   it('reports missing criterion slots separately from duplicate or non-City task rows', async () => {
