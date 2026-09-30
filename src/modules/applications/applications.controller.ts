@@ -1,11 +1,13 @@
 // Owns individual application draft, submission, timeline, supplement lifecycle.
 import type { Request, Response } from 'express';
 import { sendSuccess } from '../../shared/responses/api-response';
+import { ApplicationSubmissionModeService } from './application-submission-mode.service';
 import { ApplicationsService } from './applications.service';
 import { CitySubmissionEligibilityService } from './city-submission-eligibility.service';
 import { CityReviewSeasonsService } from '../manager/city-review-seasons.service';
 
 const applicationsService = new ApplicationsService();
+const applicationSubmissionModeService = new ApplicationSubmissionModeService();
 const citySubmissionEligibilityService = new CitySubmissionEligibilityService();
 const cityReviewSeasonsService = new CityReviewSeasonsService();
 
@@ -65,7 +67,9 @@ export async function getApplicationTimeline(req: Request, res: Response): Promi
 }
 
 export async function submitApplication(req: Request, res: Response): Promise<void> {
-  const data = await applicationsService.submit(req.user!, String(req.params.id), req.body);
+  const applicationId = String(req.params.id);
+  await applicationSubmissionModeService.assertGenericSubmitAllowed(req.user!, applicationId);
+  const data = await applicationsService.submit(req.user!, applicationId, req.body);
   sendSuccess(res, data, { requestId: req.requestId });
 }
 

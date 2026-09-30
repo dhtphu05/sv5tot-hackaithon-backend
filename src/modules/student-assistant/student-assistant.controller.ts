@@ -1,8 +1,10 @@
 import type { Request, Response } from 'express';
 import { sendSuccess } from '../../shared/responses/api-response';
+import { SupplementResubmitService } from '../applications/supplement-resubmit.service';
 import { StudentCommunicationAssistantService } from './student-assistant.service';
 
 const service = new StudentCommunicationAssistantService();
+const supplementResubmitService = new SupplementResubmitService();
 
 export async function getStudentAssistantContext(req: Request, res: Response): Promise<void> {
   const data = await service.getContext(req.user!, req.query as never);
@@ -46,7 +48,10 @@ export async function streamStudentAssistantAnswer(req: Request, res: Response):
 }
 
 export async function resubmitSupplement(req: Request, res: Response): Promise<void> {
-  const data = await service.resubmitSupplement(req.user!, String(req.params.reviewTaskId));
+  const data = await supplementResubmitService.resubmit(
+    req.user!,
+    String(req.params.reviewTaskId),
+  );
   sendSuccess(res, data, { requestId: req.requestId });
 }
 
