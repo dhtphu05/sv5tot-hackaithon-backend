@@ -765,6 +765,7 @@ export class ReviewService {
               : undefined,
         };
         let saved: Awaited<ReturnType<typeof tx.reviewTask.update>>;
+        let resolutionCaseId: string | null = null;
         if (isCityIndividualReviewTask(application)) {
           const updatedAt = new Date(Math.max(Date.now(), task.updatedAt.getTime() + 1));
           const claim = await tx.reviewTask.updateMany({
@@ -1013,7 +1014,7 @@ export class ReviewService {
             },
             orderBy: { createdAt: 'desc' },
           });
-          let resolutionCaseId = existingCase?.id ?? null;
+          resolutionCaseId = existingCase?.id ?? null;
           if (
             existingCase &&
             (!existingCase.reviewTaskId || (primaryEvidenceId && !existingCase.evidenceId))
@@ -1211,7 +1212,7 @@ export class ReviewService {
           }
         }
 
-        return { task: saved, applicationOutcome };
+        return { task: saved, applicationOutcome, resolutionCaseId };
       },
       { maxWait: 10_000, timeout: 30_000 },
     );
@@ -1230,6 +1231,7 @@ export class ReviewService {
         finalLevel: result.applicationOutcome?.finalLevel ?? application.finalLevel,
       },
       collectiveProfile: null,
+      resolutionCaseId: result.resolutionCaseId ?? undefined,
       reviewProgress: await getApplicationReviewProgress(applicationId),
     };
   }
