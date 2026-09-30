@@ -1,0 +1,46 @@
+import { ApplicationStatus, ReviewTaskStatus, Role, type PrismaClient } from '@prisma/client';
+import { prisma } from '../../infrastructure/database/prisma';
+import { AppError } from '../../shared/errors/app-error';
+import { ErrorCodes } from '../../shared/errors/error-codes';
+import type { AuthenticatedUser } from '../../shared/types/auth';
+
+export class ApplicationSubmissionModeService {
+  constructor(private readonly db: PrismaClient = prisma) {}
+
+  async assertGenericSubmitAllowed(user: AuthenticatedUser, applicationId: string): Promise<void> {
+    const application = await this.db.application.findFirst({
+      where: {
+        id: applicationId,
+        ...(user.role === Role.admin ? {} : { studentId: user.id }),
+      },
+      select: {
+        status: true,
+        submittedAt: true,
+        reviewTasks: {
+          where: { status: ReviewTaskStatus.supplement_required },
+          select: { id: true, criterion: true },
+        },
+      },
+    });
+
+    if (
+      application?.status !== ApplicationStatus.supplement_required ||
+      application.submittedAt === null
+    ) {
+      return;
+    }
+
+    if (application.reviewTasks.length === 1) return;
+
+    throw new AppError(
+      409,
+      ErrorCodes.APPLICATION_NOT_SUBMITTABLE,
+      application.reviewTasks.length === 0
+        ? 'Hồ sơ đang ở trạng thái cần bổ sung nhưng không còn yêu cầu bổ sung đang hoạt động. Vui lòng tải lại hồ sơ.'
+        : 'Hồ sơ có nhiều tiêu chí cần bổ sung. Vui lòng gửi lại từng tiêu chí được yêu cầu bổ sung.',
+      {
+        supplementTasks: application.reviewTasks,
+      },
+    );
+  }
+}
