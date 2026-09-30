@@ -30,7 +30,7 @@ const rawEnvSchema = z.object({
   DEFAULT_SCHOOL_YEAR: z
     .string()
     .regex(/^\d{4}-\d{4}$/)
-    .default('2025-2026'),
+    .default('2026-2027'),
   JWT_SECRET: z.string().min(1).optional(),
   JWT_ACCESS_SECRET: z.string().min(1).optional(),
   JWT_REFRESH_SECRET: z.string().min(1).optional(),
