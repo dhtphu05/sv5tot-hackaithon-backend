@@ -124,6 +124,32 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
     });
   });
 
+  it('returns authoritative institution and review context in the existing detail response', async () => {
+    const reviewRepository = {
+      findDetail: vi.fn().mockResolvedValue(
+        buildTask({ matchedEventId: null, dueDate: new Date('2026-10-15T00:00:00.000Z') }),
+      ),
+    };
+    const service = new ReviewService(reviewRepository as any, {} as any, {} as any);
+
+    const detail = await service.getTaskDetail(cityManagerUser(), 'task-1');
+
+    expect(detail.task).toMatchObject({
+      institutionName: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
+      workspace: {
+        id: workspaceId,
+        name: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
+        shortName: 'DHBK',
+        type: WorkspaceType.SCHOOL,
+      },
+      dueDate: new Date('2026-10-15T00:00:00.000Z'),
+    });
+    expect(detail.application).toMatchObject({
+      submittedAt: new Date('2026-09-01T00:00:00.000Z'),
+      finalStatus: 'pending',
+    });
+  });
+
   it('uses the resolved CriteriaVersion rule for City reviewer assessment and exposes authority metadata', async () => {
     const service = new ReviewService(
       { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as any,
@@ -466,6 +492,48 @@ describe('individual City review task permissions', () => {
     expect(result.task.permissions).toMatchObject({ canView: true, canAct: true, canClaim: false });
   });
 
+  it('validates evidence assessment membership and notes before any decision write', async () => {
+    const service = new ReviewService(
+      {
+        findDetail: vi.fn().mockResolvedValue(
+          buildTask({ matchedEventId: null, assignedOfficerId: 'city-officer' }),
+        ),
+      } as never,
+      { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) } as never,
+    );
+
+    await expect(
+      service.decideTask(cityOfficerUser(), 'task-1', {
+        decision: ReviewDecision.accepted,
+        officerSuggestedLevel: Level.city,
+        evidenceDecisions: [],
+        evidenceAssessments: [
+          {
+            evidenceId: 'foreign-evidence',
+            assessment: 'valid',
+          },
+        ],
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    await expect(
+      service.decideTask(cityOfficerUser(), 'task-1', {
+        decision: ReviewDecision.accepted,
+        officerSuggestedLevel: Level.city,
+        evidenceDecisions: [],
+        evidenceAssessments: [
+          {
+            evidenceId: 'evidence-1',
+            assessment: 'invalid',
+            note: 'ok',
+          },
+        ],
+      } as never),
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
   it('keeps a normal City Officer in waiting-for-student mode after requesting supplement', async () => {
     const service = new ReviewService(
       {
@@ -609,11 +677,18 @@ function buildTask(input: {
   criterion?: Criterion;
   status?: ReviewTaskStatus;
   targetLevel?: Level;
+  dueDate?: Date | null;
 }) {
   return {
     id: 'task-1',
     workspaceId,
-    workspace: { type: 'SCHOOL', isActive: true },
+    workspace: {
+      id: workspaceId,
+      name: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
+      shortName: 'DHBK',
+      type: 'SCHOOL',
+      isActive: true,
+    },
     applicationId: 'app-1',
     collectiveProfileId: null,
     assignedOfficerId: input.assignedOfficerId ?? null,
@@ -625,7 +700,7 @@ function buildTask(input: {
     levelAssessmentJson: null,
     decisionReason: null,
     supplementRequestJson: null,
-    dueDate: null,
+    dueDate: input.dueDate ?? null,
     createdAt: now,
     updatedAt: now,
     assignedOfficer: null,
@@ -638,6 +713,8 @@ function buildTask(input: {
       targetLevel: input.targetLevel ?? Level.city,
       applicationType: ApplicationType.individual,
       status: ApplicationStatus.under_review,
+      submittedAt: new Date('2026-09-01T00:00:00.000Z'),
+      finalStatus: 'pending',
       student: {
         id: 'student-1',
         fullName: 'Nguyễn Văn A',

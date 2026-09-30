@@ -33,7 +33,7 @@ export const reviewTaskListInclude = {
 } satisfies Prisma.ReviewTaskInclude;
 
 export const reviewTaskDetailInclude = {
-  workspace: { select: { type: true, isActive: true } },
+  workspace: { select: { id: true, name: true, shortName: true, type: true, isActive: true } },
   application: {
     include: {
       student: true,

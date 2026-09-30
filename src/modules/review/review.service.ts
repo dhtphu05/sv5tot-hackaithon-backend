@@ -336,6 +336,8 @@ export class ReviewService {
             targetLevel: taskForResponse.application.targetLevel,
             applicationType: taskForResponse.application.applicationType,
             status: taskForResponse.application.status,
+            submittedAt: taskForResponse.application.submittedAt,
+            finalStatus: taskForResponse.application.finalStatus,
           }
         : null,
       collectiveProfile: taskForResponse.collectiveProfile,
@@ -2201,6 +2203,16 @@ function toTaskDetail(
     criterion: task.criterion,
     status: task.status,
     decision: task.decision,
+    institutionName: task.workspace?.name ?? null,
+    workspace: task.workspace
+      ? {
+          id: task.workspace.id,
+          name: task.workspace.name,
+          shortName: task.workspace.shortName,
+          type: task.workspace.type,
+          isActive: task.workspace.isActive,
+        }
+      : null,
     officerNote: task.officerNote,
     officerSuggestedLevel: task.officerSuggestedLevel,
     levelAssessmentJson: task.levelAssessmentJson,
