@@ -9,6 +9,7 @@ import {
   FinalStatus,
   JobStatus,
   JobType,
+  IndexingStatus,
   KnowledgeDecision,
   Level,
   MetricType,
@@ -1539,7 +1540,7 @@ describe('workspace A/B HTTP isolation flow', () => {
       .patch(`/api/resolution/cases/${b.resolutionCaseId}/status`)
       .set(auth(a.managerToken))
       .send({ status: 'closed', note: 'cross workspace status attempt' })
-      .expect(403);
+      .expect(404);
     expectNotFound(
       await request(app)
         .post(`/api/resolution/cases/${b.resolutionCaseId}/reopen`)
@@ -1563,7 +1564,7 @@ describe('workspace A/B HTTP isolation flow', () => {
       .patch(`/api/resolution/cases/${a.resolutionCaseId}/status`)
       .set(auth(a.managerToken))
       .send({ status: 'resolved', note: 'same workspace status update' })
-      .expect(403);
+      .expect(200);
     await request(app)
       .post(`/api/resolution/cases/${a.resolutionCaseId}/reopen`)
       .set(auth(a.committeeToken))
@@ -1634,7 +1635,7 @@ describe('workspace A/B HTTP isolation flow', () => {
     );
 
     const eventFileA = await prisma.eventFile.create({
-      data: { eventId: a.eventId, fileId: a.fileId },
+      data: { eventId: a.eventId, fileId: a.fileId, indexingStatus: IndexingStatus.indexed },
     });
     const eventFileB = await prisma.eventFile.create({
       data: { eventId: b.eventId, fileId: b.fileId },

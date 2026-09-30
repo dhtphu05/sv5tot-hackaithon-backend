@@ -311,7 +311,6 @@ describe('non-AI individual application end-to-end flow', () => {
       .patch(`/api/applications/${applicationId}/draft`)
       .set('Authorization', `Bearer ${student.accessToken}`)
       .send({
-        targetLevel: Level.city,
         basicInfo: {
           fullName: `E2E Student ${runPrefix}`,
           studentCode,
