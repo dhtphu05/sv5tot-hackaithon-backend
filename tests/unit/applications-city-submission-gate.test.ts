@@ -623,16 +623,8 @@ describe('ApplicationsService City submission eligibility gate', () => {
     expect(mocks.notifications.create).not.toHaveBeenCalled();
   });
 
-<<<<<<< HEAD
-  it('uses the application version updated by its own stale precheck refresh outside City submission', async () => {
-    const { service: eligibility } = eligibilityService({
-      parentWorkspaceId: null,
-      recipients: [],
-    });
-=======
   it('uses the application version updated by its own stale precheck refresh for a City collective', async () => {
     const { service: eligibility } = eligibilityService({ parentWorkspaceId: null, recipients: [] });
->>>>>>> origin/main
     const beforePrecheck = application({
       applicationType: ApplicationType.collective,
       targetLevel: Level.city,

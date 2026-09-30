@@ -12,29 +12,18 @@ import {
   type PrismaClient,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-<<<<<<< HEAD
-import { CityReviewSeasonsService } from '../manager/city-review-seasons.service';
-import { NotificationsService } from '../notifications/notifications.service';
-=======
->>>>>>> origin/main
 import { auditActions } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
-<<<<<<< HEAD
-=======
 import { NotificationsService } from '../notifications/notifications.service';
 import { CityReviewSeasonsService } from '../manager/city-review-seasons.service';
->>>>>>> origin/main
 import { createApplicationAudit } from './application.helpers';
 import {
   assertApplicationNotCancelled,
   lockApplicationAndAssertNotCancelled,
 } from './application-lifecycle.policy';
-<<<<<<< HEAD
-=======
 import { assertStudentApplicationIsCity } from './application-submission.policy';
->>>>>>> origin/main
 
 const activeProcessingStatuses = new Set<IndexingStatus>([
   IndexingStatus.pending_indexing,
@@ -75,10 +64,7 @@ export class SupplementResubmitService {
       await lockApplicationAndAssertNotCancelled(tx, initialTask.applicationId!);
       const task = await this.getOwnedSupplementTask(tx, user, reviewTaskId);
       const application = task.application!;
-<<<<<<< HEAD
-=======
       assertStudentApplicationIsCity(user, application);
->>>>>>> origin/main
       const request = activeSupplementRequest(task);
       if (!request) {
         throw new AppError(
@@ -104,32 +90,6 @@ export class SupplementResubmitService {
         );
       }
 
-<<<<<<< HEAD
-      const taskUpdate = await tx.reviewTask.updateMany({
-        where: {
-          id: task.id,
-          applicationId: task.applicationId!,
-          status: ReviewTaskStatus.supplement_required,
-        },
-        data: {
-          status: ReviewTaskStatus.waiting,
-          decision: null,
-          officerNote: null,
-          officerSuggestedLevel: null,
-          levelAssessmentJson: Prisma.JsonNull,
-          decisionReason: null,
-        },
-      });
-      if (taskUpdate.count !== 1) {
-        throw new AppError(
-          409,
-          ErrorCodes.APPLICATION_LOCKED,
-          'Yêu cầu bổ sung đã thay đổi. Vui lòng tải lại trước khi gửi.',
-        );
-      }
-
-=======
->>>>>>> origin/main
       const now = new Date();
       const evidenceLinks = application.evidences
         .filter((evidence) => evidence.criterion === task.criterion)
@@ -175,8 +135,6 @@ export class SupplementResubmitService {
         },
       });
 
-<<<<<<< HEAD
-=======
       const taskUpdate = await tx.reviewTask.updateMany({
         where: {
           id: task.id,
@@ -200,7 +158,6 @@ export class SupplementResubmitService {
         );
       }
 
->>>>>>> origin/main
       const remainingSupplementTasks = await tx.reviewTask.count({
         where: {
           applicationId: task.applicationId!,
@@ -243,14 +200,10 @@ export class SupplementResubmitService {
             type: NotificationType.review_updated,
             title: 'Sinh viên đã gửi lại bổ sung',
             message: `Sinh viên đã gửi lại bổ sung cho tiêu chí ${criterionLabel(task.criterion)}.`,
-<<<<<<< HEAD
-            metadata: { supplementRequestId: durableRequest.id, criterion: task.criterion },
-=======
             metadata: {
               supplementRequestId: durableRequest.id,
               criterion: task.criterion,
             },
->>>>>>> origin/main
           },
           tx,
         );
@@ -321,13 +274,9 @@ function activeSupplementRequest(task: SupplementTaskRecord) {
 
   const legacy = asRecord(task.supplementRequestJson);
   const reason =
-<<<<<<< HEAD
-    stringFromRecord(legacy, 'reason') ?? stringFromRecord(legacy, 'note') ?? task.officerNote;
-=======
     stringFromRecord(legacy, 'reason') ??
     stringFromRecord(legacy, 'note') ??
     task.officerNote;
->>>>>>> origin/main
   if (!reason) return null;
 
   return {
@@ -381,13 +330,7 @@ function evaluateSupplementReadiness(task: SupplementTaskRecord) {
   return { canResubmit: true, reason: null };
 }
 
-<<<<<<< HEAD
-function jsonInputOrNull(
-  value: Prisma.JsonValue | null | undefined,
-): Prisma.InputJsonValue | typeof Prisma.JsonNull {
-=======
 function jsonInputOrNull(value: unknown): Prisma.InputJsonValue | typeof Prisma.JsonNull {
->>>>>>> origin/main
   return value === null || value === undefined
     ? Prisma.JsonNull
     : (value as Prisma.InputJsonValue);
