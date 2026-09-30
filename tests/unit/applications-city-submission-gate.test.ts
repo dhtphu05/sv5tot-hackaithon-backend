@@ -1,4 +1,4 @@
-import { ApplicationStatus, ApplicationType, Level, Role } from '@prisma/client';
+import { ApplicationStatus, ApplicationType, Level, ReviewTaskStatus, Role } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
@@ -208,18 +208,20 @@ function citySubmissionQueryMock() {
   return vi.fn(async (parts: TemplateStringsArray) => {
     const sql = parts.join('');
     if (sql.includes('FROM "CityReviewSeason"')) {
-      return [{
-        id: 'city-season-a',
-        schoolYear: '2025-2026',
-        submissionOpensAt: new Date('2000-01-01T00:00:00.000Z'),
-        submissionClosesAt: new Date('2099-01-01T00:00:00.000Z'),
-        reviewDeadlineAt: null,
-        supplementDeadlineAt: new Date('2099-02-01T00:00:00.000Z'),
-        finalizationDeadlineAt: null,
-        version: 1,
-        createdAt: new Date('2026-08-01T00:00:00.000Z'),
-        updatedAt: new Date('2026-08-01T00:00:00.000Z'),
-      }];
+      return [
+        {
+          id: 'city-season-a',
+          schoolYear: '2025-2026',
+          submissionOpensAt: new Date('2000-01-01T00:00:00.000Z'),
+          submissionClosesAt: new Date('2099-01-01T00:00:00.000Z'),
+          reviewDeadlineAt: null,
+          supplementDeadlineAt: new Date('2099-02-01T00:00:00.000Z'),
+          finalizationDeadlineAt: null,
+          version: 1,
+          createdAt: new Date('2026-08-01T00:00:00.000Z'),
+          updatedAt: new Date('2026-08-01T00:00:00.000Z'),
+        },
+      ];
     }
     if (sql.includes('FROM "CitySubmissionWindowException"')) return [];
     if (sql.includes('FROM "Application"')) return [{ id: 'application-a' }];
@@ -272,14 +274,20 @@ describe('ApplicationsService City submission eligibility gate', () => {
   });
 
   it('blocks a City submission before precheck persistence or review side effects when the window is not open', async () => {
-    const { service: eligibility } = eligibilityService({ parentWorkspaceId: null, recipients: [] });
+    const { service: eligibility } = eligibilityService({
+      parentWorkspaceId: null,
+      recipients: [],
+    });
     const transaction = {
-      $queryRaw: vi.fn()
-        .mockResolvedValueOnce([{
-          schoolYear: '2025-2026',
-          submissionOpensAt: new Date('2026-10-01T00:00:00.000Z'),
-          submissionClosesAt: new Date('2026-11-01T00:00:00.000Z'),
-        }])
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValueOnce([
+          {
+            schoolYear: '2025-2026',
+            submissionOpensAt: new Date('2026-10-01T00:00:00.000Z'),
+            submissionClosesAt: new Date('2026-11-01T00:00:00.000Z'),
+          },
+        ])
         .mockResolvedValueOnce([]),
     };
     mocks.prisma.$transaction.mockImplementation(async (callback) => callback(transaction));
@@ -316,13 +324,18 @@ describe('ApplicationsService City submission eligibility gate', () => {
     });
 
     await expect(
-      buildService(eligibility).submit({ ...student, studentCode: null } as never, 'application-a', {
-        allowSubmitWithWarnings: true,
-      }),
+      buildService(eligibility).submit(
+        { ...student, studentCode: null } as never,
+        'application-a',
+        {
+          allowSubmitWithWarnings: true,
+        },
+      ),
     ).rejects.toMatchObject({
       statusCode: 409,
       code: 'CITY_SUBMISSION_NEEDS_VERIFICATION',
-      message: 'Hệ thống chưa thể tự động xác minh thông tin của bạn với danh sách công nhận. Hồ sơ cần được kiểm tra lại.',
+      message:
+        'Hệ thống chưa thể tự động xác minh thông tin của bạn với danh sách công nhận. Hồ sơ cần được kiểm tra lại.',
     });
 
     expect(mocks.prisma.precheckResult.findFirst).not.toHaveBeenCalled();
@@ -345,9 +358,13 @@ describe('ApplicationsService City submission eligibility gate', () => {
       }),
     );
 
-    const result = await buildService(eligibility).submit({ ...student, studentCode: null }, 'application-a', {
-      allowSubmitWithWarnings: true,
-    });
+    const result = await buildService(eligibility).submit(
+      { ...student, studentCode: null },
+      'application-a',
+      {
+        allowSubmitWithWarnings: true,
+      },
+    );
 
     expect(result.application.status).toBe('under_review');
     expect(repository.findManualVerification).toHaveBeenCalledWith('application-a');
@@ -470,7 +487,12 @@ describe('ApplicationsService City submission eligibility gate', () => {
       applicationDraftSnapshot: { create: vi.fn().mockResolvedValue({}) },
       reviewTask: {
         create: vi.fn().mockImplementation(async ({ data }) => {
-          const task = { ...data, id: `task-${createdTasks.length + 1}`, decision: null, assignedOfficer: { id: 'officer-a' } };
+          const task = {
+            ...data,
+            id: `task-${createdTasks.length + 1}`,
+            decision: null,
+            assignedOfficer: { id: 'officer-a' },
+          };
           createdTasks.push(task);
           return task;
         }),
@@ -480,16 +502,14 @@ describe('ApplicationsService City submission eligibility gate', () => {
     };
     mocks.prisma.$transaction.mockImplementation(async (callback) => callback(tx));
     mocks.notifications.create.mockResolvedValue({ id: 'notification-a' });
-    mocks.prisma.application.findUnique
-      .mockResolvedValueOnce(source)
-      .mockResolvedValueOnce({
-        applicationType: ApplicationType.individual,
-        targetLevel: Level.city,
-        status: ApplicationStatus.ready_to_submit,
-        submittedAt: null,
-        currentDraftVersion: 1,
-        updatedAt: source.updatedAt,
-      });
+    mocks.prisma.application.findUnique.mockResolvedValueOnce(source).mockResolvedValueOnce({
+      applicationType: ApplicationType.individual,
+      targetLevel: Level.city,
+      status: ApplicationStatus.ready_to_submit,
+      submittedAt: null,
+      currentDraftVersion: 1,
+      updatedAt: source.updatedAt,
+    });
     mocks.prisma.precheckResult.findFirst.mockResolvedValue({
       createdAt: source.updatedAt,
       resultJson: {
@@ -532,7 +552,9 @@ describe('ApplicationsService City submission eligibility gate', () => {
       'volunteer',
       'integration',
     ]);
-    expect(createdTasks.every((task) => task.status === 'waiting' && task.decision === null)).toBe(true);
+    expect(createdTasks.every((task) => task.status === 'waiting' && task.decision === null)).toBe(
+      true,
+    );
     expect(repository.findConfirmedUniversityRecipients).not.toHaveBeenCalled();
   });
 
@@ -573,7 +595,10 @@ describe('ApplicationsService City submission eligibility gate', () => {
   });
 
   it('uses the application version updated by its own stale precheck refresh outside City submission', async () => {
-    const { service: eligibility } = eligibilityService({ parentWorkspaceId: null, recipients: [] });
+    const { service: eligibility } = eligibilityService({
+      parentWorkspaceId: null,
+      recipients: [],
+    });
     const beforePrecheck = application({
       targetLevel: Level.school,
       status: ApplicationStatus.draft,
@@ -710,11 +735,7 @@ describe('ApplicationsService City submission eligibility gate', () => {
 
     expect(result.application.status).toBe('under_review');
     expect(mocks.precheck.run).not.toHaveBeenCalled();
-    expect(mocks.precheck.persistPreparedInTransaction).toHaveBeenCalledWith(
-      tx,
-      student,
-      prepared,
-    );
+    expect(mocks.precheck.persistPreparedInTransaction).toHaveBeenCalledWith(tx, student, prepared);
     expect(tx.application.updateMany).toHaveBeenCalledWith({
       where: expect.objectContaining({
         status: ApplicationStatus.ready_to_submit,
@@ -776,20 +797,20 @@ describe('ApplicationsService City submission eligibility gate', () => {
     });
 
     await expect(
-      buildService(eligibility).submit(
-        { ...student, studentCode: null },
-        'application-a',
-        { allowSubmitWithWarnings: true },
-      ),
+      buildService(eligibility).submit({ ...student, studentCode: null }, 'application-a', {
+        allowSubmitWithWarnings: true,
+      }),
     ).rejects.toMatchObject({
       statusCode: 409,
       code: 'CITY_SUBMISSION_NEEDS_VERIFICATION',
     });
 
     expect(tx.$queryRaw).toHaveBeenCalled();
-    expect(tx.$queryRaw.mock.calls.some(([query]) =>
-      (query as TemplateStringsArray).join('').includes('FOR NO KEY UPDATE'),
-    )).toBe(true);
+    expect(
+      tx.$queryRaw.mock.calls.some(([query]) =>
+        (query as TemplateStringsArray).join('').includes('FOR NO KEY UPDATE'),
+      ),
+    ).toBe(true);
     expect(repository.findStudentIdentity).toHaveBeenLastCalledWith('student-a', tx);
     expect(tx.application.updateMany).not.toHaveBeenCalled();
     expect(tx.application.update).not.toHaveBeenCalled();
@@ -811,7 +832,16 @@ describe('ApplicationsService City submission eligibility gate', () => {
     const preparedPrecheck = {
       application: application(),
       level: Level.city,
-      criteria: { criteriaVersionId: null, versionName: 'fallback-city', schoolYear: '2025-2026', unitScope: 'default', level: Level.city, isFallback: true, warnings: [], rules: [] },
+      criteria: {
+        criteriaVersionId: null,
+        versionName: 'fallback-city',
+        schoolYear: '2025-2026',
+        unitScope: 'default',
+        level: Level.city,
+        isFallback: true,
+        warnings: [],
+        rules: [],
+      },
       completion: [],
       result: {
         applicationId: 'application-a',
@@ -927,7 +957,12 @@ describe('ApplicationsService City submission eligibility gate', () => {
       submittedAt: new Date('2026-09-01T00:00:00.000Z'),
       updatedAt: new Date('2026-09-01T00:00:00.000Z'),
       reviewTasks: [
-        { id: 'review-task-a', criterion: 'academic', status: 'supplement_required', assignedOfficer: null },
+        {
+          id: 'review-task-a',
+          criterion: 'academic',
+          status: 'supplement_required',
+          assignedOfficer: null,
+        },
       ],
     });
     const afterPrecheck = {
@@ -964,6 +999,14 @@ describe('ApplicationsService City submission eligibility gate', () => {
         updatedAt: afterPrecheck.updatedAt,
       }),
       data: expect.objectContaining({ status: ApplicationStatus.under_review }),
+    });
+    expect(tx.reviewTask.updateMany).toHaveBeenCalledWith({
+      where: { applicationId: 'application-a', status: ReviewTaskStatus.supplement_required },
+      data: expect.objectContaining({
+        status: ReviewTaskStatus.waiting,
+        decision: null,
+        officerNote: null,
+      }),
     });
     expect(tx.supplementRequest.update).toHaveBeenCalledWith({
       where: { id: 'supplement-a' },

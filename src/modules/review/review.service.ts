@@ -36,6 +36,7 @@ import { EvidenceKnowledgeService } from '../evidence-knowledge/evidence-knowled
 import { buildEmailDedupeKey, EmailOutboxService } from '../mail/email-outbox.service';
 import { createNotification, NotificationsService } from '../notifications/notifications.service';
 import { ReviewAssignmentService } from './review-assignment.service';
+import { resolveReviewCriteriaForTask, type ReviewCriteriaResolution } from './review-criteria';
 import { getApplicationReviewProgress } from './review-progress.service';
 import { ReviewRepository, reviewTaskListInclude } from './review.repository';
 import type {
@@ -54,6 +55,7 @@ type ReviewTaskPermissionReason =
   | 'claimable_by_specialization'
   | 'demo_specialization_access'
   | 'assigned_to_other'
+  | 'supplement_pending'
   | 'finalized'
   | 'out_of_scope'
   | 'role_not_allowed';
@@ -175,7 +177,9 @@ export class ReviewService {
       }).length,
     };
 
-    const bottleneckCriteria = isCityReviewRole(user.role) ? coreCriteria : Object.values(Criterion);
+    const bottleneckCriteria = isCityReviewRole(user.role)
+      ? coreCriteria
+      : Object.values(Criterion);
     const bottleneckByCriterion = bottleneckCriteria.map((criterion) => ({
       criterion,
       total: listItems.filter((item) => item.criterion === criterion).length,
@@ -321,6 +325,8 @@ export class ReviewService {
         })
       : [];
 
+    const criterionLevelAssessment = await buildCriterionLevelAssessment(taskForResponse);
+
     return {
       task: toTaskDetail(taskForResponse, permissions),
       application: taskForResponse.application
@@ -454,8 +460,8 @@ export class ReviewService {
         null,
       cascade: taskForResponse.application?.cascadeReviews[0] ?? null,
       knowledgeBaseMatches,
-      criteriaChecklist: buildCriteriaChecklist(taskForResponse),
-      criterionLevelAssessment: buildCriterionLevelAssessment(taskForResponse),
+      criteriaChecklist: buildCriteriaChecklist(criterionLevelAssessment),
+      criterionLevelAssessment,
       audit: auditLogs,
     };
   }
@@ -499,7 +505,13 @@ export class ReviewService {
       ? await prisma.$transaction(async (tx) => {
           await lockApplicationAndAssertNotCancelled(tx, task.applicationId!);
           const claimResult = await tx.reviewTask.updateMany({
-            where: { id: task.id, assignedOfficerId: null },
+            where: {
+              id: task.id,
+              assignedOfficerId: null,
+              status: task.status,
+              decision: null,
+              updatedAt: task.updatedAt,
+            },
             data: {
               assignedOfficerId: user.id,
               status:
@@ -542,7 +554,13 @@ export class ReviewService {
     task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
   ) {
     const claimResult = await prisma.reviewTask.updateMany({
-      where: { id: task.id, assignedOfficerId: null },
+      where: {
+        id: task.id,
+        assignedOfficerId: null,
+        status: task.status,
+        decision: null,
+        updatedAt: task.updatedAt,
+      },
       data: {
         assignedOfficerId: user.id,
         status: task.status === ReviewTaskStatus.waiting ? ReviewTaskStatus.reviewing : task.status,
@@ -724,438 +742,194 @@ export class ReviewService {
           )
         : null;
 
-    const result = await prisma.$transaction(async (tx) => {
-      await lockApplicationAndAssertNotCancelled(tx, applicationId);
-      const status = mapDecisionToStatus(effectiveDecision);
-      const taskUpdate = {
-        status,
-        decision: effectiveDecision,
-        officerNote,
-        officerSuggestedLevel: input.officerSuggestedLevel ?? null,
-        levelAssessmentJson: {
-          ...(input.levelAssessmentJson ?? {}),
-          evidenceAssessments: input.evidenceAssessments,
-          submittedAt: new Date().toISOString(),
-        } as Prisma.InputJsonValue,
-        decisionReason: officerNote,
-        supplementRequestJson:
-          effectiveDecision === ReviewDecision.supplement_required
-            ? ((input.supplementRequestJson ?? { note: officerNote }) as Prisma.InputJsonValue)
-            : undefined,
-      };
-      let saved: Awaited<ReturnType<typeof tx.reviewTask.update>>;
-      if (isCityIndividualReviewTask(application)) {
-        const updatedAt = new Date(Math.max(Date.now(), task.updatedAt.getTime() + 1));
-        const claim = await tx.reviewTask.updateMany({
-          where: {
-            id: task.id,
-            status: task.status,
-            decision: task.decision,
-            assignedOfficerId: task.assignedOfficerId,
-            updatedAt: task.updatedAt,
-          },
-          data: { ...taskUpdate, updatedAt },
-        });
-        if (claim.count !== 1) {
-          throw new AppError(
-            409,
-            ErrorCodes.REVIEW_TASK_ALREADY_DECIDED,
-            'Review task changed before this decision was saved. Refresh and try again.',
-          );
-        }
-        saved = await tx.reviewTask.findUniqueOrThrow({
-          where: { id: task.id },
-          include: { application: { include: { student: true } }, assignedOfficer: true },
-        });
-      } else {
-        saved = await tx.reviewTask.update({
-          where: { id: task.id },
-          data: taskUpdate,
-          include: { application: { include: { student: true } }, assignedOfficer: true },
-        });
-      }
-
-      // Update specific or all linked evidences based on decision status
-      const evidenceIds = task.evidences.map((e) => e.evidenceId);
-      if (input.evidenceDecisions.length > 0) {
-        for (const ed of input.evidenceDecisions) {
-          await tx.evidence.update({
-            where: { id: ed.evidenceId },
-            data: { status: ed.status },
-          });
-        }
-      } else {
-        let defaultEvidenceStatus: EvidenceStatus = EvidenceStatus.under_review;
-        if (effectiveDecision === ReviewDecision.accepted)
-          defaultEvidenceStatus = EvidenceStatus.accepted;
-        if (effectiveDecision === ReviewDecision.rejected)
-          defaultEvidenceStatus = EvidenceStatus.rejected;
-        if (effectiveDecision === ReviewDecision.supplement_required)
-          defaultEvidenceStatus = EvidenceStatus.needs_supplement;
-        if (effectiveDecision === ReviewDecision.resolution_needed)
-          defaultEvidenceStatus = EvidenceStatus.resolution_needed;
-
-        await tx.evidence.updateMany({
-          where: { id: { in: evidenceIds } },
-          data: { status: defaultEvidenceStatus },
-        });
-      }
-
-      // Audit status updates
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: 'EVIDENCE_STATUS_UPDATED',
-        targetType: 'review_task',
-        targetId: task.id,
-        applicationId,
-        afterStateJson: {
-          decision: effectiveDecision,
-          requestedDecision: input.decision,
-        },
-      });
-
-      if (effectiveDecision === ReviewDecision.accepted) {
-        const acceptedEvidenceIds = input.evidenceDecisions.length
-          ? input.evidenceDecisions
-              .filter((item) => item.status === EvidenceStatus.accepted)
-              .map((item) => item.evidenceId)
-          : evidenceIds;
-        for (const evidenceId of acceptedEvidenceIds) {
-          await this.evidenceKnowledgePublisher.publishAcceptedEvidence(tx, user, {
-            evidenceId,
-            reviewTaskId: task.id,
-            approvalSource: ApprovedEvidenceApprovalSource.officer,
-            note: officerNote,
-          });
-        }
-      }
-
-      if (effectiveDecision === ReviewDecision.supplement_required) {
-        const supplementRequest = (input.supplementRequestJson ?? {}) as Record<string, unknown>;
-        const supplementEvidenceIds = input.evidenceDecisions
-          .filter((item) => item.status === EvidenceStatus.needs_supplement)
-          .map((item) => item.evidenceId);
-        const selectedEvidenceIds = supplementEvidenceIds.length
-          ? supplementEvidenceIds
-          : input.evidenceDecisions.length
-            ? input.evidenceDecisions.map((item) => item.evidenceId)
-            : evidenceIds;
-        const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
-        const supplementDeadline = readSupplementDeadline(input.supplementRequestJson);
-        const dueDate = supplementDeadline ? new Date(supplementDeadline) : null;
-        await tx.application.update({
-          where: { id: applicationId },
-          data: { status: ApplicationStatus.supplement_required },
-        });
-        if (dueDate) {
-          await tx.reviewTask.update({
-            where: { id: task.id },
-            data: { dueDate },
-          });
-        }
-        const activeSupplement = await tx.supplementRequest.findFirst({
-          where: { reviewTaskId: task.id, status: 'active' },
-          orderBy: { createdAt: 'desc' },
-        });
-        const supplementData = {
-          workspaceId: task.workspaceId,
-          applicationId,
-          reviewTaskId: task.id,
-          criterion: task.criterion,
-          officialMessage: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
-          requestedFieldsJson: (supplementRequest.requestedFields ?? []) as Prisma.InputJsonValue,
-          evidenceScopeJson: { evidenceIds: selectedEvidenceIds } as Prisma.InputJsonValue,
-          acceptedEvidenceTypesJson:
-            supplementRequest.acceptedEvidenceTypes === undefined
-              ? Prisma.JsonNull
-              : (supplementRequest.acceptedEvidenceTypes as Prisma.InputJsonValue),
-          deadline: dueDate,
-          createdByUserId: user.id,
-          historyJson: [
-            {
-              at: new Date().toISOString(),
-              actorId: user.id,
-              action: activeSupplement ? 'officer_updated_request' : 'officer_created_request',
-            },
-          ] as Prisma.InputJsonValue,
-        };
-        const savedSupplement = activeSupplement
-          ? await tx.supplementRequest.update({
-              where: { id: activeSupplement.id },
-              data: {
-                ...supplementData,
-                historyJson: appendSupplementHistory(activeSupplement.historyJson, {
-                  at: new Date().toISOString(),
-                  actorId: user.id,
-                  action: 'officer_updated_request',
-                }),
-              },
-            })
-          : await tx.supplementRequest.create({ data: supplementData });
-        const notification = await this.notificationsService.create(
-          {
-            userId: application.studentId,
-            applicationId,
-            evidenceId: primaryEvidenceId,
-            reviewTaskId: task.id,
-            metadata: {
-              criterion: task.criterion,
-              evidenceIds: selectedEvidenceIds,
-              deadline: supplementRequest.deadline ?? null,
-              requestedFields: supplementRequest.requestedFields ?? [],
-            },
-            type: NotificationType.supplement_required,
-            title: 'Cần bổ sung minh chứng',
-            message: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
-          },
-          tx,
-        );
-        await this.emailOutboxService.enqueue(
-          {
-            recipientEmail: application.student.email,
-            recipientName: application.student.fullName,
-            relatedUserId: application.studentId,
-            applicationId,
-            notificationId: notification.id,
-            templateKey: 'supplement_requested',
-            payload: {
-              studentName: application.student.fullName,
-              recipientName: application.student.fullName,
-              applicationCode: applicationId,
-              applicationId,
-              schoolYear: application.schoolYear,
-              targetLevel: application.targetLevel,
-              criterion: task.criterion,
-              criterionName: task.criterion,
-              deadline: readSupplementDeadline(input.supplementRequestJson),
-              reason: officerNote,
-              reviewNote: officerNote,
-              supplementSummary: buildSupplementSummary(input.supplementRequestJson, officerNote),
-            },
-            dedupeKey: buildEmailDedupeKey('supplement_requested', {
-              applicationId,
-              reviewTaskId: task.id,
-              criterion: task.criterion,
-              supplementRequestJson: input.supplementRequestJson ?? null,
-              officerNote,
-            }),
-            actorId: user.id,
-            actorRole: user.role,
-          },
-          tx,
-        );
-        await createApplicationAudit(tx, {
-          actorId: user.id,
-          actorRole: user.role,
-          action: auditActions.SUPPLEMENT_REQUESTED,
-          targetType: 'supplement_request',
-          targetId: savedSupplement.id,
-          applicationId,
-          workspaceId: task.workspaceId,
-          afterStateJson: {
-            reviewTaskId: task.id,
-            criterion: task.criterion,
-            evidenceIds: selectedEvidenceIds,
-            requestedFields: supplementRequest.requestedFields ?? [],
-            deadline: supplementDeadline,
-          },
-          note: officerNote,
-        });
-      }
-
-      if (effectiveDecision === ReviewDecision.resolution_needed) {
-        const resolutionEvidenceIds = input.evidenceDecisions
-          .filter((item) => item.status === EvidenceStatus.resolution_needed)
-          .map((item) => item.evidenceId);
-        const selectedEvidenceIds = resolutionEvidenceIds.length
-          ? resolutionEvidenceIds
-          : input.evidenceDecisions.length
-            ? input.evidenceDecisions.map((item) => item.evidenceId)
-            : evidenceIds;
-        const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
-        await tx.application.update({
-          where: { id: applicationId },
-          data: { status: ApplicationStatus.resolution_needed },
-        });
-
-        const existingCase = await tx.resolutionCase.findFirst({
-          where: {
-            applicationId,
-            status: { in: ['open', 'in_review'] },
-            OR: [
-              { reviewTaskId: task.id },
-              ...(selectedEvidenceIds.length > 0
-                ? [{ evidenceId: { in: selectedEvidenceIds } }]
-                : [{ reviewTaskId: null, evidenceId: null }]),
-            ],
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-        let resolutionCaseId = existingCase?.id ?? null;
-        if (
-          existingCase &&
-          (!existingCase.reviewTaskId || (primaryEvidenceId && !existingCase.evidenceId))
-        ) {
-          await tx.resolutionCase.update({
-            where: { id: existingCase.id },
-            data: {
-              reviewTaskId: existingCase.reviewTaskId ?? task.id,
-              evidenceId: existingCase.evidenceId ?? primaryEvidenceId,
-            },
-          });
-        } else if (!existingCase) {
-          const createdCase = await tx.resolutionCase.create({
-            data: {
-              applicationId,
-              workspaceId: task.workspaceId,
-              evidenceId: primaryEvidenceId,
-              reviewTaskId: task.id,
-              reason: officerNote ?? 'Cần hội đồng xem xét.',
-              createdBy: user.id,
-              status: 'open',
-            },
-          });
-          resolutionCaseId = createdCase.id;
-        }
-
-        await this.notificationsService.create(
-          {
-            userId: application.studentId,
-            workspaceId: task.workspaceId,
-            applicationId,
-            evidenceId: primaryEvidenceId,
-            reviewTaskId: task.id,
-            resolutionCaseId,
-            metadata: {
-              criterion: task.criterion,
-              evidenceIds: selectedEvidenceIds,
-              primaryEvidenceId,
-              resolutionCaseId,
-            },
-            type: NotificationType.review_updated,
-            title: 'Hồ sơ được chuyển hội đồng xem xét',
-            message: officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
-          },
-          tx,
-        );
-        await notifyManagers(
-          tx,
-          applicationId,
-          task.workspaceId,
-          resolutionCaseId,
-          'Có hồ sơ cần xử lý đối sánh',
-          officerNote ?? 'Một task được chuyển sang cần hội đồng xem xét.',
-          {
-            reviewTaskId: task.id,
-            criterion: task.criterion,
-            evidenceIds: selectedEvidenceIds,
-            primaryEvidenceId,
-            resolutionCaseId,
-          },
-        );
-      }
-
-      const applicationOutcome = await syncApplicationReviewOutcome(tx, applicationId, {
-        applicationType: application.applicationType,
-        targetLevel: application.targetLevel,
-      });
-
-      // Audit application status changes
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: 'APPLICATION_STATUS_UPDATED',
-        targetType: 'application',
-        targetId: applicationId,
-        applicationId,
-        beforeStateJson: {
-          status: application.status,
-          finalStatus: application.finalStatus,
-          finalLevel: application.finalLevel,
-        },
-        afterStateJson: applicationOutcome
-          ? {
-              status: applicationOutcome.status,
-              finalStatus: applicationOutcome.finalStatus,
-              finalLevel: applicationOutcome.finalLevel,
-            }
-          : { status: application.status },
-      });
-
-      let auditActionName = 'REVIEW_DECISION_ACCEPTED';
-      if (effectiveDecision === ReviewDecision.rejected) auditActionName = 'REVIEW_DECISION_REJECTED';
-      if (effectiveDecision === ReviewDecision.supplement_required)
-        auditActionName = 'REVIEW_SUPPLEMENT_REQUESTED';
-      if (effectiveDecision === ReviewDecision.resolution_needed)
-        auditActionName = 'REVIEW_ESCALATED_TO_RESOLUTION';
-
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: auditActionName,
-        targetType: 'review_task',
-        targetId: task.id,
-        applicationId,
-        afterStateJson: {
+    const result = await prisma.$transaction(
+      async (tx) => {
+        await lockApplicationAndAssertNotCancelled(tx, applicationId);
+        const status = mapDecisionToStatus(effectiveDecision);
+        const taskUpdate = {
           status,
           decision: effectiveDecision,
-          requestedDecision: input.decision,
+          officerNote,
           officerSuggestedLevel: input.officerSuggestedLevel ?? null,
-          evidenceAssessments: input.evidenceAssessments,
-        },
-        note: officerNote,
-      });
+          levelAssessmentJson: {
+            ...(input.levelAssessmentJson ?? {}),
+            evidenceAssessments: input.evidenceAssessments,
+            submittedAt: new Date().toISOString(),
+          } as Prisma.InputJsonValue,
+          decisionReason: officerNote,
+          supplementRequestJson:
+            effectiveDecision === ReviewDecision.supplement_required
+              ? ((input.supplementRequestJson ?? { note: officerNote }) as Prisma.InputJsonValue)
+              : undefined,
+        };
+        let saved: Awaited<ReturnType<typeof tx.reviewTask.update>>;
+        if (isCityIndividualReviewTask(application)) {
+          const updatedAt = new Date(Math.max(Date.now(), task.updatedAt.getTime() + 1));
+          const claim = await tx.reviewTask.updateMany({
+            where: {
+              id: task.id,
+              status: task.status,
+              decision: task.decision,
+              assignedOfficerId: task.assignedOfficerId,
+              updatedAt: task.updatedAt,
+            },
+            data: { ...taskUpdate, updatedAt },
+          });
+          if (claim.count !== 1) {
+            throw new AppError(
+              409,
+              ErrorCodes.REVIEW_TASK_ALREADY_DECIDED,
+              'Review task changed before this decision was saved. Refresh and try again.',
+            );
+          }
+          saved = await tx.reviewTask.findUniqueOrThrow({
+            where: { id: task.id },
+            include: { application: { include: { student: true } }, assignedOfficer: true },
+          });
+        } else {
+          saved = await tx.reviewTask.update({
+            where: { id: task.id },
+            data: taskUpdate,
+            include: { application: { include: { student: true } }, assignedOfficer: true },
+          });
+        }
 
-      if (precedentContext) {
+        // Update specific or all linked evidences based on decision status
+        const evidenceIds = task.evidences.map((e) => e.evidenceId);
+        if (input.evidenceDecisions.length > 0) {
+          for (const ed of input.evidenceDecisions) {
+            await tx.evidence.update({
+              where: { id: ed.evidenceId },
+              data: { status: ed.status },
+            });
+          }
+        } else {
+          let defaultEvidenceStatus: EvidenceStatus = EvidenceStatus.under_review;
+          if (effectiveDecision === ReviewDecision.accepted)
+            defaultEvidenceStatus = EvidenceStatus.accepted;
+          if (effectiveDecision === ReviewDecision.rejected)
+            defaultEvidenceStatus = EvidenceStatus.rejected;
+          if (effectiveDecision === ReviewDecision.supplement_required)
+            defaultEvidenceStatus = EvidenceStatus.needs_supplement;
+          if (effectiveDecision === ReviewDecision.resolution_needed)
+            defaultEvidenceStatus = EvidenceStatus.resolution_needed;
+
+          await tx.evidence.updateMany({
+            where: { id: { in: evidenceIds } },
+            data: { status: defaultEvidenceStatus },
+          });
+        }
+
+        // Audit status updates
         await createApplicationAudit(tx, {
           actorId: user.id,
           actorRole: user.role,
-          action: 'REVIEW_ACCEPTED_WITH_PRECEDENT',
+          action: 'EVIDENCE_STATUS_UPDATED',
           targetType: 'review_task',
           targetId: task.id,
           applicationId,
           afterStateJson: {
             decision: effectiveDecision,
             requestedDecision: input.decision,
-            precedentId: precedentContext.precedentId,
-            precedentEventId: precedentContext.precedentEventId,
-            precedentEvidenceId: precedentContext.precedentEvidenceId,
           },
-          note: officerNote,
         });
-      }
 
-      if (additionalAudit) {
-        await createApplicationAudit(tx, {
-          actorId: user.id,
-          actorRole: user.role,
-          action: additionalAudit.action,
-          targetType: 'review_task',
-          targetId: task.id,
-          applicationId,
-          afterStateJson: additionalAudit.afterStateJson,
-          note: additionalAudit.note,
-        });
-      }
+        if (effectiveDecision === ReviewDecision.accepted) {
+          const acceptedEvidenceIds = input.evidenceDecisions.length
+            ? input.evidenceDecisions
+                .filter((item) => item.status === EvidenceStatus.accepted)
+                .map((item) => item.evidenceId)
+            : evidenceIds;
+          for (const evidenceId of acceptedEvidenceIds) {
+            await this.evidenceKnowledgePublisher.publishAcceptedEvidence(tx, user, {
+              evidenceId,
+              reviewTaskId: task.id,
+              approvalSource: ApprovedEvidenceApprovalSource.officer,
+              note: officerNote,
+            });
+          }
+        }
 
-      if (
-        effectiveDecision !== ReviewDecision.supplement_required &&
-        effectiveDecision !== ReviewDecision.resolution_needed
-      ) {
-        const notification = await this.notificationsService.create(
-          {
-            userId: application.studentId,
+        if (effectiveDecision === ReviewDecision.supplement_required) {
+          const supplementRequest = (input.supplementRequestJson ?? {}) as Record<string, unknown>;
+          const supplementEvidenceIds = input.evidenceDecisions
+            .filter((item) => item.status === EvidenceStatus.needs_supplement)
+            .map((item) => item.evidenceId);
+          const selectedEvidenceIds = supplementEvidenceIds.length
+            ? supplementEvidenceIds
+            : input.evidenceDecisions.length
+              ? input.evidenceDecisions.map((item) => item.evidenceId)
+              : evidenceIds;
+          const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
+          const supplementDeadline = readSupplementDeadline(input.supplementRequestJson);
+          const dueDate = supplementDeadline ? new Date(supplementDeadline) : null;
+          await tx.application.update({
+            where: { id: applicationId },
+            data: { status: ApplicationStatus.supplement_required },
+          });
+          if (dueDate) {
+            await tx.reviewTask.update({
+              where: { id: task.id },
+              data: { dueDate },
+            });
+          }
+          const activeSupplement = await tx.supplementRequest.findFirst({
+            where: { reviewTaskId: task.id, status: 'active' },
+            orderBy: { createdAt: 'desc' },
+          });
+          const supplementData = {
+            workspaceId: task.workspaceId,
             applicationId,
             reviewTaskId: task.id,
-            metadata: { criterion: task.criterion, decision: effectiveDecision },
-            type: NotificationType.review_updated,
-            title: 'Đánh giá hồ sơ đã cập nhật',
-            message: `Tiêu chí ${task.criterion} đã được đánh giá: ${effectiveDecision}.`,
-          },
-          tx,
-        );
-        if (resultStatusIsRejected(applicationOutcome?.status)) {
+            criterion: task.criterion,
+            officialMessage: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
+            requestedFieldsJson: (supplementRequest.requestedFields ?? []) as Prisma.InputJsonValue,
+            evidenceScopeJson: { evidenceIds: selectedEvidenceIds } as Prisma.InputJsonValue,
+            acceptedEvidenceTypesJson:
+              supplementRequest.acceptedEvidenceTypes === undefined
+                ? Prisma.JsonNull
+                : (supplementRequest.acceptedEvidenceTypes as Prisma.InputJsonValue),
+            deadline: dueDate,
+            createdByUserId: user.id,
+            historyJson: [
+              {
+                at: new Date().toISOString(),
+                actorId: user.id,
+                action: activeSupplement ? 'officer_updated_request' : 'officer_created_request',
+              },
+            ] as Prisma.InputJsonValue,
+          };
+          const savedSupplement = activeSupplement
+            ? await tx.supplementRequest.update({
+                where: { id: activeSupplement.id },
+                data: {
+                  ...supplementData,
+                  historyJson: appendSupplementHistory(activeSupplement.historyJson, {
+                    at: new Date().toISOString(),
+                    actorId: user.id,
+                    action: 'officer_updated_request',
+                  }),
+                },
+              })
+            : await tx.supplementRequest.create({ data: supplementData });
+          const notification = await this.notificationsService.create(
+            {
+              userId: application.studentId,
+              applicationId,
+              evidenceId: primaryEvidenceId,
+              reviewTaskId: task.id,
+              metadata: {
+                criterion: task.criterion,
+                evidenceIds: selectedEvidenceIds,
+                deadline: supplementRequest.deadline ?? null,
+                requestedFields: supplementRequest.requestedFields ?? [],
+              },
+              type: NotificationType.supplement_required,
+              title: 'Cần bổ sung minh chứng',
+              message: officerNote ?? 'Hồ sơ cần bổ sung minh chứng.',
+            },
+            tx,
+          );
           await this.emailOutboxService.enqueue(
             {
               recipientEmail: application.student.email,
@@ -1163,7 +937,7 @@ export class ReviewService {
               relatedUserId: application.studentId,
               applicationId,
               notificationId: notification.id,
-              templateKey: 'application_rejected',
+              templateKey: 'supplement_requested',
               payload: {
                 studentName: application.student.fullName,
                 recipientName: application.student.fullName,
@@ -1171,26 +945,274 @@ export class ReviewService {
                 applicationId,
                 schoolYear: application.schoolYear,
                 targetLevel: application.targetLevel,
-                status: ApplicationStatus.rejected,
+                criterion: task.criterion,
+                criterionName: task.criterion,
+                deadline: readSupplementDeadline(input.supplementRequestJson),
                 reason: officerNote,
                 reviewNote: officerNote,
+                supplementSummary: buildSupplementSummary(input.supplementRequestJson, officerNote),
               },
-              dedupeKey: buildEmailDedupeKey('application_rejected', {
+              dedupeKey: buildEmailDedupeKey('supplement_requested', {
                 applicationId,
                 reviewTaskId: task.id,
-                status: ApplicationStatus.rejected,
-                decision: effectiveDecision,
+                criterion: task.criterion,
+                supplementRequestJson: input.supplementRequestJson ?? null,
+                officerNote,
               }),
               actorId: user.id,
               actorRole: user.role,
             },
             tx,
           );
+          await createApplicationAudit(tx, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: auditActions.SUPPLEMENT_REQUESTED,
+            targetType: 'supplement_request',
+            targetId: savedSupplement.id,
+            applicationId,
+            workspaceId: task.workspaceId,
+            afterStateJson: {
+              reviewTaskId: task.id,
+              criterion: task.criterion,
+              evidenceIds: selectedEvidenceIds,
+              requestedFields: supplementRequest.requestedFields ?? [],
+              deadline: supplementDeadline,
+            },
+            note: officerNote,
+          });
         }
-      }
 
-      return { task: saved, applicationOutcome };
-    }, { maxWait: 10_000, timeout: 30_000 });
+        if (effectiveDecision === ReviewDecision.resolution_needed) {
+          const resolutionEvidenceIds = input.evidenceDecisions
+            .filter((item) => item.status === EvidenceStatus.resolution_needed)
+            .map((item) => item.evidenceId);
+          const selectedEvidenceIds = resolutionEvidenceIds.length
+            ? resolutionEvidenceIds
+            : input.evidenceDecisions.length
+              ? input.evidenceDecisions.map((item) => item.evidenceId)
+              : evidenceIds;
+          const primaryEvidenceId = selectedEvidenceIds[0] ?? null;
+          await tx.application.update({
+            where: { id: applicationId },
+            data: { status: ApplicationStatus.resolution_needed },
+          });
+
+          const existingCase = await tx.resolutionCase.findFirst({
+            where: {
+              applicationId,
+              status: { in: ['open', 'in_review'] },
+              OR: [
+                { reviewTaskId: task.id },
+                ...(selectedEvidenceIds.length > 0
+                  ? [{ evidenceId: { in: selectedEvidenceIds } }]
+                  : [{ reviewTaskId: null, evidenceId: null }]),
+              ],
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+          let resolutionCaseId = existingCase?.id ?? null;
+          if (
+            existingCase &&
+            (!existingCase.reviewTaskId || (primaryEvidenceId && !existingCase.evidenceId))
+          ) {
+            await tx.resolutionCase.update({
+              where: { id: existingCase.id },
+              data: {
+                reviewTaskId: existingCase.reviewTaskId ?? task.id,
+                evidenceId: existingCase.evidenceId ?? primaryEvidenceId,
+              },
+            });
+          } else if (!existingCase) {
+            const createdCase = await tx.resolutionCase.create({
+              data: {
+                applicationId,
+                workspaceId: task.workspaceId,
+                evidenceId: primaryEvidenceId,
+                reviewTaskId: task.id,
+                reason: officerNote ?? 'Cần hội đồng xem xét.',
+                createdBy: user.id,
+                status: 'open',
+              },
+            });
+            resolutionCaseId = createdCase.id;
+          }
+
+          await this.notificationsService.create(
+            {
+              userId: application.studentId,
+              workspaceId: task.workspaceId,
+              applicationId,
+              evidenceId: primaryEvidenceId,
+              reviewTaskId: task.id,
+              resolutionCaseId,
+              metadata: {
+                criterion: task.criterion,
+                evidenceIds: selectedEvidenceIds,
+                primaryEvidenceId,
+                resolutionCaseId,
+              },
+              type: NotificationType.review_updated,
+              title: 'Hồ sơ được chuyển hội đồng xem xét',
+              message: officerNote ?? 'Một tiêu chí cần hội đồng xem xét.',
+            },
+            tx,
+          );
+          await notifyManagers(
+            tx,
+            applicationId,
+            task.workspaceId,
+            resolutionCaseId,
+            'Có hồ sơ cần xử lý đối sánh',
+            officerNote ?? 'Một task được chuyển sang cần hội đồng xem xét.',
+            {
+              reviewTaskId: task.id,
+              criterion: task.criterion,
+              evidenceIds: selectedEvidenceIds,
+              primaryEvidenceId,
+              resolutionCaseId,
+            },
+          );
+        }
+
+        const applicationOutcome = await syncApplicationReviewOutcome(tx, applicationId, {
+          applicationType: application.applicationType,
+          targetLevel: application.targetLevel,
+        });
+
+        // Audit application status changes
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'APPLICATION_STATUS_UPDATED',
+          targetType: 'application',
+          targetId: applicationId,
+          applicationId,
+          beforeStateJson: {
+            status: application.status,
+            finalStatus: application.finalStatus,
+            finalLevel: application.finalLevel,
+          },
+          afterStateJson: applicationOutcome
+            ? {
+                status: applicationOutcome.status,
+                finalStatus: applicationOutcome.finalStatus,
+                finalLevel: applicationOutcome.finalLevel,
+              }
+            : { status: application.status },
+        });
+
+        let auditActionName = 'REVIEW_DECISION_ACCEPTED';
+        if (effectiveDecision === ReviewDecision.rejected)
+          auditActionName = 'REVIEW_DECISION_REJECTED';
+        if (effectiveDecision === ReviewDecision.supplement_required)
+          auditActionName = 'REVIEW_SUPPLEMENT_REQUESTED';
+        if (effectiveDecision === ReviewDecision.resolution_needed)
+          auditActionName = 'REVIEW_ESCALATED_TO_RESOLUTION';
+
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: auditActionName,
+          targetType: 'review_task',
+          targetId: task.id,
+          applicationId,
+          afterStateJson: {
+            status,
+            decision: effectiveDecision,
+            requestedDecision: input.decision,
+            officerSuggestedLevel: input.officerSuggestedLevel ?? null,
+            evidenceAssessments: input.evidenceAssessments,
+          },
+          note: officerNote,
+        });
+
+        if (precedentContext) {
+          await createApplicationAudit(tx, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: 'REVIEW_ACCEPTED_WITH_PRECEDENT',
+            targetType: 'review_task',
+            targetId: task.id,
+            applicationId,
+            afterStateJson: {
+              decision: effectiveDecision,
+              requestedDecision: input.decision,
+              precedentId: precedentContext.precedentId,
+              precedentEventId: precedentContext.precedentEventId,
+              precedentEvidenceId: precedentContext.precedentEvidenceId,
+            },
+            note: officerNote,
+          });
+        }
+
+        if (additionalAudit) {
+          await createApplicationAudit(tx, {
+            actorId: user.id,
+            actorRole: user.role,
+            action: additionalAudit.action,
+            targetType: 'review_task',
+            targetId: task.id,
+            applicationId,
+            afterStateJson: additionalAudit.afterStateJson,
+            note: additionalAudit.note,
+          });
+        }
+
+        if (
+          effectiveDecision !== ReviewDecision.supplement_required &&
+          effectiveDecision !== ReviewDecision.resolution_needed
+        ) {
+          const notification = await this.notificationsService.create(
+            {
+              userId: application.studentId,
+              applicationId,
+              reviewTaskId: task.id,
+              metadata: { criterion: task.criterion, decision: effectiveDecision },
+              type: NotificationType.review_updated,
+              title: 'Đánh giá hồ sơ đã cập nhật',
+              message: `Tiêu chí ${task.criterion} đã được đánh giá: ${effectiveDecision}.`,
+            },
+            tx,
+          );
+          if (resultStatusIsRejected(applicationOutcome?.status)) {
+            await this.emailOutboxService.enqueue(
+              {
+                recipientEmail: application.student.email,
+                recipientName: application.student.fullName,
+                relatedUserId: application.studentId,
+                applicationId,
+                notificationId: notification.id,
+                templateKey: 'application_rejected',
+                payload: {
+                  studentName: application.student.fullName,
+                  recipientName: application.student.fullName,
+                  applicationCode: applicationId,
+                  applicationId,
+                  schoolYear: application.schoolYear,
+                  targetLevel: application.targetLevel,
+                  status: ApplicationStatus.rejected,
+                  reason: officerNote,
+                  reviewNote: officerNote,
+                },
+                dedupeKey: buildEmailDedupeKey('application_rejected', {
+                  applicationId,
+                  reviewTaskId: task.id,
+                  status: ApplicationStatus.rejected,
+                  decision: effectiveDecision,
+                }),
+                actorId: user.id,
+                actorRole: user.role,
+              },
+              tx,
+            );
+          }
+        }
+
+        return { task: saved, applicationOutcome };
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    );
 
     return {
       task: result.task,
@@ -1225,26 +1247,31 @@ export class ReviewService {
       status: EvidenceStatus.needs_supplement,
     }));
 
-    const result = await this.decideTask(user, taskId, {
-      decision: ReviewDecision.supplement_required,
-      officerNote: input.reason,
-      evidenceDecisions,
-      evidenceAssessments: [],
-      supplementRequestJson: {
-        reason: input.reason,
-        deadline: input.deadline ?? null,
-        evidenceIds: input.evidenceIds ?? [],
-        requestedFields: input.requestedFields ?? [],
+    const result = await this.decideTask(
+      user,
+      taskId,
+      {
+        decision: ReviewDecision.supplement_required,
+        officerNote: input.reason,
+        evidenceDecisions,
+        evidenceAssessments: [],
+        supplementRequestJson: {
+          reason: input.reason,
+          deadline: input.deadline ?? null,
+          evidenceIds: input.evidenceIds ?? [],
+          requestedFields: input.requestedFields ?? [],
+        },
       },
-    }, {
-      action: 'REVIEW_SUPPLEMENT_REQUESTED',
-      afterStateJson: {
-        requestedFields: input.requestedFields,
-        evidenceIds: input.evidenceIds,
-        deadline: input.deadline,
+      {
+        action: 'REVIEW_SUPPLEMENT_REQUESTED',
+        afterStateJson: {
+          requestedFields: input.requestedFields,
+          evidenceIds: input.evidenceIds,
+          deadline: input.deadline,
+        },
+        note: input.reason,
       },
-      note: input.reason,
-    });
+    );
 
     return {
       ...result,
@@ -1282,22 +1309,27 @@ export class ReviewService {
       status: EvidenceStatus.resolution_needed,
     }));
 
-    const result = await this.decideTask(user, taskId, {
-      decision: ReviewDecision.resolution_needed,
-      officerNote: input.reason,
-      evidenceDecisions,
-      evidenceAssessments: [],
-    }, {
-      action: 'REVIEW_ESCALATED_TO_RESOLUTION',
-      afterStateJson: {
-        evidenceIds: selectedEvidenceIds,
-        priority: input.priority || 'normal',
-        precedentGuardViewed: input.precedentGuardViewed ?? false,
-        precedentGuardReason: input.precedentGuardReason ?? null,
-        precedentId: input.precedentId ?? null,
+    const result = await this.decideTask(
+      user,
+      taskId,
+      {
+        decision: ReviewDecision.resolution_needed,
+        officerNote: input.reason,
+        evidenceDecisions,
+        evidenceAssessments: [],
       },
-      note: input.reason,
-    });
+      {
+        action: 'REVIEW_ESCALATED_TO_RESOLUTION',
+        afterStateJson: {
+          evidenceIds: selectedEvidenceIds,
+          priority: input.priority || 'normal',
+          precedentGuardViewed: input.precedentGuardViewed ?? false,
+          precedentGuardReason: input.precedentGuardReason ?? null,
+          precedentId: input.precedentId ?? null,
+        },
+        note: input.reason,
+      },
+    );
 
     return result;
   }
@@ -1345,7 +1377,10 @@ export class ReviewService {
 
   private async canAccessTask(
     user: AuthenticatedUser,
-    task: Pick<ReviewTaskVisibilityContext, 'assignedOfficerId' | 'status' | 'criterion' | 'application' | 'collectiveProfile'>,
+    task: Pick<
+      ReviewTaskVisibilityContext,
+      'assignedOfficerId' | 'status' | 'criterion' | 'application' | 'collectiveProfile'
+    >,
     decision: boolean,
     permissionCache?: OfficerCriterionAccessCache,
   ): Promise<boolean> {
@@ -1355,7 +1390,10 @@ export class ReviewService {
 
   private async getTaskPermissions(
     user: AuthenticatedUser,
-    task: Pick<ReviewTaskVisibilityContext, 'assignedOfficerId' | 'status' | 'criterion' | 'application' | 'collectiveProfile'>,
+    task: Pick<
+      ReviewTaskVisibilityContext,
+      'assignedOfficerId' | 'status' | 'criterion' | 'application' | 'collectiveProfile'
+    >,
     permissionCache?: OfficerCriterionAccessCache,
   ): Promise<ReviewTaskPermissions> {
     const final = isFinalReviewTaskStatus(task.status);
@@ -1431,6 +1469,16 @@ export class ReviewService {
         canClaim: false,
         canRequestSupport: false,
         reason: 'out_of_scope',
+      });
+    }
+
+    if (user.role === Role.city_officer && task.status === ReviewTaskStatus.supplement_required) {
+      return buildTaskPermissions({
+        canView: true,
+        canAct: false,
+        canClaim: false,
+        canRequestSupport: false,
+        reason: 'supplement_pending',
       });
     }
 
@@ -1659,7 +1707,11 @@ export class ReviewService {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
     if (user.role !== Role.city_manager && user.role !== Role.admin) {
-      throw new AppError(403, ErrorCodes.FORBIDDEN, 'Only City Managers and admins may ensure tasks');
+      throw new AppError(
+        403,
+        ErrorCodes.FORBIDDEN,
+        'Only City Managers and admins may ensure tasks',
+      );
     }
     assertReviewWorkspaceAccess(
       user,
@@ -1714,90 +1766,93 @@ export class ReviewService {
     const createdTasks: Prisma.ReviewTaskGetPayload<object>[] = [];
     let ensuredCount = 0;
 
-    await prisma.$transaction(async (tx) => {
-      await lockApplicationAndAssertNotCancelled(tx, applicationId);
-      const existingTasks = await tx.reviewTask.findMany({ where: { applicationId } });
-      const existingCriteria = new Set(existingTasks.map((task) => task.criterion));
-      const criteriaToCreate = Array.from(criteriaToEnsure).filter(
-        (criterion) => !existingCriteria.has(criterion),
-      );
-      ensuredCount = criteriaToCreate.length;
-
-      for (const criterion of criteriaToCreate) {
-        // Find assigned officer with matching criterion and minimum workload
-        const assignedOfficerId = await this.findAssignedOfficer(
-          criterion,
-          application.student?.faculty,
-          application.workspaceId,
+    await prisma.$transaction(
+      async (tx) => {
+        await lockApplicationAndAssertNotCancelled(tx, applicationId);
+        const existingTasks = await tx.reviewTask.findMany({ where: { applicationId } });
+        const existingCriteria = new Set(existingTasks.map((task) => task.criterion));
+        const criteriaToCreate = Array.from(criteriaToEnsure).filter(
+          (criterion) => !existingCriteria.has(criterion),
         );
+        ensuredCount = criteriaToCreate.length;
 
-        // Create the task
-        const task = await tx.reviewTask.create({
-          data: {
-            applicationId,
-            workspaceId: application.workspaceId,
+        for (const criterion of criteriaToCreate) {
+          // Find assigned officer with matching criterion and minimum workload
+          const assignedOfficerId = await this.findAssignedOfficer(
             criterion,
-            assignedOfficerId,
-            status: 'waiting',
-          },
-        });
+            application.student?.faculty,
+            application.workspaceId,
+          );
 
-        // Link existing evidences to this task
-        const matchingEvidences = evidences.filter((e) => e.criterion === criterion);
-        for (const ev of matchingEvidences) {
-          await tx.reviewTaskEvidence.create({
+          // Create the task
+          const task = await tx.reviewTask.create({
             data: {
-              reviewTaskId: task.id,
-              evidenceId: ev.id,
+              applicationId,
+              workspaceId: application.workspaceId,
+              criterion,
+              assignedOfficerId,
+              status: 'waiting',
             },
           });
-        }
 
-        createdTasks.push(task);
+          // Link existing evidences to this task
+          const matchingEvidences = evidences.filter((e) => e.criterion === criterion);
+          for (const ev of matchingEvidences) {
+            await tx.reviewTaskEvidence.create({
+              data: {
+                reviewTaskId: task.id,
+                evidenceId: ev.id,
+              },
+            });
+          }
 
-        // Audit for each created task
-        await createApplicationAudit(tx, {
-          actorId: user.id,
-          actorRole: user.role,
-          action: 'REVIEW_TASK_CREATED',
-          targetType: 'review_task',
-          targetId: task.id,
-          applicationId,
-          afterStateJson: { criterion, status: 'waiting' },
-        });
+          createdTasks.push(task);
 
-        if (assignedOfficerId) {
+          // Audit for each created task
           await createApplicationAudit(tx, {
             actorId: user.id,
             actorRole: user.role,
-            action: 'REVIEW_TASK_ASSIGNED',
+            action: 'REVIEW_TASK_CREATED',
             targetType: 'review_task',
             targetId: task.id,
             applicationId,
-            afterStateJson: { assignedOfficerId },
+            afterStateJson: { criterion, status: 'waiting' },
+          });
+
+          if (assignedOfficerId) {
+            await createApplicationAudit(tx, {
+              actorId: user.id,
+              actorRole: user.role,
+              action: 'REVIEW_TASK_ASSIGNED',
+              targetType: 'review_task',
+              targetId: task.id,
+              applicationId,
+              afterStateJson: { assignedOfficerId },
+            });
+          }
+        }
+
+        // Update application status if submitted
+        if (application.status === 'submitted') {
+          await tx.application.update({
+            where: { id: applicationId },
+            data: { status: 'under_review' },
           });
         }
-      }
 
-      // Update application status if submitted
-      if (application.status === 'submitted') {
-        await tx.application.update({
-          where: { id: applicationId },
-          data: { status: 'under_review' },
+        // Audit for ensure execution
+        await createApplicationAudit(tx, {
+          actorId: user.id,
+          actorRole: user.role,
+          action: 'REVIEW_TASKS_ENSURED',
+          targetType: 'application',
+          targetId: applicationId,
+          applicationId,
+          afterStateJson: { count: createdTasks.length, mode: input.mode || 'missing_only' },
         });
-      }
-
-      // Audit for ensure execution
-      await createApplicationAudit(tx, {
-        actorId: user.id,
-        actorRole: user.role,
-        action: 'REVIEW_TASKS_ENSURED',
-        targetType: 'application',
-        targetId: applicationId,
-        applicationId,
-        afterStateJson: { count: createdTasks.length, mode: input.mode || 'missing_only' },
-      });
-    }, { maxWait: 10_000, timeout: 30_000 });
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    );
 
     return {
       ensuredCount,
@@ -1973,10 +2028,12 @@ async function syncApplicationReviewOutcome(
   return null;
 }
 
-function isCityIndividualReviewTask(application: {
-  applicationType?: ApplicationType;
-  targetLevel?: Level;
-} | null) {
+function isCityIndividualReviewTask(
+  application: {
+    applicationType?: ApplicationType;
+    targetLevel?: Level;
+  } | null,
+) {
   return (
     application?.applicationType === ApplicationType.individual &&
     application.targetLevel === Level.city
@@ -2199,9 +2256,9 @@ function taskPermissionReasonLabel(reason: ReviewTaskPermissionReason) {
     committee_resolution_view: 'Task đang ở trạng thái hội ý, được xem ở chế độ theo dõi.',
     assigned_to_you: 'Task được giao cho bạn.',
     claimable_by_specialization: 'Task chưa phân công và thuộc tiêu chí bạn phụ trách.',
-    demo_specialization_access:
-      'Tài khoản demo có thể xử lý task cùng tiêu chí trong workspace.',
+    demo_specialization_access: 'Tài khoản demo có thể xử lý task cùng tiêu chí trong workspace.',
     assigned_to_other: 'Task đã được giao cho cán bộ khác, bạn chỉ được xem.',
+    supplement_pending: 'Đang chờ sinh viên bổ sung minh chứng cho task này.',
     finalized: 'Task đã có kết luận, chỉ được xem lại.',
     out_of_scope: 'Task không thuộc phạm vi phụ trách của bạn.',
     role_not_allowed: 'Tài khoản hiện tại không có quyền xem task xét duyệt.',
@@ -2223,10 +2280,13 @@ function isDemoOfficerReviewAccount(user: AuthenticatedUser) {
   return user.role === Role.officer && /^officer\.[^@]+@dut\.udn\.vn$/i.test(user.email);
 }
 
-function buildCriteriaChecklist(
-  task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
-) {
-  return buildCriterionLevelAssessment(task).levels.flatMap((level) =>
+function buildCriteriaChecklist(assessment: {
+  levels: Array<{
+    level: Level;
+    requirements: Array<{ key: string; label: string; status: RequirementStatus; reason: string }>;
+  }>;
+}) {
+  return assessment.levels.flatMap((level) =>
     level.requirements.map((requirement) => ({
       id: `${level.level}-${requirement.key}`,
       label: `${levelLabel(level.level)} - ${requirement.label}`,
@@ -2238,7 +2298,46 @@ function buildCriteriaChecklist(
   );
 }
 
-function buildCriterionLevelAssessment(
+async function buildCriterionLevelAssessment(
+  task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
+) {
+  const resolved = await resolveReviewCriteriaForTask(task);
+  if (resolved) return buildConfiguredCriterionLevelAssessment(task, resolved);
+  return buildLegacyCriterionLevelAssessment(task);
+}
+
+function buildConfiguredCriterionLevelAssessment(
+  task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
+  resolved: ReviewCriteriaResolution,
+) {
+  const levels = resolved.levels.map((level) => {
+    const status = summarizeRequirementStatus(level.requirements);
+    return {
+      level: level.level,
+      status,
+      score: scoreForStatus(status),
+      requirements: level.requirements,
+      summary: levelSummary(level.level, status),
+      criteriaVersion: {
+        id: level.criteriaVersionId,
+        versionName: level.versionName,
+      },
+    };
+  });
+  const passed = levels.filter((level) => level.status === 'passed');
+
+  return {
+    taskId: task.id,
+    criterion: task.criterion,
+    targetLevel: task.application?.targetLevel ?? task.collectiveProfile?.targetLevel ?? null,
+    levels,
+    suggestedCriterionLevel: passed.at(-1)?.level ?? null,
+    humanConfirmationRequired: true,
+    criteriaAuthority: resolved.authority,
+  };
+}
+
+function buildLegacyCriterionLevelAssessment(
   task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
 ) {
   const levels = [Level.school, Level.university, Level.city, Level.central].map((level) => {
