@@ -161,24 +161,56 @@ describe('FilesService event source signed URLs', () => {
         officerId: 'city_officer-user',
         criterion: 'academic',
         isActive: true,
-        officer: { role: Role.city_officer, isActive: true, workspaceId: 'city-workspace' },
+        officer: { role: Role.city_officer, isActive: true },
       },
     });
     expect(storage.getSignedReadUrl).toHaveBeenCalled();
   });
 
+  it('allows a specialized City Officer to open the original evidence before claim', async () => {
+    const file = {
+      ...eventSourceFile(otherWorkspaceId),
+      filePath: 'evidence/evidence-a.pdf',
+      eventFiles: [],
+      evidenceFiles: [
+        {
+          evidence: {
+            id: evidenceId,
+            criterion: 'academic',
+            application: {
+              workspaceId: otherWorkspaceId,
+              applicationType: 'individual',
+              targetLevel: 'city',
+              workspace: { type: 'SCHOOL', isActive: true },
+              student: { faculty: 'Faculty B' },
+              reviewTasks: [
+                {
+                  id: 'task-1',
+                  workspaceId: otherWorkspaceId,
+                  criterion: 'academic',
+                  assignedOfficerId: null,
+                  status: 'waiting',
+                  decision: null,
+                  evidences: [{ evidenceId }],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    } as never;
+    const { service, storage } = serviceFor(file);
+    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-city' });
+
+    await expect(service.getSignedUrl(cityOfficer(), 'file-1')).resolves.toBe(
+      'https://signed.example/file-1',
+    );
+    expect(storage.getSignedReadUrl).toHaveBeenCalled();
+  });
+
   it.each([
     {
-      name: 'a waiting task',
-      task: {
-        criterion: 'academic',
-        assignedOfficerId: 'city_officer-user',
-        status: 'waiting',
-        evidences: [{ evidenceId }],
-      },
-    },
-    {
-      name: 'a task assigned to another officer',
+      name: 'a task assigned to another unrelated officer',
       task: {
         criterion: 'academic',
         assignedOfficerId: 'other-officer',
@@ -215,7 +247,7 @@ describe('FilesService event source signed URLs', () => {
       ],
     } as never;
     const { service, storage } = serviceFor(file);
-    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-city' });
+    prismaMock.officerSpecialization.findFirst.mockResolvedValue(null);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).rejects.toMatchObject({
       statusCode: 404,
@@ -240,7 +272,7 @@ describe('FilesService event source signed URLs', () => {
               reviewTasks: [
                 {
                   criterion: 'academic',
-                  assignedOfficerId: 'city_officer-user',
+                  assignedOfficerId: null,
                   status: 'waiting',
                   evidences: [{ evidenceId }],
                 },
@@ -251,6 +283,7 @@ describe('FilesService event source signed URLs', () => {
       ],
     } as never;
     const { service, storage } = serviceFor(file);
+    prismaMock.officerSpecialization.findFirst.mockResolvedValue(null);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).rejects.toMatchObject({
       statusCode: 404,

@@ -25,6 +25,7 @@ export class FilesRepository {
                 },
                 collectiveProfile: {
                   include: {
+                    representative: true,
                     reviewTasks: {
                       include: { evidences: { select: { evidenceId: true } } },
                     },

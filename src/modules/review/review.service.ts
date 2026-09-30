@@ -72,6 +72,20 @@ type ReviewTaskPermissions = {
   availableActions: ReviewTaskAvailableAction[];
 };
 
+export type ReviewTaskVisibilityContext = {
+  workspaceId: string;
+  workspace: { type: WorkspaceType; isActive: boolean };
+  assignedOfficerId: string | null;
+  status: ReviewTaskStatus;
+  criterion: Criterion;
+  application: {
+    applicationType?: ApplicationType;
+    targetLevel?: Level;
+    student: { faculty: string | null };
+  } | null;
+  collectiveProfile: { targetLevel?: Level; representative: { faculty: string | null } } | null;
+};
+
 type ReviewTaskPriorityReason =
   | 'overdue'
   | 'student_resubmitted'
@@ -444,6 +458,24 @@ export class ReviewService {
       criterionLevelAssessment: buildCriterionLevelAssessment(taskForResponse),
       audit: auditLogs,
     };
+  }
+
+  async canViewTask(user: AuthenticatedUser, task: ReviewTaskVisibilityContext): Promise<boolean> {
+    try {
+      assertReviewWorkspaceAccess(
+        user,
+        {
+          workspaceId: task.workspaceId,
+          workspaceType: task.workspace.type,
+          workspaceIsActive: task.workspace.isActive,
+        },
+        'Review task not found',
+      );
+    } catch {
+      return false;
+    }
+
+    return this.canAccessTask(user, task, false);
   }
 
   async claimTask(user: AuthenticatedUser, taskId: string) {
@@ -1313,17 +1345,7 @@ export class ReviewService {
 
   private async canAccessTask(
     user: AuthenticatedUser,
-    task: {
-      assignedOfficerId: string | null;
-      status: ReviewTaskStatus;
-      criterion: Criterion;
-      application: {
-        applicationType?: ApplicationType;
-        targetLevel?: Level;
-        student: { faculty: string | null };
-      } | null;
-      collectiveProfile: { representative: { faculty: string | null } } | null;
-    },
+    task: Pick<ReviewTaskVisibilityContext, 'assignedOfficerId' | 'status' | 'criterion' | 'application' | 'collectiveProfile'>,
     decision: boolean,
     permissionCache?: OfficerCriterionAccessCache,
   ): Promise<boolean> {
@@ -1333,17 +1355,7 @@ export class ReviewService {
 
   private async getTaskPermissions(
     user: AuthenticatedUser,
-    task: {
-      assignedOfficerId: string | null;
-      status: ReviewTaskStatus;
-      criterion: Criterion;
-      application: {
-        applicationType?: ApplicationType;
-        targetLevel?: Level;
-        student: { faculty: string | null };
-      } | null;
-      collectiveProfile: { representative: { faculty: string | null } } | null;
-    },
+    task: Pick<ReviewTaskVisibilityContext, 'assignedOfficerId' | 'status' | 'criterion' | 'application' | 'collectiveProfile'>,
     permissionCache?: OfficerCriterionAccessCache,
   ): Promise<ReviewTaskPermissions> {
     const final = isFinalReviewTaskStatus(task.status);
