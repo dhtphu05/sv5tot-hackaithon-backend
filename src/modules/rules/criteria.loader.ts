@@ -27,16 +27,57 @@ export async function loadCriteriaRules(input: {
     orderBy: { createdAt: 'desc' },
   });
 
+  return toCriteriaRuleBundle(version, input.level, input.schoolYear, unitScope);
+}
+
+export async function loadCriteriaRulesForLevels(input: {
+  workspaceId: string;
+  schoolYear: string;
+  levels: Level[];
+  unitScope?: string;
+}): Promise<CriteriaRuleBundle[]> {
+  const unitScope = input.unitScope ?? defaultCriteriaUnitScope;
+  const versions = await prisma.criteriaVersion.findMany({
+    where: {
+      workspaceId: input.workspaceId,
+      schoolYear: input.schoolYear,
+      level: { in: input.levels },
+      unitScope,
+      isActive: true,
+    },
+    include: {
+      rules: {
+        orderBy: [{ criterion: 'asc' }, { ruleKey: 'asc' }],
+      },
+    },
+    orderBy: [{ level: 'asc' }, { createdAt: 'desc' }],
+  });
+  const newestByLevel = new Map<Level, (typeof versions)[number]>();
+  for (const version of versions) {
+    if (!newestByLevel.has(version.level)) newestByLevel.set(version.level, version);
+  }
+
+  return input.levels.map((level) =>
+    toCriteriaRuleBundle(newestByLevel.get(level) ?? null, level, input.schoolYear, unitScope),
+  );
+}
+
+function toCriteriaRuleBundle(
+  version: Prisma.CriteriaVersionGetPayload<{ include: { rules: true } }> | null,
+  level: Level,
+  schoolYear: string,
+  unitScope: string,
+): CriteriaRuleBundle {
   if (!version || version.rules.length === 0) {
     return {
       criteriaVersionId: null,
-      versionName: `fallback-${input.level}`,
-      schoolYear: input.schoolYear,
+      versionName: `fallback-${level}`,
+      schoolYear,
       unitScope,
-      level: input.level,
+      level,
       isFallback: true,
       warnings: [ErrorCodes.CRITERIA_VERSION_NOT_FOUND],
-      rules: fallbackRulesByLevel[input.level],
+      rules: fallbackRulesByLevel[level],
     };
   }
 
@@ -45,7 +86,7 @@ export async function loadCriteriaRules(input: {
     versionName: version.versionName,
     schoolYear: version.schoolYear,
     unitScope: version.unitScope,
-    level: version.level,
+    level,
     isFallback: false,
     warnings: [],
     rules: version.rules.map((rule) => ({

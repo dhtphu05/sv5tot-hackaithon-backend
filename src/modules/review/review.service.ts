@@ -239,6 +239,12 @@ export class ReviewService {
     const data = await this.reviewRepository.list(user, query);
     const items = [];
     const permissionCache: OfficerCriterionAccessCache = new Map();
+    if (user.role === Role.city_officer) {
+      // The repository only returns criteria in this active officer's specialization scope.
+      for (const criterion of new Set(data.items.map((task) => task.criterion))) {
+        permissionCache.set(`${user.id}:${criterion}`, Promise.resolve(true));
+      }
+    }
     for (const task of data.items) {
       if (await this.canAccessTask(user, task, false, permissionCache)) {
         const item = toTaskListItem(task);
@@ -266,12 +272,31 @@ export class ReviewService {
     };
   }
 
-  async getTaskDetail(user: AuthenticatedUser, taskId: string) {
-    const task = await this.getTask(taskId);
-    await this.assertTaskAccess(user, task, false);
+  async getTaskDetail(
+    user: AuthenticatedUser,
+    taskId: string,
+    includeKnowledgeBaseMatches = true,
+    includeAudit = true,
+  ) {
+    const activeCriteriaPromise =
+      user.role === Role.city_officer &&
+      typeof this.assignmentService.getActiveCriteriaForOfficer === 'function'
+        ? this.assignmentService.getActiveCriteriaForOfficer(user.id, user.role)
+        : Promise.resolve(null);
+    const [task, activeCriteria] = await Promise.all([
+      this.getTask(taskId),
+      activeCriteriaPromise,
+    ]);
+    const permissionCache: OfficerCriterionAccessCache = new Map();
+    if (activeCriteria) {
+      permissionCache.set(
+        `${user.id}:${task.criterion}`,
+        Promise.resolve(activeCriteria.includes(task.criterion)),
+      );
+    }
+    const permissions = await this.assertTaskAccess(user, task, false, permissionCache);
 
     const taskForResponse = task;
-    const permissions = await this.getTaskPermissions(user, taskForResponse);
 
     const evidences = taskForResponse.evidences.map((item) => item.evidence);
     const matchedEventIds = [
@@ -281,8 +306,8 @@ export class ReviewService {
           .filter((eventId): eventId is string => Boolean(eventId)),
       ),
     ];
-    const matchedEvents = matchedEventIds.length
-      ? await prisma.eventRegistry.findMany({
+    const matchedEventsPromise = matchedEventIds.length
+      ? prisma.eventRegistry.findMany({
           where: {
             id: { in: matchedEventIds },
             ...(isCityReviewRole(user.role)
@@ -298,34 +323,51 @@ export class ReviewService {
             endDate: true,
           },
         })
-      : [];
-    const matchedEventsById = new Map(matchedEvents.map((event) => [event.id, event]));
-    const knowledgeBaseMatches = await Promise.all(
-      evidences.map(async (evidence) => ({
-        evidenceId: evidence.id,
-        matches: await prisma.knowledgeBaseItem.findMany({
-          where: {
-            ...reviewKnowledgeWorkspaceFilterFor(user),
-            criterion: evidence.criterion,
-            OR: [
-              { evidenceName: { contains: evidence.evidenceName, mode: 'insensitive' } },
-              { eventName: { contains: evidence.evidenceName, mode: 'insensitive' } },
-            ],
-          },
-          orderBy: [{ usageCount: 'desc' }, { updatedAt: 'desc' }],
-          take: 3,
-        }),
-      })),
-    );
+      : Promise.resolve([]);
+    const knowledgeBaseMatchesPromise = includeKnowledgeBaseMatches
+      ? Promise.all(
+          evidences.map(async (evidence) => ({
+            evidenceId: evidence.id,
+            matches: await prisma.knowledgeBaseItem.findMany({
+              where: {
+                ...reviewKnowledgeWorkspaceFilterFor(user),
+                criterion: evidence.criterion,
+                OR: [
+                  { evidenceName: { contains: evidence.evidenceName, mode: 'insensitive' } },
+                  { eventName: { contains: evidence.evidenceName, mode: 'insensitive' } },
+                ],
+              },
+              orderBy: [{ usageCount: 'desc' }, { updatedAt: 'desc' }],
+              take: 3,
+            }),
+          })),
+        )
+      : Promise.resolve([]);
 
-    const auditLogs = taskForResponse.applicationId
-      ? await prisma.auditLog.findMany({
+    const auditLogsPromise = includeAudit && taskForResponse.applicationId
+      ? prisma.auditLog.findMany({
           where: { applicationId: taskForResponse.applicationId },
           orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            action: true,
+            note: true,
+            actorId: true,
+            actorRole: true,
+            createdAt: true,
+            actor: { select: { fullName: true } },
+          },
         })
-      : [];
+      : Promise.resolve([]);
 
-    const criterionLevelAssessment = await buildCriterionLevelAssessment(taskForResponse);
+    const [matchedEvents, knowledgeBaseMatches, auditLogs, criterionLevelAssessment] =
+      await Promise.all([
+        matchedEventsPromise,
+        knowledgeBaseMatchesPromise,
+        auditLogsPromise,
+        buildCriterionLevelAssessment(taskForResponse),
+      ]);
+    const matchedEventsById = new Map(matchedEvents.map((event) => [event.id, event]));
 
     return {
       task: toTaskDetail(taskForResponse, permissions),
@@ -468,7 +510,11 @@ export class ReviewService {
     };
   }
 
-  async canViewTask(user: AuthenticatedUser, task: ReviewTaskVisibilityContext): Promise<boolean> {
+  async canViewTask(
+    user: AuthenticatedUser,
+    task: ReviewTaskVisibilityContext,
+    permissionCache?: OfficerCriterionAccessCache,
+  ): Promise<boolean> {
     try {
       assertReviewWorkspaceAccess(
         user,
@@ -483,7 +529,7 @@ export class ReviewService {
       return false;
     }
 
-    return this.canAccessTask(user, task, false);
+    return this.canAccessTask(user, task, false, permissionCache);
   }
 
   async claimTask(user: AuthenticatedUser, taskId: string) {
@@ -1360,7 +1406,8 @@ export class ReviewService {
     user: AuthenticatedUser,
     task: NonNullable<Awaited<ReturnType<ReviewRepository['findDetail']>>>,
     decision: boolean,
-  ) {
+    permissionCache?: OfficerCriterionAccessCache,
+  ): Promise<ReviewTaskPermissions> {
     assertReviewWorkspaceAccess(
       user,
       {
@@ -1370,13 +1417,15 @@ export class ReviewService {
       },
       'Review task not found',
     );
-    if (!(await this.canAccessTask(user, task, decision))) {
+    const permissions = await this.getTaskPermissions(user, task, permissionCache);
+    if (decision ? !permissions.canAct : !permissions.canView) {
       throw new AppError(
         403,
         ErrorCodes.REVIEW_TASK_PERMISSION_DENIED,
         'You do not have access to this review task',
       );
     }
+    return permissions;
   }
 
   private async canAccessTask(
@@ -1551,7 +1600,8 @@ export class ReviewService {
       );
     }
 
-    const key = `${user.id}:${criterion}:${faculty ?? ''}`;
+    // facultyScope only changes assignment preference, not task visibility or claim permission.
+    const key = `${user.id}:${criterion}`;
     const cached = permissionCache.get(key);
     if (cached) return cached;
 

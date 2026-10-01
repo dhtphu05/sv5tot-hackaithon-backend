@@ -14,7 +14,7 @@ async function main() {
       DATABASE_URL:
         process.env.DATABASE_URL ??
         'postgresql://postgres:postgres@127.0.0.1:5432/sv5tot_smoke',
-      DEFAULT_SCHOOL_YEAR: process.env.DEFAULT_SCHOOL_YEAR ?? '2025-2026',
+      DEFAULT_SCHOOL_YEAR: process.env.DEFAULT_SCHOOL_YEAR ?? '2026-2027',
       JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET ?? 'smoke_access_secret_change_me',
       JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET ?? 'smoke_refresh_secret_change_me',
       JWT_ACCESS_EXPIRES_IN: process.env.JWT_ACCESS_EXPIRES_IN ?? '120m',

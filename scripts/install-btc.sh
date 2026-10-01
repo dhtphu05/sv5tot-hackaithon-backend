@@ -68,7 +68,7 @@ ensure_backend_env() {
 NODE_ENV=development
 PORT=8080
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/sv5tot
-DEFAULT_SCHOOL_YEAR=2025-2026
+DEFAULT_SCHOOL_YEAR=2026-2027
 
 JWT_SECRET=dev_btc_change_me
 JWT_EXPIRES_IN=15m

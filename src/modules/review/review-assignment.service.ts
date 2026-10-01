@@ -111,4 +111,17 @@ export class ReviewAssignmentService {
 
     return Boolean(specialization);
   }
+
+  async getActiveCriteriaForOfficer(officerId: string, reviewerRole: Role): Promise<Criterion[]> {
+    const specializations = await prisma.officerSpecialization.findMany({
+      where: {
+        officerId,
+        isActive: true,
+        officer: { role: reviewerRole, isActive: true },
+      },
+      select: { criterion: true },
+    });
+
+    return specializations.map((specialization) => specialization.criterion);
+  }
 }

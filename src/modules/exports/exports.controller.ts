@@ -20,6 +20,11 @@ export async function exportReviewTasksCsv(req: Request, res: Response): Promise
   sendCsv(res, csv, `sv5t-review-tasks-${dateStamp()}.csv`);
 }
 
+export async function exportReviewTasksJson(req: Request, res: Response): Promise<void> {
+  const data = await service.exportReviewTasksJson(req.user!, req.query as never);
+  sendSuccess(res, data, { requestId: req.requestId });
+}
+
 export async function exportReviewResults(req: Request, res: Response): Promise<void> {
   const data = await service.exportReviewResults(req.user!, req.body);
   sendSuccess(res, data, { requestId: req.requestId }, 201);

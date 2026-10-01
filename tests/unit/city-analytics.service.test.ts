@@ -14,6 +14,7 @@ import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
 const prismaMock = vi.hoisted(() => ({
   application: { findMany: vi.fn(), count: vi.fn(), groupBy: vi.fn() },
+  cityReviewSeason: { findFirst: vi.fn() },
   workspace: { findMany: vi.fn() },
   user: { findMany: vi.fn() },
 }));
@@ -49,6 +50,13 @@ const admin: AuthenticatedUser = {
   workspaceId: null,
   workspace: null,
 };
+const cityCommittee: AuthenticatedUser = {
+  ...cityManager,
+  id: 'city-committee-id',
+  email: 'committee@city.test',
+  fullName: 'City Committee',
+  role: Role.city_committee,
+};
 
 const criteria = [
   Criterion.ethics,
@@ -64,6 +72,7 @@ function makeApplication(input: {
   status: ApplicationStatus;
   submittedAt: Date | null;
   finalStatus?: FinalStatus;
+  finalLevel?: Level | null;
   reviewTasks?: Array<{
     criterion: Criterion;
     status: ReviewTaskStatus;
@@ -80,6 +89,8 @@ function makeApplication(input: {
     status: input.status,
     submittedAt: input.submittedAt,
     finalStatus: input.finalStatus ?? FinalStatus.pending,
+    finalLevel:
+      input.finalLevel ?? (input.finalStatus === FinalStatus.passed ? Level.city : null),
     workspace: {
       id: input.schoolId ?? schoolAId,
       code: input.schoolId === 'school-b' ? 'SCHOOL-B' : 'SCHOOL-A',
@@ -104,6 +115,7 @@ describe('CityAnalyticsService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.application.groupBy.mockResolvedValue([{ schoolYear: '2025-2026' }]);
+    prismaMock.cityReviewSeason.findFirst.mockResolvedValue({ schoolYear: '2026-2027' });
     prismaMock.workspace.findMany.mockResolvedValue([
       { id: schoolAId, code: 'SCHOOL-A', name: 'School A' },
       { id: 'school-b', code: 'SCHOOL-B', name: 'School B' },
@@ -119,7 +131,6 @@ describe('CityAnalyticsService', () => {
   it.each([
     Role.student,
     Role.city_officer,
-    Role.city_committee,
     Role.data_uploader,
     Role.officer,
     Role.manager,
@@ -144,6 +155,30 @@ describe('CityAnalyticsService', () => {
     const service = new CityAnalyticsService();
 
     await expect(service.getSummary(invalidManager, {})).rejects.toMatchObject({ statusCode: 403 });
+    expect(prismaMock.application.groupBy).not.toHaveBeenCalled();
+  });
+
+  it('allows City Committee to read cross-school City analytics while keeping its reviewer workload in its City workspace', async () => {
+    const service = new CityAnalyticsService();
+
+    await service.getSummary(cityCommittee, {});
+
+    expect(prismaMock.application.findMany).toHaveBeenCalledOnce();
+    expect(prismaMock.user.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ workspaceId: cityWorkspaceId, role: Role.city_officer }),
+      }),
+    );
+  });
+
+  it('requires City Committee to belong to a City workspace', async () => {
+    const invalidCommittee = {
+      ...cityCommittee,
+      workspace: { ...cityCommittee.workspace!, type: WorkspaceType.SCHOOL },
+    };
+    const service = new CityAnalyticsService();
+
+    await expect(service.getSummary(invalidCommittee, {})).rejects.toMatchObject({ statusCode: 403 });
     expect(prismaMock.application.groupBy).not.toHaveBeenCalled();
   });
 
@@ -200,13 +235,28 @@ describe('CityAnalyticsService', () => {
         reviewTasks: fiveTasks(Array(5).fill(ReviewTaskStatus.accepted), officerId),
       }),
       makeApplication({
+        id: 'final-partial-lower-level',
+        status: ApplicationStatus.completed,
+        submittedAt,
+        finalStatus: FinalStatus.passed,
+        finalLevel: Level.school,
+      }),
+      makeApplication({
         id: 'supplement',
         schoolId: 'school-b',
         status: ApplicationStatus.supplement_required,
         submittedAt,
         reviewTasks: [
-          { criterion: Criterion.academic, status: ReviewTaskStatus.supplement_required, assignedOfficerId: officerId },
-          { criterion: Criterion.ethics, status: ReviewTaskStatus.supplement_required, assignedOfficerId: officerId },
+          {
+            criterion: Criterion.academic,
+            status: ReviewTaskStatus.supplement_required,
+            assignedOfficerId: officerId,
+          },
+          {
+            criterion: Criterion.ethics,
+            status: ReviewTaskStatus.supplement_required,
+            assignedOfficerId: officerId,
+          },
         ],
       }),
       makeApplication({
@@ -214,7 +264,13 @@ describe('CityAnalyticsService', () => {
         schoolId: 'school-b',
         status: ApplicationStatus.resolution_needed,
         submittedAt,
-        reviewTasks: [{ criterion: Criterion.ethics, status: ReviewTaskStatus.resolution_needed, assignedOfficerId: officerId }],
+        reviewTasks: [
+          {
+            criterion: Criterion.ethics,
+            status: ReviewTaskStatus.resolution_needed,
+            assignedOfficerId: officerId,
+          },
+        ],
         resolutionCases: [{ status: ResolutionStatus.open }],
       }),
       makeApplication({
@@ -224,7 +280,13 @@ describe('CityAnalyticsService', () => {
         submittedAt,
         finalStatus: FinalStatus.failed,
         reviewTasks: fiveTasks(
-          [ReviewTaskStatus.accepted, ReviewTaskStatus.accepted, ReviewTaskStatus.rejected, ReviewTaskStatus.rejected, ReviewTaskStatus.rejected],
+          [
+            ReviewTaskStatus.accepted,
+            ReviewTaskStatus.accepted,
+            ReviewTaskStatus.rejected,
+            ReviewTaskStatus.rejected,
+            ReviewTaskStatus.rejected,
+          ],
           officerId,
         ),
       }),
@@ -235,25 +297,28 @@ describe('CityAnalyticsService', () => {
     const summary = await service.getSummary(cityManager, {});
 
     expect(summary.applications).toMatchObject({
-      created: 7,
+      created: 8,
       notSubmitted: 1,
-      submitted: 6,
+      submitted: 7,
       supplementRequired: 1,
       resolutionBlocked: 1,
       reviewComplete: 3,
-      progressDistribution: { '0': 2, '1': 0, '2': 0, '3': 0, '4': 1, '5': 3 },
+      progressDistribution: { '0': 3, '1': 0, '2': 0, '3': 0, '4': 1, '5': 3 },
       unexpectedTaskCount: 0,
-      missingCriterionSlots: 7,
+      missingCriterionSlots: 12,
     });
     expect(summary.finalResults).toMatchObject({
-      finalized: 2,
+      finalized: 3,
       passed: 1,
-      failed: 1,
-      partiallyPassed: 0,
+      failed: 2,
       notFinalized: 4,
     });
     expect(summary.supplement).toEqual({ applications: 1, tasks: 2 });
-    expect(summary.resolution).toMatchObject({ openCases: 1, resolvedCases: 0, blockedApplications: 1 });
+    expect(summary.resolution).toMatchObject({
+      openCases: 1,
+      resolvedCases: 0,
+      blockedApplications: 1,
+    });
     expect(summary.criteria.find((item) => item.criterion === Criterion.academic)).toMatchObject({
       totalTasks: 5,
       supplementRequired: 1,
@@ -269,8 +334,19 @@ describe('CityAnalyticsService', () => {
     });
     expect(summary.bySchool).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ workspaceId: schoolAId, submitted: 3, reviewComplete: 2, finalPassed: 1 }),
-        expect.objectContaining({ workspaceId: 'school-b', submitted: 3, supplementRequired: 1, finalFailed: 1 }),
+        expect.objectContaining({
+          workspaceId: schoolAId,
+          submitted: 4,
+          reviewComplete: 2,
+          finalPassed: 1,
+          finalFailed: 1,
+        }),
+        expect.objectContaining({
+          workspaceId: 'school-b',
+          submitted: 3,
+          supplementRequired: 1,
+          finalFailed: 1,
+        }),
       ]),
     );
     expect(JSON.stringify(summary)).not.toContain('studentCode');
@@ -294,24 +370,88 @@ describe('CityAnalyticsService', () => {
       progressDistribution: { '0': 0, '1': 0, '2': 0, '3': 0, '4': 0, '5': 0 },
       unexpectedTaskCount: 0,
     });
-    expect(summary.finalResults).toMatchObject({ finalized: 0, passed: 0, failed: 0, notFinalized: 0 });
+    expect(summary.finalResults).toMatchObject({
+      finalized: 0,
+      passed: 0,
+      failed: 0,
+      notFinalized: 0,
+    });
     expect(summary.criteria).toHaveLength(5);
     expect(summary.reviewers).toEqual([]);
     expect(summary.bySchool).toEqual([]);
   });
 
-  it('returns a null selected year and zero metrics when no City applications exist', async () => {
+  it('includes active schools with zero City applications in the school breakdown', async () => {
+    const service = new CityAnalyticsService();
+
+    const summary = await service.getSummary(cityManager, { schoolYear: '2025-2026' });
+
+    expect(summary.bySchool).toHaveLength(2);
+    expect(summary.bySchool).toEqual([
+      expect.objectContaining({
+        workspaceId: schoolAId,
+        submitted: 0,
+        inReview: 0,
+        supplementRequired: 0,
+        reviewComplete: 0,
+        finalPassed: 0,
+        finalFailed: 0,
+      }),
+      expect.objectContaining({
+        workspaceId: 'school-b',
+        submitted: 0,
+        inReview: 0,
+        supplementRequired: 0,
+        reviewComplete: 0,
+        finalPassed: 0,
+        finalFailed: 0,
+      }),
+    ]);
+  });
+
+  it('limits a selected-school breakdown to that school', async () => {
+    const service = new CityAnalyticsService();
+
+    const summary = await service.getSummary(cityManager, { workspaceId: 'school-b' });
+
+    expect(summary.bySchool).toHaveLength(1);
+    expect(summary.bySchool[0]).toMatchObject({ workspaceId: 'school-b', submitted: 0 });
+  });
+
+  it('keeps the active 2025-2026 City season selected when no applications exist', async () => {
     prismaMock.application.groupBy.mockResolvedValue([]);
+    prismaMock.cityReviewSeason.findFirst.mockResolvedValue(null);
     prismaMock.workspace.findMany.mockResolvedValue([]);
     prismaMock.user.findMany.mockResolvedValue([]);
     const service = new CityAnalyticsService();
 
     const summary = await service.getSummary(cityManager, {});
 
-    expect(summary.filters.schoolYear).toBeNull();
-    expect(summary.availableSchoolYears).toEqual([]);
+    expect(summary.filters.schoolYear).toBe('2025-2026');
+    expect(summary.availableSchoolYears).toEqual(['2025-2026']);
     expect(summary.applications.created).toBe(0);
     expect(summary.finalResults.notFinalized).toBe(0);
+  });
+
+  it('defaults summary and drill-down to 2025-2026 even when newer test data and seasons exist', async () => {
+    prismaMock.application.groupBy.mockResolvedValue([
+      { schoolYear: '2098-2099' },
+      { schoolYear: '2025-2026' },
+    ]);
+    prismaMock.cityReviewSeason.findFirst.mockResolvedValue({ schoolYear: '2026-2027' });
+    prismaMock.application.findMany.mockResolvedValue([]);
+    const service = new CityAnalyticsService();
+
+    const summary = await service.getSummary(cityManager, {});
+    const summaryQuery = prismaMock.application.findMany.mock.calls[0][0];
+
+    await service.listApplications(cityManager, { page: 1, limit: 20 });
+    const drillDownQuery = prismaMock.application.findMany.mock.calls[1][0];
+
+    expect(summary.filters.schoolYear).toBe('2025-2026');
+    expect(summary.availableSchoolYears).toEqual(['2098-2099', '2026-2027', '2025-2026']);
+    expect(summaryQuery.where.schoolYear).toBe('2025-2026');
+    expect(drillDownQuery.where.schoolYear).toBe('2025-2026');
   });
 
   it('reports missing criterion slots separately from duplicate or non-City task rows', async () => {
@@ -370,7 +510,9 @@ describe('CityAnalyticsService', () => {
 
     expect(summary.cancelledCount).toBe(2);
     expect(summary.applications.created).toBe(1);
-    expect(prismaMock.application.findMany.mock.calls[0][0].where).toMatchObject({ cancelledAt: null });
+    expect(prismaMock.application.findMany.mock.calls[0][0].where).toMatchObject({
+      cancelledAt: null,
+    });
     expect(prismaMock.application.findMany.mock.calls[0][0].where).not.toHaveProperty('archivedAt');
     expect(prismaMock.application.count.mock.calls[0][0].where).toMatchObject({
       cancelledAt: { not: null },
@@ -402,7 +544,18 @@ describe('CityAnalyticsService', () => {
       applicationType: ApplicationType.individual,
       targetLevel: Level.city,
       workspaceId: schoolAId,
-      finalStatus: FinalStatus.failed,
+      AND: expect.arrayContaining([
+        { OR: [
+          { finalStatus: FinalStatus.failed },
+          { finalStatus: FinalStatus.partially_passed },
+          {
+            AND: [
+              { finalStatus: FinalStatus.passed },
+              { OR: [{ finalLevel: { not: Level.city } }, { finalLevel: null }] },
+            ],
+          },
+        ] },
+      ]),
       reviewTasks: { some: { criterion: Criterion.academic, status: ReviewTaskStatus.rejected } },
     });
   });
@@ -433,7 +586,11 @@ describe('CityAnalyticsService', () => {
             OR: [
               { status: ApplicationStatus.resolution_needed },
               { reviewTasks: { some: { status: ReviewTaskStatus.resolution_needed } } },
-              { resolutionCases: { some: { status: { in: [ResolutionStatus.open, ResolutionStatus.in_review] } } } },
+              {
+                resolutionCases: {
+                  some: { status: { in: [ResolutionStatus.open, ResolutionStatus.in_review] } },
+                },
+              },
             ],
           },
         },
@@ -474,5 +631,59 @@ describe('CityAnalyticsService', () => {
 
     const query = prismaMock.application.findMany.mock.calls[0][0];
     expect(query.where).toMatchObject({ submittedAt: null });
+  });
+
+  it('filters City passes and partial results by the actual awarded level', async () => {
+    const service = new CityAnalyticsService();
+
+    await service.listApplications(cityManager, {
+      finalStatus: FinalStatus.passed,
+      page: 1,
+      limit: 20,
+    });
+    const cityPassQuery = prismaMock.application.findMany.mock.calls[0][0];
+    expect(cityPassQuery.where).toMatchObject({
+      AND: [{ finalStatus: FinalStatus.passed, finalLevel: Level.city }],
+    });
+
+    await service.listApplications(cityManager, {
+      finalStatus: FinalStatus.failed,
+      page: 1,
+      limit: 20,
+    });
+    const nonCityQuery = prismaMock.application.findMany.mock.calls[1][0];
+    expect(nonCityQuery.where.AND).toContainEqual({
+      OR: [
+        { finalStatus: FinalStatus.failed },
+        { finalStatus: FinalStatus.partially_passed },
+        {
+          AND: [
+            { finalStatus: FinalStatus.passed },
+            { OR: [{ finalLevel: { not: Level.city } }, { finalLevel: null }] },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('normalizes all finalized non-City outcomes to not achieved at City level in drill-down rows', async () => {
+    prismaMock.application.findMany.mockResolvedValue([
+      {
+        ...makeApplication({
+          id: 'partial',
+          status: ApplicationStatus.completed,
+          submittedAt,
+          finalStatus: FinalStatus.passed,
+          finalLevel: Level.school,
+        }),
+        reviewTasks: [],
+        resolutionCases: [],
+      },
+    ] as never);
+    const service = new CityAnalyticsService();
+
+    const result = await service.listApplications(cityManager, { page: 1, limit: 20 });
+
+    expect(result.items[0].finalStatus).toBe(FinalStatus.failed);
   });
 });

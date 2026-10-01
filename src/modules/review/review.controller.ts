@@ -20,7 +20,12 @@ export async function listReviewTasks(req: Request, res: Response): Promise<void
 }
 
 export async function getReviewTaskDetail(req: Request, res: Response): Promise<void> {
-  const data = await service.getTaskDetail(req.user!, String(req.params.id));
+  const data = await service.getTaskDetail(
+    req.user!,
+    String(req.params.id),
+    req.query.includeKnowledgeBaseMatches !== 'false',
+    req.query.includeAudit !== 'false',
+  );
   sendSuccess(res, data, { requestId: req.requestId });
 }
 

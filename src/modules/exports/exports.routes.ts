@@ -10,6 +10,7 @@ import {
   exportApplicationsJson,
   exportReviewResults,
   exportReviewTasksCsv,
+  exportReviewTasksJson,
 } from './exports.controller';
 import {
   exportApplicationsQuerySchema,
@@ -39,6 +40,13 @@ exportsRouter.get(
   requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: exportReviewTasksQuerySchema }),
   asyncHandler(exportReviewTasksCsv),
+);
+exportsRouter.get(
+  '/review-tasks.json',
+  requireAuth,
+  requireRole(Role.manager, Role.committee, Role.city_manager, Role.city_committee, Role.admin),
+  validate({ query: exportReviewTasksQuerySchema }),
+  asyncHandler(exportReviewTasksJson),
 );
 exportsRouter.post(
   '/review-results',

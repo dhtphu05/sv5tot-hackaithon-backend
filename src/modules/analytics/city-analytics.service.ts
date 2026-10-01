@@ -11,6 +11,7 @@ import {
   type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
+import { cityPilotSchoolYear } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import { coreCriteria } from '../../shared/constants/criteria';
@@ -49,6 +50,7 @@ type ApplicationRow = {
   status: ApplicationStatus;
   submittedAt: Date | null;
   finalStatus: FinalStatus;
+  finalLevel: Level | null;
   workspace: { id: string; code: string; name: string };
   reviewTasks: ReviewTaskRow[];
   resolutionCases: ResolutionRow[];
@@ -58,12 +60,8 @@ type ApplicationRow = {
 export class CityAnalyticsService {
   async getSummary(user: AuthenticatedUser, query: CityAnalyticsQuery) {
     authorizeCityAnalytics(user);
-    const [yearGroups, schools, officers] = await Promise.all([
-      prisma.application.groupBy({
-        by: ['schoolYear'],
-        where: cityApplicationWhere({}, 'all'),
-        orderBy: { schoolYear: 'desc' },
-      }),
+    const [yearSelection, schools, officers] = await Promise.all([
+      getCitySchoolYears(),
       prisma.workspace.findMany({
         where: { type: WorkspaceType.SCHOOL, isActive: true },
         select: { id: true, code: true, name: true },
@@ -71,7 +69,9 @@ export class CityAnalyticsService {
       }),
       prisma.user.findMany({
         where: {
-          ...(user.role === Role.city_manager ? { workspaceId: user.workspaceId! } : {}),
+          ...(user.role === Role.city_manager || user.role === Role.city_committee
+            ? { workspaceId: user.workspaceId! }
+            : {}),
           role: Role.city_officer,
           isActive: true,
           workspace: { is: { type: WorkspaceType.CITY, isActive: true } },
@@ -81,8 +81,8 @@ export class CityAnalyticsService {
       }),
     ]);
 
-    const availableSchoolYears = yearGroups.map((item) => item.schoolYear);
-    const schoolYear = query.schoolYear ?? availableSchoolYears[0] ?? null;
+    const { availableSchoolYears } = yearSelection;
+    const schoolYear = query.schoolYear ?? cityPilotSchoolYear;
     const filters = { ...query, schoolYear: schoolYear ?? undefined };
     let rows: ApplicationRow[] = [];
     let cancelledCount = 0;
@@ -99,6 +99,7 @@ export class CityAnalyticsService {
             status: true,
             submittedAt: true,
             finalStatus: true,
+            finalLevel: true,
             workspace: { select: { id: true, code: true, name: true } },
             reviewTasks: { select: { criterion: true, status: true, assignedOfficerId: true } },
             resolutionCases: { select: { status: true } },
@@ -119,15 +120,30 @@ export class CityAnalyticsService {
 
   async listApplications(user: AuthenticatedUser, query: CityAnalyticsApplicationsQuery) {
     authorizeCityAnalytics(user);
-    const yearGroups = await prisma.application.groupBy({
-      by: ['schoolYear'],
-      where: cityApplicationWhere({}, 'all'),
-      orderBy: { schoolYear: 'desc' },
-    });
-    const schoolYear = query.schoolYear ?? yearGroups[0]?.schoolYear;
+    const schoolYear = query.schoolYear ?? cityPilotSchoolYear;
     const where = cityApplicationWhere({ ...query, schoolYear });
-    if (query.finalStatus) where.finalStatus = query.finalStatus;
     const andFilters: Prisma.ApplicationWhereInput[] = [];
+    if (query.finalStatus === FinalStatus.passed) {
+      andFilters.push({ finalStatus: FinalStatus.passed, finalLevel: Level.city });
+    } else if (
+      query.finalStatus === FinalStatus.failed ||
+      query.finalStatus === FinalStatus.partially_passed
+    ) {
+      andFilters.push({
+        OR: [
+          { finalStatus: FinalStatus.failed },
+          { finalStatus: FinalStatus.partially_passed },
+          {
+            AND: [
+              { finalStatus: FinalStatus.passed },
+              { OR: [{ finalLevel: { not: Level.city } }, { finalLevel: null }] },
+            ],
+          },
+        ],
+      });
+    } else if (query.finalStatus) {
+      where.finalStatus = query.finalStatus;
+    }
     if (query.submitted !== undefined) {
       where.submittedAt = query.submitted ? { not: null } : null;
     }
@@ -185,6 +201,7 @@ export class CityAnalyticsService {
           status: true,
           submittedAt: true,
           finalStatus: true,
+          finalLevel: true,
           workspace: { select: { id: true, code: true, name: true } },
           student: { select: { fullName: true, studentCode: true } },
           reviewTasks: { select: { criterion: true, status: true } },
@@ -208,7 +225,7 @@ export class CityAnalyticsService {
           expected: 5 as const,
           anomalous: Boolean(application.submittedAt && (progress.missingSlots > 0 || progress.unexpectedTasks > 0)),
         },
-        finalStatus: application.finalStatus,
+        finalStatus: cityResultStatus(application.finalStatus, application.finalLevel),
         supplementRequired: isSupplementRequired(application),
         resolutionBlocked: isResolutionBlocked(application),
         student: application.student,
@@ -232,9 +249,35 @@ export class CityAnalyticsService {
   }
 }
 
+async function getCitySchoolYears() {
+  const [yearGroups, latestSeason] = await Promise.all([
+    prisma.application.groupBy({
+      by: ['schoolYear'],
+      where: cityApplicationWhere({}, 'all'),
+      orderBy: { schoolYear: 'desc' },
+    }),
+    prisma.cityReviewSeason.findFirst({
+      orderBy: { schoolYear: 'desc' },
+      select: { schoolYear: true },
+    }),
+  ]);
+  const availableSchoolYears = [
+    ...new Set([
+      cityPilotSchoolYear,
+      ...(latestSeason ? [latestSeason.schoolYear] : []),
+      ...yearGroups.map((item) => item.schoolYear),
+    ]),
+  ].sort((left, right) => right.localeCompare(left));
+
+  return {
+    availableSchoolYears,
+    latestConfiguredSchoolYear: latestSeason?.schoolYear ?? null,
+  };
+}
+
 function authorizeCityAnalytics(user: AuthenticatedUser): void {
   if (user.role === Role.admin) return;
-  if (user.role !== Role.city_manager) {
+  if (user.role !== Role.city_manager && user.role !== Role.city_committee) {
     throw new AppError(403, ErrorCodes.FORBIDDEN, 'This role cannot view City analytics');
   }
   if (
@@ -307,6 +350,20 @@ function summarize(
     finalPassed: number;
     finalFailed: number;
   }>();
+  for (const school of schools) {
+    if (filters.workspaceId && filters.workspaceId !== school.id) continue;
+    schoolMap.set(school.id, {
+      workspaceId: school.id,
+      code: school.code,
+      name: school.name,
+      submitted: 0,
+      inReview: 0,
+      supplementRequired: 0,
+      reviewComplete: 0,
+      finalPassed: 0,
+      finalFailed: 0,
+    });
+  }
   const officerMap = new Map(officers.map((officer) => [officer.id, {
     officerId: officer.id,
     fullName: officer.fullName,
@@ -319,7 +376,6 @@ function summarize(
   let finalized = 0;
   let passed = 0;
   let failed = 0;
-  let partiallyPassed = 0;
   let notFinalized = 0;
   let supplementApplications = 0;
   let supplementTasks = 0;
@@ -385,11 +441,19 @@ function summarize(
     }
 
     if (submitted) {
-      if (application.finalStatus === FinalStatus.passed) passed += 1;
-      else if (application.finalStatus === FinalStatus.failed) failed += 1;
-      else if (application.finalStatus === FinalStatus.partially_passed) partiallyPassed += 1;
-      else notFinalized += 1;
-      if (application.finalStatus !== FinalStatus.pending) finalized += 1;
+      if (application.finalStatus === FinalStatus.pending) {
+        notFinalized += 1;
+      } else {
+        finalized += 1;
+        if (
+          application.finalStatus === FinalStatus.passed &&
+          application.finalLevel === Level.city
+        ) {
+          passed += 1;
+        } else {
+          failed += 1;
+        }
+      }
     }
 
     const school = schoolMap.get(application.workspaceId) ?? {
@@ -407,8 +471,16 @@ function summarize(
     if (submitted && isInReview(application.status)) school.inReview += 1;
     if (supplementRequired) school.supplementRequired += 1;
     if (complete) school.reviewComplete += 1;
-    if (submitted && application.finalStatus === FinalStatus.passed) school.finalPassed += 1;
-    if (submitted && application.finalStatus === FinalStatus.failed) school.finalFailed += 1;
+    if (submitted && application.finalStatus !== FinalStatus.pending) {
+      if (
+        application.finalStatus === FinalStatus.passed &&
+        application.finalLevel === Level.city
+      ) {
+        school.finalPassed += 1;
+      } else {
+        school.finalFailed += 1;
+      }
+    }
     schoolMap.set(application.workspaceId, school);
   }
 
@@ -421,10 +493,17 @@ function summarize(
     criteria,
     bySchool: [...schoolMap.values()].sort((left, right) => left.name.localeCompare(right.name)),
     reviewers: [...officerMap.values()],
-    finalResults: { finalized, passed, failed, partiallyPassed, notFinalized },
+    finalResults: { finalized, passed, failed, notFinalized },
     supplement: { applications: supplementApplications, tasks: supplementTasks },
     resolution: { openCases, resolvedCases, blockedApplications },
   };
+}
+
+function cityResultStatus(status: FinalStatus, level: Level | null): FinalStatus {
+  if (status === FinalStatus.pending) return FinalStatus.pending;
+  return status === FinalStatus.passed && level === Level.city
+    ? FinalStatus.passed
+    : FinalStatus.failed;
 }
 
 function reviewProgress(tasks: ReviewTaskRow[]) {

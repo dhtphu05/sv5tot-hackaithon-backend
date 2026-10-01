@@ -67,12 +67,15 @@ const volunteerActivityRequirementKeys = ['accumulated_volunteer_days', 'activit
 type CompletionApplication = NonNullable<
   Awaited<ReturnType<CriteriaCompletionRepository['findApplicationContext']>>
 >;
+type CriteriaCompletionReadApplication = NonNullable<
+  Awaited<ReturnType<CriteriaCompletionRepository['findApplicationForCompletion']>>
+>;
 
 export class CriteriaCompletionService {
   constructor(private readonly repository = new CriteriaCompletionRepository()) {}
 
   async getCompletion(user: AuthenticatedUser, applicationId: string) {
-    const application = await this.getApplication(applicationId);
+    const application = await this.getApplicationForCompletion(applicationId);
     assertCriteriaCompletionViewAccess(application, user);
 
     const criteria = await loadCriteriaRules({
@@ -1027,6 +1030,16 @@ export class CriteriaCompletionService {
 
   private async getApplication(applicationId: string): Promise<CompletionApplication> {
     const application = await this.repository.findApplicationContext(applicationId);
+    if (!application) {
+      throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
+    }
+    return application;
+  }
+
+  private async getApplicationForCompletion(
+    applicationId: string,
+  ): Promise<CriteriaCompletionReadApplication> {
+    const application = await this.repository.findApplicationForCompletion(applicationId);
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }

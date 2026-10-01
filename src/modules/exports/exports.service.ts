@@ -1,6 +1,8 @@
 // Owns export job requests for applications and review results.
 import {
+  ApplicationType,
   FileStorageType,
+  FinalStatus,
   Level,
   ReviewTaskStatus,
   Role,
@@ -12,7 +14,7 @@ import path from 'node:path';
 import { env } from '../../config/env';
 import { uploadConfig } from '../../config/upload';
 import { prisma } from '../../infrastructure/database/prisma';
-import { auditActions } from '../../shared/constants/application';
+import { auditActions, cityPilotSchoolYear } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -76,6 +78,24 @@ export class ExportsService {
       afterStateJson: { rowCount: items.length, filters: query },
     });
     return toCsv(items, reviewTaskCsvHeaders);
+  }
+
+  async exportReviewTasksJson(user: AuthenticatedUser, query: ExportReviewTasksQuery) {
+    const items = await this.buildReviewTaskRows(user, query);
+    await createApplicationAudit(prisma, {
+      actorId: user.id,
+      actorRole: user.role,
+      workspaceId: user.role === Role.admin ? null : user.workspaceId,
+      action: 'EXPORT_REVIEW_TASKS_JSON',
+      targetType: 'export',
+      targetId: 'review-tasks.json',
+      afterStateJson: { rowCount: items.length, filters: query },
+    });
+    return {
+      exportedAt: new Date().toISOString(),
+      filters: query,
+      items,
+    };
   }
 
   async exportReviewResults(user: AuthenticatedUser, input: ExportReviewResultsInput) {
@@ -195,6 +215,7 @@ export class ExportsService {
       ...(input.status ? { status: input.status } : {}),
       ...(input.targetLevel ? { targetLevel: input.targetLevel } : {}),
       ...(input.faculty ? { student: { faculty: input.faculty } } : {}),
+      ...cityOperationsApplicationWhere(user, input.schoolYear ?? cityPilotSchoolYear),
     };
     const applications = await prisma.application.findMany({
       where,
@@ -209,6 +230,35 @@ export class ExportsService {
 
     return applications.map((application) => {
       const latestCascade = application.cascadeReviews[0] ?? null;
+      const cityOnly =
+        user.role === Role.city_manager ||
+        user.role === Role.city_committee ||
+        user.role === Role.admin;
+      if (cityOnly) {
+        return {
+          studentCode: application.student.studentCode,
+          fullName: application.student.fullName,
+          className: application.student.className,
+          faculty: application.student.faculty,
+          schoolYear: application.schoolYear,
+          finalStatus:
+            application.finalStatus === FinalStatus.pending
+              ? FinalStatus.pending
+              : application.finalStatus === FinalStatus.passed &&
+                  application.finalLevel === Level.city
+                ? FinalStatus.passed
+                : FinalStatus.failed,
+          applicationStatus: application.status,
+          readinessScore: application.readinessScore,
+          submittedAt: application.submittedAt,
+          completedAt: application.finalizedAt,
+          criteriaTaskStatuses: Object.fromEntries(
+            application.reviewTasks.map((task) => [task.criterion, task.status]),
+          ),
+          finalizedByName: application.finalizedBy?.fullName ?? null,
+          finalNote: application.finalNote,
+        };
+      }
       return {
       studentCode: application.student.studentCode,
       fullName: application.student.fullName,
@@ -245,6 +295,7 @@ export class ExportsService {
       ...buildApplicationWhere(query),
       ...buildLifecycleWhere(query.lifecycle),
       ...reviewWorkspaceFilterFor(user),
+      ...cityOperationsApplicationWhere(user, query.schoolYear ?? cityPilotSchoolYear),
     };
     const applications = await prisma.application.findMany({
       where,
@@ -287,6 +338,7 @@ export class ExportsService {
       application: {
         ...buildApplicationWhere(query),
         ...buildLifecycleWhere(query.lifecycle),
+        ...cityOperationsApplicationWhere(user, query.schoolYear ?? cityPilotSchoolYear),
       },
     };
     const tasks = await prisma.reviewTask.findMany({
@@ -308,6 +360,7 @@ export class ExportsService {
       criterion: task.criterion,
       status: task.status,
       decision: task.decision,
+      officerNote: task.officerNote,
       assignedOfficerId: task.assignedOfficerId,
       assignedOfficerName: task.assignedOfficer?.fullName,
       studentCode: task.application?.student.studentCode,
@@ -319,6 +372,25 @@ export class ExportsService {
       updatedAt: task.updatedAt.toISOString(),
     }));
   }
+}
+
+function cityOperationsApplicationWhere(
+  user: AuthenticatedUser,
+  schoolYear: string,
+): Prisma.ApplicationWhereInput {
+  if (
+    user.role !== Role.city_manager &&
+    user.role !== Role.city_committee &&
+    user.role !== Role.admin
+  ) {
+    return {};
+  }
+  return {
+    applicationType: ApplicationType.individual,
+    targetLevel: Level.city,
+    schoolYear,
+    workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+  };
 }
 
 function isExportFilePath(filePath: string) {

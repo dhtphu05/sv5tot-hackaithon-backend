@@ -3,6 +3,8 @@ export const applicationDefaults = {
   initialReadinessScore: 0,
 } as const;
 
+export const cityPilotSchoolYear = '2025-2026';
+
 export const editableApplicationStatuses = [
   'draft',
   'prechecked',

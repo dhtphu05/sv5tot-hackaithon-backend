@@ -10,8 +10,18 @@ import type { ListReviewTasksQuery } from './review.validation';
 
 export const reviewTaskListInclude = {
   workspace: { select: { name: true, shortName: true, type: true, isActive: true } },
-  application: { include: { student: true } },
-  collectiveProfile: { include: { representative: true } },
+  application: {
+    include: {
+      student: {
+        select: { id: true, fullName: true, studentCode: true, className: true, faculty: true },
+      },
+    },
+  },
+  collectiveProfile: {
+    include: {
+      representative: { select: { id: true, fullName: true, faculty: true } },
+    },
+  },
   assignedOfficer: { select: { id: true, fullName: true } },
   evidences: {
     include: {
@@ -36,7 +46,16 @@ export const reviewTaskDetailInclude = {
   workspace: { select: { id: true, name: true, shortName: true, type: true, isActive: true } },
   application: {
     include: {
-      student: true,
+      student: {
+        select: {
+          id: true,
+          fullName: true,
+          studentCode: true,
+          className: true,
+          faculty: true,
+          email: true,
+        },
+      },
       metrics: true,
       precheckResults: { orderBy: { createdAt: 'desc' }, take: 1 },
       cascadeReviews: { orderBy: { createdAt: 'desc' }, take: 1 },
@@ -44,19 +63,68 @@ export const reviewTaskDetailInclude = {
   },
   collectiveProfile: {
     include: {
-      representative: true,
+      representative: {
+        select: {
+          id: true,
+          fullName: true,
+          studentCode: true,
+          className: true,
+          faculty: true,
+          email: true,
+        },
+      },
       members: true,
       precheckResults: { orderBy: { createdAt: 'desc' }, take: 1 },
     },
   },
-  assignedOfficer: true,
+  assignedOfficer: { select: { id: true, fullName: true } },
   evidences: {
     include: {
       evidence: {
         include: {
-          evidenceFiles: { include: { file: true } },
-          evidenceCard: true,
-          event: true,
+          evidenceFiles: {
+            include: {
+              file: {
+                select: {
+                  id: true,
+                  originalName: true,
+                  mimeType: true,
+                  fileSize: true,
+                  publicUrl: true,
+                  createdAt: true,
+                },
+              },
+            },
+          },
+          evidenceCard: {
+            select: {
+              id: true,
+              ocrText: true,
+              extractedFieldsJson: true,
+              normalizedFieldsJson: true,
+              confirmedFieldsJson: true,
+              warningsJson: true,
+              matchedEventId: true,
+              matchedParticipantId: true,
+              matchedKnowledgeItemIds: true,
+              confidence: true,
+              aiSummary: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          },
+          event: {
+            select: {
+              id: true,
+              eventName: true,
+              organizer: true,
+              organizerLevel: true,
+              startDate: true,
+              endDate: true,
+              convertedValue: true,
+              convertedUnit: true,
+            },
+          },
         },
       },
     },
@@ -181,7 +249,11 @@ export class ReviewRepository {
     }
 
     const specializations = await prisma.officerSpecialization.findMany({
-      where: { officerId: user.id, isActive: true },
+      where: {
+        officerId: user.id,
+        isActive: true,
+        officer: { role: user.role, isActive: true },
+      },
       select: { criterion: true },
     });
     const criteria = Array.from(new Set(specializations.map((item) => item.criterion)));
@@ -217,9 +289,10 @@ export class ReviewRepository {
     const limit = query.pageSize ?? query.limit;
     const skip = (query.page - 1) * limit;
     const where = await this.buildTaskWhere(user, query);
-    const [items, total] = await prisma.$transaction([
+    const [items, total] = await Promise.all([
       prisma.reviewTask.findMany({
         where,
+        relationLoadStrategy: 'join',
         include: reviewTaskListInclude,
         orderBy: [{ dueDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'desc' }],
         skip,
@@ -234,6 +307,7 @@ export class ReviewRepository {
   findDetail(taskId: string) {
     return prisma.reviewTask.findUnique({
       where: { id: taskId },
+      relationLoadStrategy: 'join',
       include: reviewTaskDetailInclude,
     });
   }

@@ -1369,7 +1369,16 @@ export const openApiDocument = {
         tags: ['Review'],
         summary: 'Get review task detail with evidences, cards, precheck, cascade and KB matches',
         security: bearerSecurity,
-        parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string' } }],
+        parameters: [
+          { in: 'path', name: 'id', required: true, schema: { type: 'string' } },
+          {
+            in: 'query',
+            name: 'includeKnowledgeBaseMatches',
+            required: false,
+            schema: { type: 'boolean', default: true },
+            description: 'Set false when the caller does not need related Knowledge Base matches.',
+          },
+        ],
         responses: {
           '200': {
             description: 'Review task detail',
@@ -1588,6 +1597,14 @@ export const openApiDocument = {
           'Không expose local file path. CSV được tải qua /api/exports/{fileId}/download.',
         security: bearerSecurity,
         responses: { '201': jsonResponse('Export result or file metadata') },
+      },
+    },
+    '/api/exports/review-tasks.json': {
+      get: {
+        tags: ['Exports'],
+        summary: 'Get filtered review-task rows as JSON for spreadsheet export',
+        security: bearerSecurity,
+        responses: { '200': jsonResponse('Filtered review-task rows') },
       },
     },
     '/api/exports/{fileId}/download': {

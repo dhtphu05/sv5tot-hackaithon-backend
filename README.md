@@ -29,6 +29,19 @@ Default password: `Password@123`
 - `committee@dut.udn.vn`
 - `admin@dut.udn.vn`
 
+City-workflow QA accounts (one City Officer per criterion):
+
+- `hoctap_sv5tot@gmail.com` — Học tập
+- `daoduc_sv5tot@gmail.com` — Đạo đức
+- `theluc_sv5tot@gmail.com` — Thể lực
+- `tinhnguyen_sv5tot@gmail.com` — Tình nguyện
+- `hoinhap_sv5tot@gmail.com` — Hội nhập
+- `manager@danang.city` — City Manager
+- `committee@danang.city` — City Committee
+- `uploader@udn.vn` — Data Uploader
+
+These accounts are created by the disposable QA seed only. The shared password is `SEED_DEFAULT_PASSWORD` (default: `Password@123`). Existing school demo students remain in the school workspaces; register a new student against an open school to test the current City submission flow. Do not run the QA seed against pilot or production databases.
+
 ## Frontend Integration
 
 Tai lieu ket noi API theo tung domain bat dau tai

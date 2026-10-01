@@ -40,6 +40,7 @@ import { exportsRouter } from '../../src/modules/exports/exports.routes';
 import { ExportsService } from '../../src/modules/exports/exports.service';
 import { resolutionRouter } from '../../src/modules/resolution/resolution.routes';
 import { ResolutionService } from '../../src/modules/resolution/resolution.service';
+import { cityPilotSchoolYear } from '../../src/shared/constants/application';
 
 const cityId = '22222222-2222-4222-8222-222222222222';
 const schoolId = '11111111-1111-4111-8111-111111111111';
@@ -66,6 +67,31 @@ beforeEach(() => {
 });
 
 describe('City resolution authorization', () => {
+  it('applies City level and 2025-2026 filters to admin resolution lists when requested', async () => {
+    const service = new ResolutionService();
+
+    await service.listCases(cityUser(Role.admin), {
+      page: 1,
+      limit: 10,
+      level: 'city',
+      schoolYear: cityPilotSchoolYear,
+    } as never);
+
+    expect(prisma.resolutionCase.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          AND: expect.arrayContaining([
+            {
+              application: {
+                is: { targetLevel: 'city', schoolYear: cityPilotSchoolYear },
+              },
+            },
+          ]),
+        }),
+      }),
+    );
+  });
+
   it('scopes City resolution lists to active School workspaces and retains legacy same-workspace scope', async () => {
     const service = new ResolutionService();
     await service.listCases(cityUser(Role.city_manager), { page: 1, limit: 10 } as never);
@@ -74,6 +100,16 @@ describe('City resolution authorization', () => {
         where: expect.objectContaining({
           AND: expect.arrayContaining([
             { workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } } },
+            {
+              application: {
+                is: {
+                  applicationType: 'individual',
+                  targetLevel: 'city',
+                  schoolYear: '2025-2026',
+                  workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+                },
+              },
+            },
           ]),
         }),
       }),
@@ -95,6 +131,37 @@ describe('City resolution authorization', () => {
       }),
     );
   });
+
+  it.each([Role.city_manager, Role.city_committee, Role.admin])(
+    'restricts %s exports to City individual applications in the 2025-2026 season',
+    async (role) => {
+      const service = new ExportsService({} as never);
+      await service.exportApplicationsJson(cityUser(role), {} as never);
+
+      expect(prisma.application.findMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            applicationType: 'individual',
+            targetLevel: 'city',
+            schoolYear: '2025-2026',
+            workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+          }),
+        }),
+      );
+
+      await service.exportReviewResults(cityUser(role), { format: 'json' } as never);
+      expect(prisma.application.findMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            applicationType: 'individual',
+            targetLevel: 'city',
+            schoolYear: '2025-2026',
+            workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+          }),
+        }),
+      );
+    },
+  );
 
   it('keeps legacy school officers out of City resolution lists and details', async () => {
     const service = new ResolutionService();
@@ -508,6 +575,9 @@ describe('City audit and export scope', () => {
       expect.objectContaining({
         where: {
           cancelledAt: null,
+          applicationType: ApplicationType.individual,
+          targetLevel: 'city',
+          schoolYear: cityPilotSchoolYear,
           workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
         },
       }),
@@ -520,6 +590,9 @@ describe('City audit and export scope', () => {
       expect.objectContaining({
         where: {
           cancelledAt: null,
+          applicationType: ApplicationType.individual,
+          targetLevel: 'city',
+          schoolYear: cityPilotSchoolYear,
           workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
         },
       }),
@@ -528,10 +601,16 @@ describe('City audit and export scope', () => {
     await new ExportsService().exportReviewTasksCsv(cityUser(Role.city_committee), {} as never);
     expect(prisma.reviewTask.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        where: {
+        where: expect.objectContaining({
           workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
-          application: { cancelledAt: null },
-        },
+          application: {
+            cancelledAt: null,
+            applicationType: ApplicationType.individual,
+            targetLevel: 'city',
+            schoolYear: cityPilotSchoolYear,
+            workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+          },
+        }),
       }),
     );
 
