@@ -4,7 +4,10 @@ import { logger } from '../src/config/logger';
 import { prisma } from '../src/infrastructure/database/prisma';
 import { PasswordService } from '../src/modules/auth/password.service';
 import { defaultCriteriaUnitScope, fallbackRulesByLevel } from '../src/modules/rules/criteria.constants';
-import { cityDemoOfficerUsers } from './seeds/demo-city-officers';
+import {
+  cityDemoMultiSpecializedOfficer,
+  cityDemoOfficerUsers,
+} from './seeds/demo-city-officers';
 import { seedNormalizedCriteria } from './seeds/criteria/seed-criteria';
 import { danangSchoolWorkspaces } from './seeds/danang-workspaces';
 
@@ -69,41 +72,6 @@ const demoUsers: SeedUser[] = [
     specializations: [Criterion.academic, Criterion.ethics, Criterion.volunteer],
   },
   {
-    email: 'officer.academic@dut.udn.vn',
-    role: Role.officer,
-    fullName: 'Cán bộ Học tập',
-    faculty: 'Khoa Công nghệ Thông tin',
-    specialization: Criterion.academic,
-  },
-  {
-    email: 'officer.volunteer@dut.udn.vn',
-    role: Role.officer,
-    fullName: 'Cán bộ Tình nguyện',
-    faculty: 'Khoa Công nghệ Thông tin',
-    specialization: Criterion.volunteer,
-  },
-  {
-    email: 'officer.ethics@dut.udn.vn',
-    role: Role.officer,
-    fullName: 'Cán bộ Đạo đức',
-    faculty: 'Khoa Công nghệ Thông tin',
-    specialization: Criterion.ethics,
-  },
-  {
-    email: 'officer.physical@dut.udn.vn',
-    role: Role.officer,
-    fullName: 'Cán bộ Thể lực',
-    faculty: 'Khoa Công nghệ Thông tin',
-    specialization: Criterion.physical,
-  },
-  {
-    email: 'officer.integration@dut.udn.vn',
-    role: Role.officer,
-    fullName: 'Cán bộ Hội nhập',
-    faculty: 'Khoa Công nghệ Thông tin',
-    specialization: Criterion.integration,
-  },
-  {
     email: 'manager@dut.udn.vn',
     role: Role.manager,
     fullName: 'Quản lý Hội Sinh viên',
@@ -154,13 +122,14 @@ const economicsDemoUsers: SeedUser[] = [
 
 const cityDemoUsers: SeedUser[] = [
   ...cityDemoOfficerUsers,
+  cityDemoMultiSpecializedOfficer,
   {
-    email: 'manager@danang.city',
+    email: 'sv5tot_quanly@gmail.com',
     role: Role.city_manager,
     fullName: 'Quản lý cấp thành phố',
   },
   {
-    email: 'committee@danang.city',
+    email: 'sv5tot_hoidong@gmail.com',
     role: Role.city_committee,
     fullName: 'Hội đồng cấp thành phố',
   },
@@ -255,8 +224,12 @@ function getSeededWorkspace(
   return workspace;
 }
 
-async function seedUserList(users: SeedUser[], workspaceId: string | null): Promise<void> {
-  const passwordHash = await passwordService.hashPassword(env.SEED_DEFAULT_PASSWORD);
+async function seedUserList(
+  users: SeedUser[],
+  workspaceId: string | null,
+  defaultPassword = env.SEED_DEFAULT_PASSWORD,
+): Promise<void> {
+  const passwordHash = await passwordService.hashPassword(defaultPassword);
 
   for (const seedUser of users) {
     const userWorkspaceId = seedUser.role === Role.admin ? null : workspaceId;
@@ -323,7 +296,11 @@ async function seedUsers(): Promise<void> {
     await seedWorkspaces();
   await seedUserList(demoUsers, defaultWorkspace.id);
   await seedUserList(economicsDemoUsers, economicsWorkspace.id);
-  await seedUserList(cityDemoUsers, cityWorkspace.id);
+  await seedUserList(
+    cityDemoUsers,
+    cityWorkspace.id,
+    env.CITY_STAFF_SEED_PASSWORD ?? env.SEED_DEFAULT_PASSWORD,
+  );
   await seedUserList(universityDemoUsers, universityWorkspace.id);
 }
 

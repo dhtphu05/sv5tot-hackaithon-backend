@@ -92,17 +92,20 @@ Role guard chi phuc vu UX; khong thay authorization cua backend.
 
 ## Demo accounts
 
-Mat khau seed mac dinh: `Password@123`.
+Mat khau seed mac dinh cho student/legacy demo: `Password@123`. City staff dung `CITY_STAFF_SEED_PASSWORD` neu duoc cau hinh, neu khong se fallback ve `SEED_DEFAULT_PASSWORD`.
 
 - `student@dut.udn.vn`
 - `classrep@dut.udn.vn`
-- `officer.academic@dut.udn.vn`
-- `officer.volunteer@dut.udn.vn`
-- `officer.ethics@dut.udn.vn`
-- `officer.physical@dut.udn.vn`
-- `officer.integration@dut.udn.vn`
+- `sv5tot_hoctap@gmail.com` — City Officer, Học tập
+- `sv5tot_tinhnguyen@gmail.com` — City Officer, Tình nguyện
+- `sv5tot_daoduc@gmail.com` — City Officer, Đạo đức
+- `sv5tot_theluc@gmail.com` — City Officer, Thể lực
+- `sv5tot_hoinhap@gmail.com` — City Officer, Hội nhập
+- `sv5tot_canbo@gmail.com` — City Officer, Học tập, Đạo đức, Tình nguyện
+- `sv5tot_quanly@gmail.com` — City Manager
+- `sv5tot_hoidong@gmail.com` — City Committee
 - `manager@dut.udn.vn`
 - `committee@dut.udn.vn`
 - `admin@dut.udn.vn`
 
-Tat ca email seed dung domain `@dut.udn.vn`.
+City staff credentials use `CITY_STAFF_SEED_PASSWORD` when configured, or `SEED_DEFAULT_PASSWORD` otherwise. Student and legacy school demo accounts keep their existing seed configuration.

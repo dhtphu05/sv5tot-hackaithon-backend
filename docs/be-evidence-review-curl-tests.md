@@ -27,8 +27,8 @@ Thiet lap bien moi truong:
 ```bash
 BASE_URL=http://localhost:8080
 STUDENT_EMAIL=student@dut.udn.vn
-OFFICER_EMAIL=officer.volunteer@dut.udn.vn
-MANAGER_EMAIL=manager@dut.udn.vn
+OFFICER_EMAIL=sv5tot_tinhnguyen@gmail.com
+MANAGER_EMAIL=sv5tot_quanly@gmail.com
 PASSWORD=ChangeMe123!
 
 STUDENT_TOKEN=

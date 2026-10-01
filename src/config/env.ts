@@ -18,6 +18,10 @@ const optionalUrlFromEnv = z.preprocess(
   (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
   z.string().url().optional(),
 );
+const optionalPasswordFromEnv = z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  z.string().min(8).max(128).optional(),
+);
 const modelFromEnv = z.preprocess(
   (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
   z.string().min(1).default('gpt-6-luna'),
@@ -40,6 +44,7 @@ const rawEnvSchema = z.object({
   BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(15).optional(),
   BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
   SEED_DEFAULT_PASSWORD: z.string().min(8).default('Password@123'),
+  CITY_STAFF_SEED_PASSWORD: optionalPasswordFromEnv,
   CORS_ORIGIN: z
     .string()
     .min(1, 'CORS_ORIGIN is required')
