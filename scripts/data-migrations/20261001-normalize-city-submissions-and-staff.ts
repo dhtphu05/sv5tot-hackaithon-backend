@@ -11,11 +11,11 @@ const promotionAuditAction = 'DATA_MIGRATION_PROMOTE_CITY_OFFICER';
 const deactivationAuditAction = 'DATA_MIGRATION_DEACTIVATE_SCHOOL_REVIEW_STAFF';
 
 const expectedOfficers = [
-  { email: 'officer.academic@dut.udn.vn', criterion: 'academic' },
-  { email: 'officer.ethics@dut.udn.vn', criterion: 'ethics' },
-  { email: 'officer.integration@dut.udn.vn', criterion: 'integration' },
-  { email: 'officer.physical@dut.udn.vn', criterion: 'physical' },
-  { email: 'officer.volunteer@dut.udn.vn', criterion: 'volunteer' },
+  { email: 'sv5tot_hoctap@gmail.com', criterion: 'academic' },
+  { email: 'sv5tot_daoduc@gmail.com', criterion: 'ethics' },
+  { email: 'sv5tot_hoinhap@gmail.com', criterion: 'integration' },
+  { email: 'sv5tot_theluc@gmail.com', criterion: 'physical' },
+  { email: 'sv5tot_tinhnguyen@gmail.com', criterion: 'volunteer' },
 ] as const;
 const expectedSchoolLeads = [
   { email: 'manager@dut.udn.vn', role: 'manager' },

@@ -8,11 +8,11 @@ const expectedSchoolCode = 'DHBK-DHDN';
 const expectedSchoolYear = '2025-2026';
 const auditAction = 'DATA_MIGRATION_ASSIGN_TASK_TO_CRITERION_REVIEWER';
 const officerByCriterion = [
-  { criterion: 'academic', email: 'officer.academic@dut.udn.vn' },
-  { criterion: 'ethics', email: 'officer.ethics@dut.udn.vn' },
-  { criterion: 'integration', email: 'officer.integration@dut.udn.vn' },
-  { criterion: 'physical', email: 'officer.physical@dut.udn.vn' },
-  { criterion: 'volunteer', email: 'officer.volunteer@dut.udn.vn' },
+  { criterion: 'academic', email: 'sv5tot_hoctap@gmail.com' },
+  { criterion: 'ethics', email: 'sv5tot_daoduc@gmail.com' },
+  { criterion: 'integration', email: 'sv5tot_hoinhap@gmail.com' },
+  { criterion: 'physical', email: 'sv5tot_theluc@gmail.com' },
+  { criterion: 'volunteer', email: 'sv5tot_tinhnguyen@gmail.com' },
 ] as const;
 
 if (process.env.APPLY_CITY_TASK_ASSIGNMENT_CLEANUP !== expectedConfirmation) {
