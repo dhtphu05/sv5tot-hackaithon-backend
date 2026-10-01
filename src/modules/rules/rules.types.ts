@@ -78,15 +78,30 @@ export type CriteriaRuleBundle = {
 };
 
 export type EvidenceWithCard = Evidence & {
-  evidenceCard: EvidenceCard | null;
-  event: EventRegistry | null;
+  evidenceCard: Pick<
+    EvidenceCard,
+    | 'id'
+    | 'ocrText'
+    | 'extractedFieldsJson'
+    | 'normalizedFieldsJson'
+    | 'confirmedFieldsJson'
+    | 'warningsJson'
+    | 'matchedEventId'
+    | 'matchedParticipantId'
+    | 'matchedKnowledgeItemIds'
+    | 'confidence'
+    | 'aiSummary'
+    | 'createdAt'
+    | 'updatedAt'
+  > | null;
+  event: Pick<EventRegistry, 'convertedValue' | 'convertedUnit'> | null;
 };
 
 export type RuleContext = {
   application: Application;
   metrics: ApplicationMetric[];
   evidences: EvidenceWithCard[];
-  evidenceCards: EvidenceCard[];
+  evidenceCards: NonNullable<EvidenceWithCard['evidenceCard']>[];
   eventImports: EvidenceWithCard[];
   criteriaRules: CriteriaRuleConfig[];
   targetLevel: Level;

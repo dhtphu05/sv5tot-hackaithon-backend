@@ -4,7 +4,9 @@ import { logger } from '../src/config/logger';
 import { prisma } from '../src/infrastructure/database/prisma';
 import { PasswordService } from '../src/modules/auth/password.service';
 import { defaultCriteriaUnitScope, fallbackRulesByLevel } from '../src/modules/rules/criteria.constants';
+import { cityDemoOfficerUsers } from './seeds/demo-city-officers';
 import { seedNormalizedCriteria } from './seeds/criteria/seed-criteria';
+import { danangSchoolWorkspaces } from './seeds/danang-workspaces';
 
 const passwordService = new PasswordService();
 const defaultWorkspaceCode = 'DHBK-DHDN';
@@ -13,58 +15,6 @@ const cityWorkspaceCode = 'DANANG_CITY';
 const universityWorkspaceCode = 'UDN';
 const economicsTrialCriteriaVersionName =
   'Bộ tiêu chí thử nghiệm - không sử dụng cho xét duyệt chính thức';
-
-const udnWorkspaces = [
-  {
-    code: defaultWorkspaceCode,
-    name: 'Trường Đại học Bách khoa - Đại học Đà Nẵng',
-    shortName: 'DHBK',
-    isActive: true,
-    registrationEnabled: true,
-  },
-  {
-    code: economicsWorkspaceCode,
-    name: 'Trường Đại học Kinh tế - Đại học Đà Nẵng',
-    shortName: 'DHKTE',
-    isActive: true,
-    registrationEnabled: true,
-  },
-  {
-    code: 'DHSP-DHDN',
-    name: 'Trường Đại học Sư phạm - Đại học Đà Nẵng',
-    shortName: 'DHSP',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'DHNN-DHDN',
-    name: 'Trường Đại học Ngoại ngữ - Đại học Đà Nẵng',
-    shortName: 'DHNN',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'DHSPKT-DHDN',
-    name: 'Trường Đại học Sư phạm Kỹ thuật - Đại học Đà Nẵng',
-    shortName: 'DHSPKT',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'VKU-DHDN',
-    name: 'Trường Đại học Công nghệ Thông tin và Truyền thông Việt - Hàn - Đại học Đà Nẵng',
-    shortName: 'VKU',
-    isActive: true,
-    registrationEnabled: false,
-  },
-  {
-    code: 'TYD-DHDN',
-    name: 'Trường Y Dược - Đại học Đà Nẵng',
-    shortName: 'TYD',
-    isActive: true,
-    registrationEnabled: false,
-  },
-] as const;
 
 type SeedUser = {
   email: string;
@@ -203,12 +153,7 @@ const economicsDemoUsers: SeedUser[] = [
 ];
 
 const cityDemoUsers: SeedUser[] = [
-  {
-    email: 'officer@danang.city',
-    role: Role.city_officer,
-    fullName: 'Cán bộ xét duyệt cấp thành phố',
-    specializations: [Criterion.academic, Criterion.ethics, Criterion.volunteer],
-  },
+  ...cityDemoOfficerUsers,
   {
     email: 'manager@danang.city',
     role: Role.city_manager,
@@ -276,13 +221,12 @@ async function seedWorkspaces() {
     },
   });
 
-  for (const workspaceSeed of udnWorkspaces) {
-    const isUdnSchool =
-      workspaceSeed.code === defaultWorkspaceCode || workspaceSeed.code === economicsWorkspaceCode;
+  for (const workspaceSeed of danangSchoolWorkspaces) {
+    const { parentCode, ...workspaceFields } = workspaceSeed;
     const school = {
-      ...workspaceSeed,
+      ...workspaceFields,
       type: WorkspaceType.SCHOOL,
-      parentWorkspaceId: isUdnSchool ? universityWorkspace.id : null,
+      parentWorkspaceId: parentCode === 'UDN' ? universityWorkspace.id : null,
     };
     const workspace = await prisma.workspace.upsert({
       where: { code: workspaceSeed.code },
@@ -521,12 +465,13 @@ async function main(): Promise<void> {
   const normalizedCriteriaSeed = await seedNormalizedCriteria(prisma);
   logger.info(
     {
-      workspaceCount: udnWorkspaces.length,
+      workspaceCount: danangSchoolWorkspaces.length,
       defaultWorkspaceCode,
-      registrationEnabledWorkspaceCodes: udnWorkspaces
+      registrationEnabledWorkspaceCodes: danangSchoolWorkspaces
         .filter((workspace) => workspace.registrationEnabled)
         .map((workspace) => workspace.code),
-      demoUserCount: demoUsers.length + economicsDemoUsers.length,
+      demoUserCount:
+        demoUsers.length + economicsDemoUsers.length + cityDemoUsers.length + universityDemoUsers.length,
       economicsDemoUserCount: economicsDemoUsers.length,
       economicsTrialCriteriaVersionName,
       normalizedCriteria: {
