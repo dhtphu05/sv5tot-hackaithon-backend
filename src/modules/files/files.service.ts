@@ -8,6 +8,13 @@ import { FilesRepository } from './files.repository';
 import { StorageService } from '../storage/storage.service';
 import { ReviewService, type ReviewTaskVisibilityContext } from '../review/review.service';
 
+type CityOfficerFile = NonNullable<Awaited<ReturnType<FilesRepository['findByIdForCityOfficer']>>>;
+type CityOfficerEvidence = CityOfficerFile['evidenceFiles'][number]['evidence'];
+type CityOfficerReviewSource =
+  | NonNullable<CityOfficerEvidence['application']>
+  | NonNullable<CityOfficerEvidence['collectiveProfile']>;
+type CityOfficerReviewTask = CityOfficerReviewSource['reviewTasks'][number];
+
 export class FilesService {
   constructor(
     private readonly filesRepository = new FilesRepository(),
@@ -16,6 +23,22 @@ export class FilesService {
   ) {}
 
   async getMetadata(user: AuthenticatedUser, fileId: string) {
+    if (user.role === Role.student || user.role === Role.class_representative) {
+      const ownedFile = await this.filesRepository.findOwnedById(fileId, user.id);
+      if (!ownedFile) {
+        throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
+      }
+
+      return {
+        id: ownedFile.id,
+        originalName: ownedFile.originalName,
+        mimeType: ownedFile.mimeType,
+        fileSize: ownedFile.fileSize,
+        publicUrl: ownedFile.publicUrl,
+        createdAt: ownedFile.createdAt,
+      };
+    }
+
     const file = await this.filesRepository.findById(fileId);
     if (!file) {
       throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
@@ -49,23 +72,61 @@ export class FilesService {
   }
 
   async getSignedUrl(user: AuthenticatedUser, fileId: string): Promise<string> {
+    if (user.role === Role.city_officer) {
+      const [file, specializations] = await Promise.all([
+        this.filesRepository.findByIdForCityOfficer(fileId),
+        this.filesRepository.findActiveCityOfficerCriteria(user.id),
+      ]);
+      if (!file) {
+        throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
+      }
+
+      const permissionCache = new Map<string, Promise<boolean>>();
+      for (const criterion of new Set(file.evidenceFiles.map((link) => link.evidence.criterion))) {
+        permissionCache.set(
+          `${user.id}:${criterion}`,
+          Promise.resolve(specializations.some((item) => item.criterion === criterion)),
+        );
+      }
+      const isEvidenceFile = file.evidenceFiles.length > 0;
+      const canOfficerView = isEvidenceFile
+        ? await this.canOfficerAccessEvidenceFile(user, file, permissionCache)
+        : this.canOfficerAccessEventSourceFile(user, file) ||
+          (await this.canOfficerAccessEvidenceFile(user, file, permissionCache));
+      const canViewAsOwner = file.ownerId === user.id && !isEvidenceFile;
+
+      if (!canViewAsOwner && !canOfficerView) {
+        throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
+      }
+
+      return this.storageService.getSignedReadUrl(file.filePath, 300, file.storageType);
+    }
+
+    if (user.role === Role.student || user.role === Role.class_representative) {
+      const ownedFile = await this.filesRepository.findOwnedById(fileId, user.id);
+      if (!ownedFile) {
+        throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
+      }
+
+      return this.storageService.getSignedReadUrl(
+        ownedFile.filePath,
+        300,
+        ownedFile.storageType,
+      );
+    }
+
     const file = await this.filesRepository.findById(fileId);
     if (!file) {
       throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
     }
 
     const canViewAll = this.canViewWorkspaceFile(user, file);
-    const isCityOfficerEvidenceFile =
-      user.role === Role.city_officer && Boolean(file.evidenceFiles?.length);
     const canOfficerView =
-      user.role === Role.officer || user.role === Role.city_officer
-        ? isCityOfficerEvidenceFile
-          ? await this.canOfficerAccessEvidenceFile(user, file)
-          : this.canOfficerAccessEventSourceFile(user, file) ||
-            (await this.canOfficerAccessEvidenceFile(user, file))
+      user.role === Role.officer
+        ? this.canOfficerAccessEventSourceFile(user, file) ||
+          (await this.canOfficerAccessEvidenceFile(user, file))
         : false;
-    const canViewAsOwner =
-      user.role !== Role.data_uploader && file.ownerId === user.id && !isCityOfficerEvidenceFile;
+    const canViewAsOwner = user.role !== Role.data_uploader && file.ownerId === user.id;
 
     if (!canViewAsOwner && !canViewAll && !canOfficerView) {
       throw new AppError(404, ErrorCodes.FILE_NOT_FOUND, 'File not found');
@@ -76,7 +137,8 @@ export class FilesService {
 
   private async canOfficerAccessEvidenceFile(
     user: AuthenticatedUser,
-    file: NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>,
+    file: Pick<CityOfficerFile, 'evidenceFiles'>,
+    permissionCache?: Map<string, Promise<boolean>>,
   ) {
     const evidenceLinks = file.evidenceFiles ?? [];
     if (!evidenceLinks.length) return false;
@@ -91,7 +153,7 @@ export class FilesService {
         if (!task.evidences?.some((link) => link.evidenceId === evidence.id)) continue;
 
         const taskContext = this.buildTaskVisibilityContext(evidence, reviewSource, task);
-        if (await this.reviewService.canViewTask(user, taskContext)) return true;
+        if (await this.reviewService.canViewTask(user, taskContext, permissionCache)) return true;
       }
     }
 
@@ -99,9 +161,9 @@ export class FilesService {
   }
 
   private buildTaskVisibilityContext(
-    evidence: NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>['evidenceFiles'][number]['evidence'],
-    reviewSource: NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>['evidenceFiles'][number]['evidence']['application'] | NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>['evidenceFiles'][number]['evidence']['collectiveProfile'],
-    task: NonNullable<typeof reviewSource>['reviewTasks'][number],
+    evidence: CityOfficerEvidence,
+    reviewSource: CityOfficerReviewSource,
+    task: CityOfficerReviewTask,
   ): ReviewTaskVisibilityContext {
     const application = evidence.application
       ? {
@@ -171,7 +233,7 @@ export class FilesService {
 
   private canOfficerAccessEventSourceFile(
     user: AuthenticatedUser,
-    file: NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>,
+    file: Pick<NonNullable<Awaited<ReturnType<FilesRepository['findById']>>>, 'eventFiles' | 'decisionImports' | 'sampleCertificateEvents'> | Pick<CityOfficerFile, 'eventFiles' | 'decisionImports' | 'sampleCertificateEvents'>,
   ) {
     return (
       file.eventFiles?.some((link) => this.sameWorkspace(user, link.event.workspaceId)) ||

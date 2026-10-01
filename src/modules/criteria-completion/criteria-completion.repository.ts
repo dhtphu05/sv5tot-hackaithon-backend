@@ -23,6 +23,65 @@ export const criteriaCompletionApplicationInclude = {
   },
 } satisfies Prisma.ApplicationInclude;
 
+export const criteriaCompletionApplicationSelect = {
+  id: true,
+  studentId: true,
+  workspaceId: true,
+  schoolYear: true,
+  targetLevel: true,
+  student: { select: { faculty: true } },
+  workspace: { select: { type: true, isActive: true } },
+  metrics: {
+    select: {
+      id: true,
+      metricType: true,
+      value: true,
+      scale: true,
+      verificationStatus: true,
+      schoolYear: true,
+      source: true,
+      supportingEvidenceId: true,
+    },
+  },
+  evidences: {
+    select: {
+      id: true,
+      criterion: true,
+      sourceType: true,
+      status: true,
+      indexingStatus: true,
+      confidence: true,
+      event: { select: { convertedValue: true, convertedUnit: true } },
+      evidenceCard: {
+        select: {
+          extractedFieldsJson: true,
+          normalizedFieldsJson: true,
+          confirmedFieldsJson: true,
+          confirmationStatus: true,
+          requiresHumanConfirmation: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  },
+  reviewTasks: { select: { criterion: true, status: true } },
+  requirementResponses: {
+    select: {
+      id: true,
+      criterion: true,
+      requirementKey: true,
+      responseKind: true,
+      status: true,
+      metricId: true,
+      evidenceId: true,
+      payloadJson: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+    orderBy: { createdAt: 'asc' },
+  },
+} satisfies Prisma.ApplicationSelect;
+
 export class CriteriaCompletionRepository {
   constructor(private readonly db: PrismaClient = prisma) {}
 
@@ -30,6 +89,13 @@ export class CriteriaCompletionRepository {
     return this.db.application.findUnique({
       where: { id: applicationId },
       include: criteriaCompletionApplicationInclude,
+    });
+  }
+
+  findApplicationForCompletion(applicationId: string) {
+    return this.db.application.findUnique({
+      where: { id: applicationId },
+      select: criteriaCompletionApplicationSelect,
     });
   }
 

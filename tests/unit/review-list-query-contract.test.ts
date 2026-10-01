@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
   officerSpecialization: { findMany: vi.fn() },
-  reviewTask: { findMany: vi.fn(), count: vi.fn() },
+  reviewTask: { findMany: vi.fn(), findUnique: vi.fn(), count: vi.fn() },
   $transaction: vi.fn(),
 }));
 
@@ -97,6 +97,49 @@ describe('review task list statuses contract', () => {
         }),
       ]),
     });
+  });
+
+  it('loads review list relations with one joined query', async () => {
+    const repository = new ReviewRepository();
+
+    await repository.list(cityOfficer, { page: 1, limit: 20 } as never);
+
+    expect(prismaMock.reviewTask.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ relationLoadStrategy: 'join' }),
+    );
+  });
+
+  it('limits City Officer queue specializations to active City Officers', async () => {
+    const repository = new ReviewRepository();
+
+    await repository.buildTaskWhere(cityOfficer, { page: 1, limit: 20 } as never);
+
+    expect(prismaMock.officerSpecialization.findMany).toHaveBeenCalledWith({
+      where: {
+        officerId: 'city-officer',
+        isActive: true,
+        officer: { role: Role.city_officer, isActive: true },
+      },
+      select: { criterion: true },
+    });
+  });
+
+  it('runs independent list and total queries concurrently without a wrapping transaction', async () => {
+    const repository = new ReviewRepository();
+
+    await repository.list(cityOfficer, { page: 1, limit: 20 } as never);
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('loads review detail relations with one joined query', async () => {
+    const repository = new ReviewRepository();
+
+    await repository.findDetail('task-1');
+
+    expect(prismaMock.reviewTask.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ relationLoadStrategy: 'join' }),
+    );
   });
 
   it('keeps the existing City workspace scope while applying the union', async () => {

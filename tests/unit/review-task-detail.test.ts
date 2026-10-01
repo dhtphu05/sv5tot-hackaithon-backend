@@ -20,7 +20,8 @@ const prismaMock = vi.hoisted(() => ({
   auditLog: { findMany: vi.fn() },
   eventRegistry: { findMany: vi.fn() },
   knowledgeBaseItem: { findMany: vi.fn() },
-  criteriaVersion: { findFirst: vi.fn() },
+  criteriaVersion: { findFirst: vi.fn(), findMany: vi.fn() },
+  officerSpecialization: { findFirst: vi.fn(), findMany: vi.fn() },
   reviewTask: { updateMany: vi.fn() },
   $transaction: vi.fn(),
 }));
@@ -30,6 +31,7 @@ vi.mock('../../src/infrastructure/database/prisma', () => ({
 }));
 
 import { ReviewService } from '../../src/modules/review/review.service';
+import { getReviewTaskDetail } from '../../src/modules/review/review.controller';
 
 const now = new Date('2026-07-05T00:00:00.000Z');
 const workspaceId = '11111111-1111-1111-1111-111111111111';
@@ -41,23 +43,25 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
     vi.clearAllMocks();
     prismaMock.auditLog.findMany.mockResolvedValue([]);
     prismaMock.knowledgeBaseItem.findMany.mockResolvedValue([]);
-    prismaMock.criteriaVersion.findFirst.mockImplementation(async ({ where }: any) => ({
-      id: `criteria-${where.level}`,
-      versionName: `Configured ${where.level}`,
-      schoolYear: '2025-2026',
-      unitScope: 'DHBK-DHDN',
-      level: where.level,
-      rules: [
-        {
-          criterion: Criterion.academic,
-          ruleKey: `configured-academic-${where.level}`,
-          ruleType: 'metric_threshold',
-          thresholdJson: { metric: MetricType.gpa, operator: '>=', value: 3.9 },
-          evidenceRequirementsJson: null,
-          humanReadableText: `Configured GPA requirement for ${where.level}`,
-        },
-      ],
-    }));
+    prismaMock.criteriaVersion.findMany.mockImplementation(async ({ where }: any) =>
+      where.level.in.map((level: Level) => ({
+        id: `criteria-${level}`,
+        versionName: `Configured ${level}`,
+        schoolYear: '2025-2026',
+        unitScope: 'DHBK-DHDN',
+        level,
+        rules: [
+          {
+            criterion: Criterion.academic,
+            ruleKey: `configured-academic-${level}`,
+            ruleType: 'metric_threshold',
+            thresholdJson: { metric: MetricType.gpa, operator: '>=', value: 3.9 },
+            evidenceRequirementsJson: null,
+            humanReadableText: `Configured GPA requirement for ${level}`,
+          },
+        ],
+      })),
+    );
   });
 
   it('returns matched event details when an evidence card has matchedEventId', async () => {
@@ -124,6 +128,80 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
     });
   });
 
+  it('skips unused Knowledge Base lookups when the reviewer screen opts out', async () => {
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as never,
+      {} as never,
+    );
+
+    const detail = await service.getTaskDetail(cityManagerUser(), 'task-1', false);
+
+    expect(prismaMock.knowledgeBaseItem.findMany).not.toHaveBeenCalled();
+    expect(detail.knowledgeBaseMatches).toEqual([]);
+  });
+
+  it('keeps application audit history in the detail response by default', async () => {
+    const audit = [
+      {
+        id: 'audit-1',
+        action: 'APPLICATION_SUBMITTED',
+        note: null,
+        actorId: 'student-1',
+        actorRole: Role.student,
+        createdAt: now,
+        actor: { fullName: 'Nguyễn Văn A' },
+      },
+    ];
+    prismaMock.auditLog.findMany.mockResolvedValue(audit);
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as never,
+      {} as never,
+    );
+
+    const detail = await service.getTaskDetail(cityManagerUser(), 'task-1');
+
+    expect(prismaMock.auditLog.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { applicationId: 'app-1' } }),
+    );
+    expect(detail.audit).toEqual(audit);
+  });
+
+  it('skips application audit history when the detail consumer opts out', async () => {
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as never,
+      {} as never,
+    );
+
+    const detail = await service.getTaskDetail(cityManagerUser(), 'task-1', false, false);
+
+    expect(prismaMock.auditLog.findMany).not.toHaveBeenCalled();
+    expect(detail.audit).toEqual([]);
+  });
+
+  it('passes the audit opt-out query parameter through the review detail controller', async () => {
+    const user = cityManagerUser();
+    const getTaskDetail = vi
+      .spyOn(ReviewService.prototype, 'getTaskDetail')
+      .mockResolvedValue({} as never);
+    const response = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn().mockReturnThis(),
+    };
+
+    await getReviewTaskDetail(
+      {
+        user,
+        params: { id: 'task-1' },
+        query: { includeAudit: 'false' },
+        requestId: 'request-1',
+      } as never,
+      response as never,
+    );
+
+    expect(getTaskDetail).toHaveBeenCalledWith(user, 'task-1', true, false);
+    getTaskDetail.mockRestore();
+  });
+
   it('returns authoritative institution and review context in the existing detail response', async () => {
     const reviewRepository = {
       findDetail: vi.fn().mockResolvedValue(
@@ -161,6 +239,16 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
       (level) => level.level === Level.city,
     );
 
+    expect(prismaMock.criteriaVersion.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.criteriaVersion.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId,
+          schoolYear: '2025-2026',
+          level: { in: expect.arrayContaining([Level.school, Level.university, Level.city, Level.central]) },
+        }),
+      }),
+    );
     expect(cityLevel?.requirements).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -181,23 +269,25 @@ describe('ReviewService.getTaskDetail evidence event matching', () => {
   });
 
   it('keeps an unsupported configured rule human-review-only instead of inventing a pass or fail', async () => {
-    prismaMock.criteriaVersion.findFirst.mockImplementation(async ({ where }: any) => ({
-      id: `criteria-${where.level}`,
-      versionName: `Configured ${where.level}`,
-      schoolYear: '2025-2026',
-      unitScope: 'DHBK-DHDN',
-      level: where.level,
-      rules: [
-        {
-          criterion: Criterion.academic,
-          ruleKey: `manual-academic-${where.level}`,
-          ruleType: 'unimplemented_rule_type',
-          thresholdJson: { value: 999 },
-          evidenceRequirementsJson: null,
-          humanReadableText: 'Cán bộ phải đối chiếu theo quy định hiện hành.',
-        },
-      ],
-    }));
+    prismaMock.criteriaVersion.findMany.mockImplementation(async ({ where }: any) =>
+      where.level.in.map((level: Level) => ({
+        id: `criteria-${level}`,
+        versionName: `Configured ${level}`,
+        schoolYear: '2025-2026',
+        unitScope: 'DHBK-DHDN',
+        level,
+        rules: [
+          {
+            criterion: Criterion.academic,
+            ruleKey: `manual-academic-${level}`,
+            ruleType: 'unimplemented_rule_type',
+            thresholdJson: { value: 999 },
+            evidenceRequirementsJson: null,
+            humanReadableText: 'Cán bộ phải đối chiếu theo quy định hiện hành.',
+          },
+        ],
+      })),
+    );
     const service = new ReviewService(
       { findDetail: vi.fn().mockResolvedValue(buildTask({ matchedEventId: null })) } as any,
       {} as any,
@@ -355,6 +445,99 @@ describe('City Officer access to School review tasks', () => {
       canClaim: false,
       reason: 'assigned_to_other',
     });
+  });
+
+  it('checks City Officer specialization once for a task detail', async () => {
+    const task = buildTask({ matchedEventId: null });
+    const assignmentService = { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) };
+    const service = new ReviewService(
+      { findDetail: vi.fn().mockResolvedValue(task) } as never,
+      assignmentService as never,
+    );
+
+    await service.getTaskDetail(cityOfficerUser(), 'task-1');
+
+    expect(assignmentService.canOfficerHandleCriterion).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads City Officer specializations alongside the detail and reuses the result', async () => {
+    const task = buildTask({ matchedEventId: null, criterion: Criterion.ethics });
+    let resolveTask!: (value: typeof task) => void;
+    let resolveCriteria!: (value: { criterion: Criterion }[]) => void;
+    const taskRead = new Promise<typeof task>((resolve) => {
+      resolveTask = resolve;
+    });
+    const criteriaRead = new Promise<{ criterion: Criterion }[]>((resolve) => {
+      resolveCriteria = resolve;
+    });
+    const findDetail = vi.fn(() => taskRead);
+    prismaMock.officerSpecialization.findMany.mockReturnValue(criteriaRead);
+    const service = new ReviewService({ findDetail } as never);
+
+    const resultPromise = service.getTaskDetail(cityOfficerUser(), 'task-1');
+
+    expect(findDetail).toHaveBeenCalledTimes(1);
+    expect(prismaMock.officerSpecialization.findMany).toHaveBeenCalledWith({
+      where: {
+        officerId: 'city-officer',
+        isActive: true,
+        officer: { role: Role.city_officer, isActive: true },
+      },
+      select: { criterion: true },
+    });
+    resolveTask(task);
+    resolveCriteria([{ criterion: Criterion.ethics }]);
+
+    const result = await resultPromise;
+
+    expect(result.task.permissions).toMatchObject({ canView: true, canClaim: true });
+  });
+
+  it('still denies City Officers without an active specialization in the task criterion', async () => {
+    prismaMock.officerSpecialization.findMany.mockResolvedValue([
+      { criterion: Criterion.academic },
+    ] as never);
+    const service = new ReviewService({
+      findDetail: vi.fn().mockResolvedValue(
+        buildTask({ matchedEventId: null, criterion: Criterion.ethics }),
+      ),
+    } as never);
+
+    await expect(service.getTaskDetail(cityOfficerUser(), 'task-1')).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    expect(prismaMock.officerSpecialization.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('reuses the queue specialization scope without extra permission queries', async () => {
+    const assignmentService = { canOfficerHandleCriterion: vi.fn().mockResolvedValue(true) };
+    const reviewRepository = {
+      list: vi.fn().mockResolvedValue({
+        items: [
+          buildTask({ matchedEventId: null }),
+          {
+            ...buildTask({ matchedEventId: null }),
+            id: 'task-2',
+            application: {
+              ...buildTask({ matchedEventId: null }).application,
+              id: 'app-2',
+              student: {
+                ...buildTask({ matchedEventId: null }).application.student,
+                id: 'student-2',
+                faculty: 'Kinh tế',
+              },
+            },
+          },
+        ],
+        total: 2,
+      }),
+    };
+    const service = new ReviewService(reviewRepository as never, assignmentService as never);
+
+    const result = await service.listTasks(cityOfficerUser(), { page: 1, limit: 100 } as never);
+
+    expect(result.items).toHaveLength(2);
+    expect(assignmentService.canOfficerHandleCriterion).not.toHaveBeenCalled();
   });
 
   it('denies detail access to an assigned task when City Officer specialization is no longer active', async () => {
@@ -672,6 +855,7 @@ describe('individual City review task permissions', () => {
 
 function buildTask(input: {
   matchedEventId: string | null;
+  faculty?: string;
   normalizedFieldsJson?: Record<string, unknown>;
   assignedOfficerId?: string | null;
   criterion?: Criterion;
@@ -720,7 +904,7 @@ function buildTask(input: {
         fullName: 'Nguyễn Văn A',
         studentCode: '102220001',
         className: '22T1',
-        faculty: 'CNTT',
+        faculty: input.faculty ?? 'CNTT',
         email: 'student@5tot.test',
       },
       metrics: [

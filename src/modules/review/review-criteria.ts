@@ -7,7 +7,7 @@ import {
   type ApplicationMetric,
 } from '@prisma/client';
 import { evaluateCriteria } from '../rules/rule-evaluator';
-import { loadCriteriaRules } from '../rules/criteria.loader';
+import { loadCriteriaRulesForLevels } from '../rules/criteria.loader';
 import type { CriteriaRuleConfig, EvidenceWithCard, RuleContext } from '../rules/rules.types';
 
 const reviewLevels = [Level.school, Level.university, Level.city, Level.central] as const;
@@ -93,15 +93,11 @@ export async function resolveReviewCriteriaForTask(
     targetLevel: Level;
   };
 
-  const bundles = await Promise.all(
-    reviewLevels.map((level) =>
-      loadCriteriaRules({
-        workspaceId: application.workspaceId,
-        schoolYear: application.schoolYear,
-        level,
-      }),
-    ),
-  );
+  const bundles = await loadCriteriaRulesForLevels({
+    workspaceId: application.workspaceId,
+    schoolYear: application.schoolYear,
+    levels: [...reviewLevels],
+  });
 
   return {
     authority: {

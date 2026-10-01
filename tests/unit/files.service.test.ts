@@ -2,7 +2,7 @@ import { Role } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
-  officerSpecialization: { findFirst: vi.fn() },
+  officerSpecialization: { findFirst: vi.fn(), findMany: vi.fn() },
 }));
 
 vi.mock('../../src/infrastructure/database/prisma', () => ({ prisma: prismaMock }));
@@ -68,6 +68,23 @@ function eventSourceFile(fileWorkspaceId = workspaceId) {
 function serviceFor(file: ReturnType<typeof eventSourceFile>) {
   const repository = {
     findById: vi.fn().mockResolvedValue(file),
+    findByIdForCityOfficer: vi.fn().mockResolvedValue(file),
+    findActiveCityOfficerCriteria: vi.fn().mockResolvedValue([]),
+    findOwnedById: vi.fn().mockImplementation(async (_id: string, ownerId: string) =>
+      file.ownerId === ownerId
+        ? {
+            id: file.id,
+            ownerId: file.ownerId,
+            storageType: file.storageType,
+            filePath: file.filePath,
+            originalName: file.originalName,
+            mimeType: file.mimeType,
+            fileSize: file.fileSize,
+            publicUrl: file.publicUrl,
+            createdAt: new Date(),
+          }
+        : null,
+    ),
   };
   const storage = {
     getSignedReadUrl: vi.fn().mockResolvedValue('https://signed.example/file-1'),
@@ -80,6 +97,68 @@ function serviceFor(file: ReturnType<typeof eventSourceFile>) {
 }
 
 describe('FilesService event source signed URLs', () => {
+  it('uses the narrow evidence authorization query for City Officer signed URLs', async () => {
+    const file = {
+      ...eventSourceFile(otherWorkspaceId),
+      eventFiles: [],
+      evidenceFiles: [
+        {
+          evidence: {
+            id: evidenceId,
+            criterion: 'academic',
+            application: {
+              workspaceId: otherWorkspaceId,
+              applicationType: 'individual',
+              targetLevel: 'city',
+              workspace: { type: 'SCHOOL', isActive: true },
+              student: { faculty: 'Faculty B' },
+              reviewTasks: [
+                {
+                  criterion: 'academic',
+                  assignedOfficerId: null,
+                  status: 'waiting',
+                  evidences: [{ evidenceId }],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    } as never;
+    const { service, repository } = serviceFor(file);
+    repository.findActiveCityOfficerCriteria.mockResolvedValue([{ criterion: 'academic' }] as never);
+
+    await expect(service.getSignedUrl(cityOfficer(), 'file-1')).resolves.toBe(
+      'https://signed.example/file-1',
+    );
+    expect(repository.findByIdForCityOfficer).toHaveBeenCalledWith('file-1');
+    expect(repository.findActiveCityOfficerCriteria).toHaveBeenCalledWith('city_officer-user');
+    expect(repository.findById).not.toHaveBeenCalled();
+  });
+
+  it('loads a student-owned file through the owner-scoped query', async () => {
+    const file = { ...eventSourceFile(), ownerId: 'student-user' } as never;
+    const { service, repository, storage } = serviceFor(file);
+
+    await expect(service.getSignedUrl(user(Role.student), 'file-1')).resolves.toBe(
+      'https://signed.example/file-1',
+    );
+    expect(repository.findOwnedById).toHaveBeenCalledWith('file-1', 'student-user');
+    expect(repository.findById).not.toHaveBeenCalled();
+    expect(storage.getSignedReadUrl).toHaveBeenCalledWith('event-rosters/file-1.pdf', 300, 'local');
+  });
+
+  it('does not load unrelated file relations when a student does not own the file', async () => {
+    const { service, repository, storage } = serviceFor(eventSourceFile());
+
+    await expect(service.getSignedUrl(user(Role.student), 'file-1')).rejects.toMatchObject({
+      statusCode: 404,
+    });
+    expect(repository.findOwnedById).toHaveBeenCalledWith('file-1', 'student-user');
+    expect(repository.findById).not.toHaveBeenCalled();
+    expect(storage.getSignedReadUrl).not.toHaveBeenCalled();
+  });
+
   it('allows a data uploader to open Award Decision files in their own workspace only', async () => {
     const file = {
       ...eventSourceFile(),
@@ -150,20 +229,14 @@ describe('FilesService event source signed URLs', () => {
         },
       ],
     } as never;
-    const { service, storage } = serviceFor(file);
-    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-city' });
+    const { service, repository, storage } = serviceFor(file);
+    repository.findActiveCityOfficerCriteria.mockResolvedValue([{ criterion: 'academic' }] as never);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).resolves.toBe(
       'https://signed.example/file-1',
     );
-    expect(prismaMock.officerSpecialization.findFirst).toHaveBeenCalledWith({
-      where: {
-        officerId: 'city_officer-user',
-        criterion: 'academic',
-        isActive: true,
-        officer: { role: Role.city_officer, isActive: true },
-      },
-    });
+    expect(repository.findActiveCityOfficerCriteria).toHaveBeenCalledWith('city_officer-user');
+    expect(prismaMock.officerSpecialization.findFirst).not.toHaveBeenCalled();
     expect(storage.getSignedReadUrl).toHaveBeenCalled();
   });
 
@@ -199,8 +272,8 @@ describe('FilesService event source signed URLs', () => {
         },
       ],
     } as never;
-    const { service, storage } = serviceFor(file);
-    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-city' });
+    const { service, repository, storage } = serviceFor(file);
+    repository.findActiveCityOfficerCriteria.mockResolvedValue([{ criterion: 'academic' }] as never);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).resolves.toBe(
       'https://signed.example/file-1',
@@ -247,7 +320,6 @@ describe('FilesService event source signed URLs', () => {
       ],
     } as never;
     const { service, storage } = serviceFor(file);
-    prismaMock.officerSpecialization.findFirst.mockResolvedValue(null);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).rejects.toMatchObject({
       statusCode: 404,
@@ -283,7 +355,6 @@ describe('FilesService event source signed URLs', () => {
       ],
     } as never;
     const { service, storage } = serviceFor(file);
-    prismaMock.officerSpecialization.findFirst.mockResolvedValue(null);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).rejects.toMatchObject({
       statusCode: 404,
@@ -317,8 +388,8 @@ describe('FilesService event source signed URLs', () => {
         },
       ],
     } as never;
-    const { service, storage } = serviceFor(file);
-    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-city' });
+    const { service, repository, storage } = serviceFor(file);
+    repository.findActiveCityOfficerCriteria.mockResolvedValue([{ criterion: 'volunteer' }] as never);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).resolves.toBe(
       'https://signed.example/file-1',
@@ -346,8 +417,8 @@ describe('FilesService event source signed URLs', () => {
         },
       ],
     } as never;
-    const { service, storage } = serviceFor(file);
-    prismaMock.officerSpecialization.findFirst.mockResolvedValue({ id: 'spec-city' });
+    const { service, repository, storage } = serviceFor(file);
+    repository.findActiveCityOfficerCriteria.mockResolvedValue([{ criterion: 'academic' }] as never);
 
     await expect(service.getSignedUrl(cityOfficer(), 'file-1')).rejects.toMatchObject({
       statusCode: 404,
@@ -375,28 +446,95 @@ describe('FilesService event source signed URLs', () => {
 });
 
 describe('FilesRepository evidence review links', () => {
-  it('loads exact evidence links through both individual and collective review tasks', async () => {
+  it('loads City Officer specialization criteria in one narrow query', async () => {
+    const db = { officerSpecialization: { findMany: vi.fn().mockResolvedValue([]) } };
+    await new FilesRepository(db as never).findActiveCityOfficerCriteria('officer-1');
+
+    expect(db.officerSpecialization.findMany).toHaveBeenCalledWith({
+      where: {
+        officerId: 'officer-1',
+        isActive: true,
+        officer: { role: Role.city_officer, isActive: true },
+      },
+      select: { criterion: true },
+    });
+  });
+
+  it('loads only the evidence, Event Registry, and legacy source relations needed for City Officer file access', async () => {
+    const db = { file: { findUnique: vi.fn().mockResolvedValue(null) } };
+    await new FilesRepository(db as never).findByIdForCityOfficer('file-1');
+
+    const query = db.file.findUnique.mock.calls[0]?.[0];
+    expect(query).toEqual(
+      expect.objectContaining({
+        where: { id: 'file-1' },
+        select: expect.objectContaining({
+          id: true,
+          ownerId: true,
+          storageType: true,
+          filePath: true,
+          evidenceFiles: expect.any(Object),
+          eventFiles: expect.any(Object),
+          decisionImports: { select: { workspaceId: true } },
+          sampleCertificateEvents: { select: { workspaceId: true } },
+        }),
+      }),
+    );
+    expect(query?.select).not.toHaveProperty('awardDecisionsAsDecisionFile');
+    expect(query?.select).not.toHaveProperty('awardDecisionsAsRosterFile');
+  });
+
+  it('selects only file fields needed for display and scoped access checks', async () => {
     const db = { file: { findUnique: vi.fn().mockResolvedValue(null) } };
     await new FilesRepository(db as never).findById('file-1');
 
     expect(db.file.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({
-        include: expect.objectContaining({
+        select: expect.objectContaining({
+          id: true,
+          ownerId: true,
+          workspaceId: true,
+          storageType: true,
+          filePath: true,
+          publicUrl: true,
+          originalName: true,
+          mimeType: true,
+          fileSize: true,
+          createdAt: true,
           evidenceFiles: {
-            include: {
+            select: {
               evidence: {
-                include: expect.objectContaining({
+                select: expect.objectContaining({
+                  id: true,
+                  criterion: true,
                   application: {
-                    include: expect.objectContaining({
+                    select: expect.objectContaining({
+                      workspaceId: true,
+                      applicationType: true,
+                      targetLevel: true,
+                      student: { select: { faculty: true } },
                       reviewTasks: {
-                        include: { evidences: { select: { evidenceId: true } } },
+                        select: expect.objectContaining({
+                          criterion: true,
+                          assignedOfficerId: true,
+                          status: true,
+                          evidences: { select: { evidenceId: true } },
+                        }),
                       },
                     }),
                   },
                   collectiveProfile: {
-                    include: expect.objectContaining({
+                    select: expect.objectContaining({
+                      workspaceId: true,
+                      targetLevel: true,
+                      representative: { select: { faculty: true } },
                       reviewTasks: {
-                        include: { evidences: { select: { evidenceId: true } } },
+                        select: expect.objectContaining({
+                          criterion: true,
+                          assignedOfficerId: true,
+                          status: true,
+                          evidences: { select: { evidenceId: true } },
+                        }),
                       },
                     }),
                   },
@@ -404,6 +542,9 @@ describe('FilesRepository evidence review links', () => {
               },
             },
           },
+          eventFiles: expect.any(Object),
+          awardDecisionsAsDecisionFile: { select: { issuerWorkspaceId: true } },
+          awardDecisionsAsRosterFile: { select: { issuerWorkspaceId: true } },
         }),
       }),
     );
