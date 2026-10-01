@@ -198,6 +198,40 @@ describe('CityAnalyticsService', () => {
     expect(applicationQuery.where).not.toHaveProperty('workspaceId');
   });
 
+  it('returns a zero-filled daily submission series using the City business timezone', async () => {
+    prismaMock.application.findMany.mockResolvedValue([
+      makeApplication({
+        id: 'submitted-september-29',
+        status: ApplicationStatus.submitted,
+        submittedAt: new Date('2026-09-28T17:30:00.000Z'),
+      }),
+      makeApplication({
+        id: 'submitted-october-1-a',
+        status: ApplicationStatus.submitted,
+        submittedAt: new Date('2026-09-30T17:00:00.000Z'),
+      }),
+      makeApplication({
+        id: 'submitted-october-1-b',
+        status: ApplicationStatus.submitted,
+        submittedAt: new Date('2026-10-01T06:00:00.000Z'),
+      }),
+      makeApplication({
+        id: 'not-submitted',
+        status: ApplicationStatus.draft,
+        submittedAt: null,
+      }),
+    ] as never);
+    const service = new CityAnalyticsService();
+
+    const summary = await service.getSummary(cityManager, {});
+
+    expect(summary.dailySubmissions).toEqual([
+      { date: '2026-09-29', count: 1 },
+      { date: '2026-09-30', count: 0 },
+      { date: '2026-10-01', count: 2 },
+    ]);
+  });
+
   it('counts human City review state, separates final outcomes, and deduplicates application supplements', async () => {
     const officerId = 'city-officer-1';
     const rows = [
@@ -379,6 +413,7 @@ describe('CityAnalyticsService', () => {
     expect(summary.criteria).toHaveLength(5);
     expect(summary.reviewers).toEqual([]);
     expect(summary.bySchool).toEqual([]);
+    expect(summary.dailySubmissions).toEqual([]);
   });
 
   it('includes active schools with zero City applications in the school breakdown', async () => {

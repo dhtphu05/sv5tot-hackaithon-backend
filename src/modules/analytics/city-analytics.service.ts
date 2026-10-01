@@ -38,6 +38,12 @@ const resolvedResolutionStatuses = new Set<ResolutionStatus>([
   ResolutionStatus.resolved,
   ResolutionStatus.rejected,
 ]);
+const cityDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Ho_Chi_Minh',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
 
 type ReviewTaskRow = { criterion: Criterion; status: ReviewTaskStatus; assignedOfficerId?: string | null };
 type ResolutionRow = { status: ResolutionStatus };
@@ -382,11 +388,17 @@ function summarize(
   let openCases = 0;
   let resolvedCases = 0;
   let blockedApplications = 0;
+  const submittedByDate = new Map<string, number>();
 
   for (const application of rows) {
-    const submitted = application.submittedAt !== null;
+    const submittedAt = application.submittedAt;
+    const submitted = submittedAt !== null;
     if (!submitted) applications.notSubmitted += 1;
-    else applications.submitted += 1;
+    else {
+      applications.submitted += 1;
+      const date = cityDateKey(submittedAt);
+      submittedByDate.set(date, (submittedByDate.get(date) ?? 0) + 1);
+    }
     if (submitted && isInReview(application.status)) {
       applications.inReview += 1;
     }
@@ -490,6 +502,7 @@ function summarize(
     cancelledCount,
     filterOptions: { schools: schools.map(({ id, code, name }) => ({ workspaceId: id, code, name })) },
     applications,
+    dailySubmissions: buildDailySubmissionSeries(submittedByDate),
     criteria,
     bySchool: [...schoolMap.values()].sort((left, right) => left.name.localeCompare(right.name)),
     reviewers: [...officerMap.values()],
@@ -497,6 +510,30 @@ function summarize(
     supplement: { applications: supplementApplications, tasks: supplementTasks },
     resolution: { openCases, resolvedCases, blockedApplications },
   };
+}
+
+function cityDateKey(date: Date): string {
+  const parts = Object.fromEntries(
+    cityDateFormatter.formatToParts(date).map(({ type, value }) => [type, value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function buildDailySubmissionSeries(submittedByDate: Map<string, number>) {
+  const dates = [...submittedByDate.keys()].sort();
+  const firstDate = dates[0];
+  const lastDate = dates[dates.length - 1];
+  if (!firstDate || !lastDate) return [];
+
+  const current = new Date(`${firstDate}T00:00:00.000Z`);
+  const series: Array<{ date: string; count: number }> = [];
+  while (current.toISOString().slice(0, 10) <= lastDate) {
+    const date = current.toISOString().slice(0, 10);
+    const count = submittedByDate.get(date) ?? 0;
+    series.push({ date, count });
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  return series;
 }
 
 function cityResultStatus(status: FinalStatus, level: Level | null): FinalStatus {
