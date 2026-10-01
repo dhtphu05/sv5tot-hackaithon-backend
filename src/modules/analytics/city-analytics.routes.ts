@@ -12,14 +12,14 @@ export const analyticsRouter = Router();
 analyticsRouter.get(
   '/city',
   requireAuth,
-  requireRole(Role.city_manager, Role.admin),
+  requireRole(Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: cityAnalyticsQuerySchema }),
   asyncHandler(getCityAnalytics),
 );
 analyticsRouter.get(
   '/city/applications',
   requireAuth,
-  requireRole(Role.city_manager, Role.admin),
+  requireRole(Role.city_manager, Role.city_committee, Role.admin),
   validate({ query: cityAnalyticsApplicationsQuerySchema }),
   asyncHandler(listCityAnalyticsApplications),
 );

@@ -1,4 +1,5 @@
 import { Role } from '@prisma/client';
+import { Level, FinalStatus } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const prismaMock = vi.hoisted(() => ({
@@ -89,6 +90,42 @@ describe('application lifecycle export scope', () => {
     });
   });
 
+  it('exports only City-level outcomes without cascade or lower-level fields for City staff', async () => {
+    const cityManager = {
+      ...manager,
+      role: Role.city_manager,
+      workspaceId: 'city-1',
+      workspace: { id: 'city-1', code: 'CITY', name: 'City', shortName: 'City', type: 'CITY' },
+    } as AuthenticatedUser;
+    prismaMock.application.findMany.mockResolvedValue([
+      {
+        student: { studentCode: '00123', fullName: 'Student Example', className: 'Class 1', faculty: 'Faculty' },
+        schoolYear: '2025-2026',
+        targetLevel: Level.city,
+        finalLevel: Level.school,
+        finalStatus: FinalStatus.passed,
+        status: 'completed',
+        readinessScore: 80,
+        submittedAt: new Date('2026-09-01T10:00:00.000Z'),
+        finalizedAt: new Date('2026-09-10T10:00:00.000Z'),
+        finalizedBy: null,
+        finalNote: 'Council decision',
+        reviewTasks: [],
+        cascadeReviews: [{ suggestedLevel: Level.school, createdAt: new Date(), levelResultsJson: {} }],
+      },
+    ] as never);
+
+    const result = await new ExportsService().exportReviewResults(cityManager, { format: 'json' });
+    const [cityResult] = result.data ?? [];
+
+    expect(cityResult).toMatchObject({ finalStatus: FinalStatus.failed, schoolYear: '2025-2026' });
+    expect(cityResult).not.toHaveProperty('targetLevel');
+    expect(cityResult).not.toHaveProperty('finalLevel');
+    expect(cityResult).not.toHaveProperty('cascadeSuggestedLevel');
+    expect(cityResult).not.toHaveProperty('cascadeSnapshot');
+    expect(cityResult).not.toHaveProperty('downrankReason');
+  });
+
   it('defaults management application and task exports to active records', async () => {
     await new ExportsService().exportApplicationsJson(manager, {} as never);
     await new ExportsService().exportReviewTasksCsv(manager, {} as never);
@@ -97,6 +134,57 @@ describe('application lifecycle export scope', () => {
     expect(prismaMock.reviewTask.findMany.mock.calls[0][0].where.application).toMatchObject({
       cancelledAt: null,
     });
+  });
+
+  it('provides scoped review-task rows as JSON for spreadsheet generation', async () => {
+    const query = { schoolYear: '2025-2026', lifecycle: 'active' };
+    prismaMock.reviewTask.findMany.mockResolvedValue([
+      {
+        id: 'task-1',
+        applicationId: 'application-1',
+        criterion: 'academic',
+        status: 'accepted',
+        decision: 'accepted',
+        officerNote: 'Cần đối chiếu minh chứng',
+        assignedOfficerId: 'officer-1',
+        assignedOfficer: { fullName: 'Reviewer' },
+        application: {
+          schoolYear: '2025-2026',
+          targetLevel: 'city',
+          status: 'under_review',
+          student: { studentCode: '00123', fullName: 'Student', className: '25A', faculty: 'Faculty' },
+        },
+        evidences: [{ evidenceId: 'evidence-1' }],
+        dueDate: null,
+        updatedAt: new Date('2026-09-01T00:00:00.000Z'),
+      },
+    ] as never);
+
+    const result = await new ExportsService().exportReviewTasksJson(manager, query as never);
+
+    expect(result.items).toMatchObject([
+      {
+        reviewTaskId: 'task-1',
+        studentCode: '00123',
+        studentName: 'Student',
+        criterion: 'academic',
+        officerNote: 'Cần đối chiếu minh chứng',
+        evidenceCount: 1,
+      },
+    ]);
+    expect(prismaMock.reviewTask.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ application: expect.objectContaining({ schoolYear: '2025-2026' }) }),
+      }),
+    );
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'EXPORT_REVIEW_TASKS_JSON',
+          targetId: 'review-tasks.json',
+        }),
+      }),
+    );
   });
 
   it.each([

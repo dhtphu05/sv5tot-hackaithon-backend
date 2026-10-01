@@ -58,7 +58,7 @@ function buildApp() {
 describe('City analytics routes', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it.each([Role.city_manager, Role.admin])('allows %s to read the City dashboard', async (role) => {
+  it.each([Role.city_manager, Role.city_committee, Role.admin])('allows %s to read the City dashboard', async (role) => {
     await request(buildApp())
       .get('/api/analytics/city')
       .set('x-test-role', role)
@@ -70,7 +70,6 @@ describe('City analytics routes', () => {
   it.each([
     Role.student,
     Role.city_officer,
-    Role.city_committee,
     Role.data_uploader,
     Role.officer,
     Role.manager,
@@ -86,13 +85,25 @@ describe('City analytics routes', () => {
     expect(controllerMocks.getCityAnalytics).not.toHaveBeenCalled();
   });
 
-  it('allows the same City-only role set on the paginated drill-down endpoint', async () => {
-    await request(buildApp())
-      .get('/api/analytics/city/applications?page=2&limit=10')
-      .set('x-test-role', Role.admin)
-      .expect(200);
+  it.each([Role.city_manager, Role.city_committee, Role.admin])(
+    'allows %s to use the paginated City drill-down endpoint',
+    async (role) => {
+      await request(buildApp())
+        .get('/api/analytics/city/applications?page=2&limit=10')
+        .set('x-test-role', role)
+        .expect(200);
 
-    expect(controllerMocks.listCityAnalyticsApplications).toHaveBeenCalledOnce();
+      expect(controllerMocks.listCityAnalyticsApplications).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('denies City Officers from both City analytics endpoints', async () => {
+    await request(buildApp())
+      .get('/api/analytics/city/applications')
+      .set('x-test-role', Role.city_officer)
+      .expect(403);
+
+    expect(controllerMocks.listCityAnalyticsApplications).not.toHaveBeenCalled();
   });
 
   it('accepts explicit boolean filters for supplement and resolution drill-downs', async () => {

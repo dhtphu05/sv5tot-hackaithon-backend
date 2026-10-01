@@ -13,7 +13,7 @@ import {
   type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-import { auditActions } from '../../shared/constants/application';
+import { auditActions, cityPilotSchoolYear } from '../../shared/constants/application';
 import { coreCriteria } from '../../shared/constants/criteria';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
@@ -95,6 +95,141 @@ const applicationDetailInclude = {
 
 type ApplicationDetail = Prisma.ApplicationGetPayload<{ include: typeof applicationDetailInclude }>;
 
+const resultDetailSelect = {
+  id: true,
+  workspaceId: true,
+  workspace: { select: { type: true, isActive: true } },
+  schoolYear: true,
+  applicationType: true,
+  targetLevel: true,
+  status: true,
+  readinessScore: true,
+  submittedAt: true,
+  finalStatus: true,
+  finalLevel: true,
+  finalNote: true,
+  finalizedAt: true,
+  updatedAt: true,
+  createdAt: true,
+  cancelledAt: true,
+  cancelledBy: { select: { id: true, fullName: true } },
+  cancelReason: true,
+  archivedAt: true,
+  archivedBy: { select: { id: true, fullName: true } },
+  archiveReason: true,
+  finalDecisionHistory: {
+    orderBy: { supersededAt: 'desc' },
+    select: {
+      id: true,
+      finalStatus: true,
+      finalLevel: true,
+      finalNote: true,
+      finalizedAt: true,
+      supersededAt: true,
+      supersedeReason: true,
+      finalizedBy: { select: { id: true, fullName: true } },
+      supersededBy: { select: { id: true, fullName: true } },
+    },
+  },
+  student: {
+    select: {
+      id: true,
+      fullName: true,
+      studentCode: true,
+      className: true,
+      faculty: true,
+      avatarUrl: true,
+    },
+  },
+  metrics: {
+    select: { id: true, metricType: true, value: true, scale: true, verificationStatus: true },
+  },
+  evidences: {
+    select: {
+      id: true,
+      evidenceName: true,
+      criterion: true,
+      sourceType: true,
+      status: true,
+      indexingStatus: true,
+      confidence: true,
+      evidenceFiles: {
+        select: {
+          file: {
+            select: { id: true, originalName: true, mimeType: true, fileSize: true, createdAt: true },
+          },
+        },
+      },
+      evidenceCard: {
+        select: {
+          id: true,
+          aiSummary: true,
+          confidence: true,
+          ocrText: true,
+          extractedFieldsJson: true,
+          warningsJson: true,
+          matchedEventId: true,
+          matchedKnowledgeItemIds: true,
+        },
+      },
+    },
+    orderBy: { updatedAt: 'desc' },
+  },
+  reviewTasks: {
+    select: {
+      id: true,
+      criterion: true,
+      status: true,
+      decision: true,
+      officerNote: true,
+      officerSuggestedLevel: true,
+      levelAssessmentJson: true,
+      decisionReason: true,
+      assignedOfficer: { select: { id: true, fullName: true } },
+      evidences: { select: { evidenceId: true } },
+    },
+    orderBy: [{ criterion: 'asc' }, { updatedAt: 'desc' }],
+  },
+  finalizedBy: { select: { id: true, fullName: true } },
+  resolutionCases: {
+    select: {
+      id: true,
+      status: true,
+      reason: true,
+      committeeDecision: true,
+      evidenceId: true,
+      createdBy: true,
+      closedBy: true,
+      createdAt: true,
+      closedAt: true,
+    },
+    orderBy: { createdAt: 'desc' },
+  },
+  precheckResults: { orderBy: { createdAt: 'desc' }, take: 1 },
+  cascadeReviews: {
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+    select: { suggestedLevel: true, createdAt: true },
+  },
+} satisfies Prisma.ApplicationSelect;
+
+type ResultApplicationDetail = Prisma.ApplicationGetPayload<{ select: typeof resultDetailSelect }>;
+
+type ResultAggregationApplication = {
+  id: string;
+  targetLevel: Level;
+  status: ApplicationStatus;
+  finalStatus: FinalStatus;
+  finalLevel: Level | null;
+  finalizedAt: Date | null;
+  readinessScore: number;
+  student: ResultApplicationDetail['student'];
+  reviewTasks: Array<{ criterion: Criterion; status: ReviewTaskStatus }>;
+  resolutionCases: Array<{ status: ResolutionStatus }>;
+  precheckResults: ApplicationDetail['precheckResults'];
+  cascadeReviews: Array<{ suggestedLevel: Level | null }>;
+};
+
 export class ManagerService {
   constructor(
     private readonly emailOutboxService = new EmailOutboxService(),
@@ -121,6 +256,9 @@ export class ManagerService {
               { student: { studentCode: { contains: query.q, mode: 'insensitive' } } },
             ],
           }
+        : {}),
+      ...(usesCityResultsScope(user)
+        ? cityResultsApplicationWhere(query.schoolYear ?? cityPilotSchoolYear)
         : {}),
     };
     const skip = (query.page - 1) * query.limit;
@@ -418,10 +556,11 @@ export class ManagerService {
       }),
       prisma.application.findMany({
         where: applicationScope,
-        select: {
-          id: true,
-          targetLevel: true,
-          finalStatus: true,
+      select: {
+        id: true,
+        targetLevel: true,
+        finalLevel: true,
+        finalStatus: true,
           readinessScore: true,
           finalizedAt: true,
           updatedAt: true,
@@ -514,14 +653,18 @@ export class ManagerService {
 
   async listResults(user: AuthenticatedUser, query: ListManagerResultsQuery) {
     const where: Prisma.ApplicationWhereInput = {
-      ...buildResultsWhere(query),
+      ...buildResultsWhere(query, usesCityResultsScope(user)),
       ...reviewWorkspaceFilterFor(user),
+      ...(usesCityResultsScope(user)
+        ? cityResultsApplicationWhere(query.schoolYear ?? cityPilotSchoolYear)
+        : {}),
     };
     const allCandidates = await prisma.application.findMany({
       where,
       select: {
         id: true,
         targetLevel: true,
+        finalLevel: true,
         finalStatus: true,
         readinessScore: true,
         finalizedAt: true,
@@ -540,7 +683,13 @@ export class ManagerService {
     const pageIds = sortedCandidates.slice(skip, skip + query.pageSize).map((item) => item.id);
     const applications = pageIds.length
       ? await prisma.application.findMany({
-          where: { id: { in: pageIds }, ...reviewWorkspaceFilterFor(user) },
+          where: {
+            id: { in: pageIds },
+            ...reviewWorkspaceFilterFor(user),
+            ...(usesCityResultsScope(user)
+              ? cityResultsApplicationWhere(query.schoolYear ?? cityPilotSchoolYear)
+              : {}),
+          },
           include: {
             student: true,
             finalizedBy: true,
@@ -567,6 +716,7 @@ export class ManagerService {
 
     return {
       items: orderedApplications.map(toResultItem),
+      ...(usesCityResultsScope(user) ? { summary: summarizeCityResults(filteredCandidates) } : {}),
       pagination: {
         page: query.page,
         pageSize: query.pageSize,
@@ -585,7 +735,11 @@ export class ManagerService {
     const limit = query.limit;
     const now = new Date();
     const applications = await prisma.application.findMany({
-      where: { ...buildCommitteeInboxWhere(query), ...reviewWorkspaceFilterFor(user) },
+      where: {
+        ...buildCommitteeInboxWhere(query),
+        ...reviewWorkspaceFilterFor(user),
+        ...(usesCityResultsScope(user) ? cityResultsApplicationWhere(cityPilotSchoolYear) : {}),
+      },
       include: {
         student: true,
         finalizedBy: true,
@@ -643,29 +797,45 @@ export class ManagerService {
   async getResultDetail(user: AuthenticatedUser, applicationId: string) {
     const application = await prisma.application.findUnique({
       where: { id: applicationId },
-      include: applicationDetailInclude,
+      select: resultDetailSelect,
     });
     if (!application) {
       throw new AppError(404, ErrorCodes.APPLICATION_NOT_FOUND, 'Application not found');
     }
     assertReviewWorkspaceAccess(user, reviewResource(application), 'Application not found');
+    if (usesCityResultsScope(user) && !isCityOperationalApplication(application)) {
+      throw new AppError(404, ErrorCodes.NOT_FOUND, 'Application not found');
+    }
 
-    const auditTimeline = await prisma.auditLog.findMany({
-      where: { applicationId, ...reviewWorkspaceFilterFor(user) },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
     const aggregation = buildResultAggregation(application);
-
-    await createApplicationAudit(prisma, {
-      actorId: user.id,
-      actorRole: user.role,
-      action: 'MANAGER_RESULT_DETAIL_VIEWED',
-      targetType: 'application',
-      targetId: application.id,
-      applicationId: application.id,
-      afterStateJson: { status: application.status, finalStatus: application.finalStatus },
-    });
+    const [auditTimeline, viewAudit] = await Promise.all([
+      prisma.auditLog.findMany({
+        where: { applicationId, ...reviewWorkspaceFilterFor(user) },
+        select: {
+          id: true,
+          actorId: true,
+          actorRole: true,
+          action: true,
+          targetType: true,
+          targetId: true,
+          note: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+      createApplicationAudit(prisma, {
+        actorId: user.id,
+        actorRole: user.role,
+        action: 'MANAGER_RESULT_DETAIL_VIEWED',
+        targetType: 'application',
+        targetId: application.id,
+        applicationId: application.id,
+        workspaceId: application.workspaceId,
+        afterStateJson: { status: application.status, finalStatus: application.finalStatus },
+      }),
+    ]);
+    const evidenceById = new Map(application.evidences.map((evidence) => [evidence.id, evidence]));
 
     return {
       application: {
@@ -711,7 +881,7 @@ export class ManagerService {
         scale: metric.scale,
         verificationStatus: metric.verificationStatus,
       })),
-      reviewTasks: application.reviewTasks.map(toResultReviewTask),
+      reviewTasks: application.reviewTasks.map((task) => toResultReviewTask(task, evidenceById)),
       applicationEvidences: application.evidences.map(toResultEvidence),
       criterionSummary: buildCriterionSummary(application),
       latestPrecheck: application.precheckResults[0] ?? null,
@@ -727,7 +897,9 @@ export class ManagerService {
         createdAt: item.createdAt.toISOString(),
         updatedAt: (item.closedAt ?? item.createdAt).toISOString(),
       })),
-      auditTimeline: auditTimeline.map(toAuditTimelineItem),
+      auditTimeline: auditTimeline
+        .filter((item) => item.id !== viewAudit.id)
+        .map(toAuditTimelineItem),
       aggregation,
     };
   }
@@ -1538,7 +1710,7 @@ function isCityIndividualApplication(application: {
   );
 }
 
-export function buildAggregation(application: ApplicationDetail) {
+export function buildAggregation(application: ResultAggregationApplication) {
   const computed = computeAggregation(application);
   const reviewProgress = buildReviewProgress(application.reviewTasks.map((task) => task.status));
   const resolutionSummary = {
@@ -1588,7 +1760,7 @@ export function buildAggregation(application: ApplicationDetail) {
   };
 }
 
-function computeAggregation(application: ApplicationDetail) {
+function computeAggregation(application: Pick<ResultAggregationApplication, 'reviewTasks'>) {
   const acceptedCriteria = uniqueCriteria(
     application.reviewTasks
       .filter((task) => task.status === ReviewTaskStatus.accepted)
@@ -1816,7 +1988,58 @@ type CommitteeNextAction =
   | 'send_reminder'
   | 'reopen_final_result';
 
-function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWhereInput {
+function usesCityResultsScope(user: AuthenticatedUser): boolean {
+  return (
+    user.role === Role.city_manager || user.role === Role.city_committee || user.role === Role.admin
+  );
+}
+
+function cityResultsApplicationWhere(schoolYear: string): Prisma.ApplicationWhereInput {
+  return {
+    applicationType: ApplicationType.individual,
+    targetLevel: Level.city,
+    schoolYear,
+    workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+  };
+}
+
+function isCityOperationalApplication(
+  application: Pick<ApplicationDetail, 'applicationType' | 'targetLevel' | 'workspace'>,
+): boolean {
+  return (
+    application.applicationType === ApplicationType.individual &&
+    application.targetLevel === Level.city &&
+    application.workspace.type === WorkspaceType.SCHOOL &&
+    application.workspace.isActive
+  );
+}
+
+function summarizeCityResults(
+  applications: Array<{
+    finalLevel: Level | null;
+    finalStatus: FinalStatus;
+  }>,
+) {
+  return {
+    totalApplications: applications.length,
+    passedCity: applications.filter(
+      (application) =>
+        application.finalStatus === FinalStatus.passed && application.finalLevel === Level.city,
+    ).length,
+    notAchievedCity: applications.filter(
+      (application) =>
+        application.finalStatus !== FinalStatus.pending &&
+        !(application.finalStatus === FinalStatus.passed && application.finalLevel === Level.city),
+    ).length,
+    unfinalized: applications.filter((application) => application.finalStatus === FinalStatus.pending)
+      .length,
+  };
+}
+
+function buildResultsWhere(
+  query: ListManagerResultsQuery,
+  cityScope = false,
+): Prisma.ApplicationWhereInput {
   const and: Prisma.ApplicationWhereInput[] = [];
   if (query.workspaceId) and.push({ workspaceId: query.workspaceId });
   if (query.status) and.push({ status: query.status });
@@ -1824,11 +2047,31 @@ function buildResultsWhere(query: ListManagerResultsQuery): Prisma.ApplicationWh
   if (query.targetLevel) and.push({ targetLevel: query.targetLevel });
   if (query.finalLevel) and.push({ finalLevel: query.finalLevel });
   if (query.finalStatus) {
-    and.push(
-      query.finalStatus === FinalStatus.pending || query.finalStatus === 'unfinalized'
-        ? { OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }] }
-        : { finalStatus: query.finalStatus },
-    );
+    if (cityScope && query.finalStatus === FinalStatus.passed) {
+      and.push({ finalStatus: FinalStatus.passed, finalLevel: Level.city });
+    } else if (
+      cityScope &&
+      (query.finalStatus === FinalStatus.failed || query.finalStatus === FinalStatus.partially_passed)
+    ) {
+      and.push({
+        OR: [
+          { finalStatus: FinalStatus.failed },
+          { finalStatus: FinalStatus.partially_passed },
+          {
+            AND: [
+              { finalStatus: FinalStatus.passed },
+              { OR: [{ finalLevel: { not: Level.city } }, { finalLevel: null }] },
+            ],
+          },
+        ],
+      });
+    } else {
+      and.push(
+        query.finalStatus === FinalStatus.pending || query.finalStatus === 'unfinalized'
+          ? { OR: [{ finalStatus: FinalStatus.pending }, { finalizedAt: null }] }
+          : { finalStatus: query.finalStatus },
+      );
+    }
   }
   const lifecycleFilters = applicationLifecycleListFilters(query.lifecycle, query.archive);
   if ('cancelledAt' in lifecycleFilters) and.push({ cancelledAt: lifecycleFilters.cancelledAt });
@@ -2352,11 +2595,12 @@ function toResultItem(application: {
   };
 }
 
-type ResultEvidenceSource =
-  | ApplicationDetail['evidences'][number]
-  | ApplicationDetail['reviewTasks'][number]['evidences'][number]['evidence'];
+type ResultEvidenceSource = ResultApplicationDetail['evidences'][number];
 
-function toResultReviewTask(task: ApplicationDetail['reviewTasks'][number]) {
+function toResultReviewTask(
+  task: ResultApplicationDetail['reviewTasks'][number],
+  evidenceById: Map<string, ResultEvidenceSource>,
+) {
   return {
     id: task.id,
     criterion: task.criterion,
@@ -2369,7 +2613,10 @@ function toResultReviewTask(task: ApplicationDetail['reviewTasks'][number]) {
     assignedOfficer: task.assignedOfficer
       ? { id: task.assignedOfficer.id, fullName: task.assignedOfficer.fullName }
       : null,
-    evidences: task.evidences.map((link) => toResultEvidence(link.evidence)),
+    evidences: task.evidences
+      .map((link) => evidenceById.get(link.evidenceId))
+      .filter((evidence): evidence is ResultEvidenceSource => Boolean(evidence))
+      .map(toResultEvidence),
   };
 }
 
@@ -2404,7 +2651,9 @@ function toResultEvidence(evidence: ResultEvidenceSource) {
   };
 }
 
-function buildCriterionSummary(application: ApplicationDetail) {
+function buildCriterionSummary(
+  application: Pick<ResultApplicationDetail, 'applicationType' | 'targetLevel' | 'reviewTasks' | 'evidences'>,
+) {
   const criteria = criteriaForApplicationPresentation(application);
   return Object.fromEntries(
     criteria.map((criterion) => {
@@ -2452,7 +2701,7 @@ function buildCriterionSummaryText(
   return 'Tiêu chí đang chờ cán bộ xét duyệt.';
 }
 
-function buildResultAggregation(application: ApplicationDetail) {
+function buildResultAggregation(application: ResultAggregationApplication) {
   const aggregation = buildAggregation(application);
   const blockingIssues = [
     ...aggregation.blockingReasons.map((message) => ({

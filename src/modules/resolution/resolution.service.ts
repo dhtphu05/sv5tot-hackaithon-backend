@@ -17,7 +17,7 @@ import {
   type Prisma,
 } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-import { auditActions } from '../../shared/constants/application';
+import { auditActions, cityPilotSchoolYear } from '../../shared/constants/application';
 import { AppError } from '../../shared/errors/app-error';
 import { ErrorCodes } from '../../shared/errors/error-codes';
 import type { AuthenticatedUser } from '../../shared/types/auth';
@@ -577,11 +577,33 @@ async function buildListWhere(
       },
     });
   }
+  if (isCityReviewRole(user.role)) {
+    filters.push({
+      application: {
+        is: {
+          applicationType: ApplicationType.individual,
+          targetLevel: Level.city,
+          schoolYear: cityPilotSchoolYear,
+          workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+        },
+      },
+    });
+  }
   const statusFilter = statusWhere(query.status);
   if (statusFilter) filters.push(statusFilter);
   if (query.applicationId) filters.push({ applicationId: query.applicationId });
   if (query.evidenceId) filters.push({ evidenceId: query.evidenceId });
   if (query.criterion) filters.push({ evidence: { criterion: query.criterion } });
+  if (query.level || query.schoolYear) {
+    filters.push({
+      application: {
+        is: {
+          ...(query.level ? { targetLevel: query.level } : {}),
+          ...(query.schoolYear ? { schoolYear: query.schoolYear } : {}),
+        },
+      },
+    });
+  }
   if (query.q) {
     filters.push({
       OR: [

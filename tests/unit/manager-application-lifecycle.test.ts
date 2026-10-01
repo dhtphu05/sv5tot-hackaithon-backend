@@ -1,4 +1,11 @@
-import { ApplicationStatus, FinalStatus, Level, Role, WorkspaceType } from '@prisma/client';
+import {
+  ApplicationStatus,
+  ApplicationType,
+  FinalStatus,
+  Level,
+  Role,
+  WorkspaceType,
+} from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthenticatedUser } from '../../src/shared/types/auth';
 
@@ -39,6 +46,18 @@ const cityManager: AuthenticatedUser = {
     shortName: 'Da Nang',
     type: WorkspaceType.CITY,
   },
+};
+const cityCommittee: AuthenticatedUser = {
+  ...cityManager,
+  id: 'city-committee',
+  role: Role.city_committee,
+};
+const admin: AuthenticatedUser = {
+  ...cityManager,
+  id: 'admin',
+  role: Role.admin,
+  workspaceId: null,
+  workspace: null,
 };
 
 function resultDetail(overrides: Record<string, unknown> = {}) {
@@ -169,17 +188,198 @@ describe('manager application lifecycle APIs', () => {
     });
   });
 
+  it.each([
+    ['City Manager', cityManager],
+    ['City Committee', cityCommittee],
+    ['admin City results view', admin],
+  ] as const)(
+    '%s result list is restricted to active-school City individual applications',
+    async (_label, user) => {
+      const query = listManagerResultsQuerySchema.parse({ targetLevel: Level.school });
+      await new ManagerService().listResults(user, query);
+
+      expect(prismaMock.application.findMany.mock.calls[0][0].where).toMatchObject({
+        applicationType: ApplicationType.individual,
+        targetLevel: Level.city,
+        schoolYear: '2025-2026',
+        workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
+        AND: expect.arrayContaining([{ targetLevel: Level.school }]),
+      });
+    },
+  );
+
+  it('defaults City application lists and Committee inbox to the 2025-2026 season', async () => {
+    const query = listManagerApplicationsQuerySchema.parse({ page: '1' });
+    await new ManagerService().listApplications(cityManager, query);
+    expect(prismaMock.application.findMany.mock.calls[0][0].where).toMatchObject({
+      applicationType: ApplicationType.individual,
+      targetLevel: Level.city,
+      schoolYear: '2025-2026',
+    });
+
+    prismaMock.application.findMany.mockClear();
+    await new ManagerService().getCommitteeInbox(cityCommittee, {
+      page: 1,
+      limit: 20,
+      bucket: 'all',
+    } as never);
+    expect(prismaMock.application.findMany.mock.calls[0][0].where).toMatchObject({
+      applicationType: ApplicationType.individual,
+      targetLevel: Level.city,
+      schoolYear: '2025-2026',
+    });
+  });
+
+  it('returns accurate City result summary counts across all matching rows, not just the current page', async () => {
+    const now = new Date('2026-09-28T00:00:00.000Z');
+    prismaMock.application.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'passed-city',
+          targetLevel: Level.city,
+          finalLevel: Level.city,
+          finalStatus: FinalStatus.passed,
+          finalizedAt: now,
+          readinessScore: 100,
+          updatedAt: now,
+          submittedAt: now,
+          createdAt: now,
+          reviewTasks: [],
+          resolutionCases: [],
+          cascadeReviews: [],
+        },
+        {
+          id: 'partial',
+          targetLevel: Level.city,
+          finalLevel: null,
+          finalStatus: FinalStatus.partially_passed,
+          finalizedAt: now,
+          readinessScore: 80,
+          updatedAt: now,
+          submittedAt: now,
+          createdAt: now,
+          reviewTasks: [],
+          resolutionCases: [],
+          cascadeReviews: [],
+        },
+        {
+          id: 'city-result-partial-level',
+          targetLevel: Level.city,
+          finalLevel: Level.school,
+          finalStatus: FinalStatus.passed,
+          finalizedAt: now,
+          readinessScore: 80,
+          updatedAt: now,
+          submittedAt: now,
+          createdAt: now,
+          reviewTasks: [],
+          resolutionCases: [],
+          cascadeReviews: [],
+        },
+        {
+          id: 'failed',
+          targetLevel: Level.city,
+          finalLevel: null,
+          finalStatus: FinalStatus.failed,
+          finalizedAt: now,
+          readinessScore: 40,
+          updatedAt: now,
+          submittedAt: now,
+          createdAt: now,
+          reviewTasks: [],
+          resolutionCases: [],
+          cascadeReviews: [],
+        },
+        {
+          id: 'pending',
+          targetLevel: Level.city,
+          finalLevel: null,
+          finalStatus: FinalStatus.pending,
+          finalizedAt: null,
+          readinessScore: 60,
+          updatedAt: now,
+          submittedAt: now,
+          createdAt: now,
+          reviewTasks: [],
+          resolutionCases: [],
+          cascadeReviews: [],
+        },
+      ] as never)
+      .mockResolvedValueOnce([]);
+
+    const result = await new ManagerService().listResults(
+      cityManager,
+      listManagerResultsQuerySchema.parse({ pageSize: 1 }),
+    );
+
+    expect(result.pagination.total).toBe(5);
+    expect(result.items).toHaveLength(0);
+    expect(result.summary).toEqual({
+      totalApplications: 5,
+      passedCity: 1,
+      notAchievedCity: 3,
+      unfinalized: 1,
+    });
+  });
+
+  it('filters the City non-achieved bucket without exposing cascade levels', async () => {
+    prismaMock.application.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce([] as never);
+
+    await new ManagerService().listResults(
+      cityManager,
+      listManagerResultsQuerySchema.parse({ finalStatus: FinalStatus.failed }),
+    );
+
+    const [query] = prismaMock.application.findMany.mock.calls[0];
+    expect(query.where).toMatchObject({
+      AND: expect.arrayContaining([
+        {
+          OR: [
+            { finalStatus: FinalStatus.failed },
+            { finalStatus: FinalStatus.partially_passed },
+            {
+              AND: [
+                { finalStatus: FinalStatus.passed },
+                { OR: [{ finalLevel: { not: Level.city } }, { finalLevel: null }] },
+              ],
+            },
+          ],
+        },
+      ]),
+    });
+  });
+
+  it.each([cityManager, cityCommittee, admin])(
+    'does not expose non-City applications through the City result detail route for %s',
+    async (user) => {
+      prismaMock.application.findUnique.mockResolvedValueOnce(
+        resultDetail({ targetLevel: Level.school }) as never,
+      );
+
+      await expect(
+        new ManagerService().getResultDetail(user, 'application-1'),
+      ).rejects.toMatchObject({ statusCode: 404 });
+      expect(prismaMock.auditLog.create).not.toHaveBeenCalled();
+    },
+  );
+
   it('allows explicit all lifecycle and archive filters without dropping existing constraints', async () => {
     await new ManagerService().listResults(
       cityManager,
-      listManagerResultsQuerySchema.parse({ lifecycle: 'all', archive: 'all', schoolYear: '2025-2026' }),
+      listManagerResultsQuerySchema.parse({
+        lifecycle: 'all',
+        archive: 'all',
+        schoolYear: '2025-2026',
+      }),
     );
 
     expect(prismaMock.application.findMany.mock.calls[0][0].where).toMatchObject({
       workspace: { is: { type: WorkspaceType.SCHOOL, isActive: true } },
       AND: [{ schoolYear: '2025-2026' }],
     });
-    expect(prismaMock.application.findMany.mock.calls[0][0].where).not.toHaveProperty('cancelledAt');
+    expect(prismaMock.application.findMany.mock.calls[0][0].where).not.toHaveProperty(
+      'cancelledAt',
+    );
     expect(prismaMock.application.findMany.mock.calls[0][0].where).not.toHaveProperty('archivedAt');
   });
 
@@ -198,17 +398,15 @@ describe('manager application lifecycle APIs', () => {
       resolutionCases: [],
       cascadeReviews: [{ suggestedLevel: Level.city }],
     };
-    prismaMock.application.findMany
-      .mockResolvedValueOnce([candidate])
-      .mockResolvedValueOnce([
-        resultDetail({
-          finalStatus: FinalStatus.passed,
-          finalLevel: Level.city,
-          finalizedAt: now,
-          archivedAt: now,
-          archiveReason: 'Season closed',
-        }),
-      ]);
+    prismaMock.application.findMany.mockResolvedValueOnce([candidate]).mockResolvedValueOnce([
+      resultDetail({
+        finalStatus: FinalStatus.passed,
+        finalLevel: Level.city,
+        finalizedAt: now,
+        archivedAt: now,
+        archiveReason: 'Season closed',
+      }),
+    ]);
 
     const result = await new ManagerService().listResults(
       cityManager,
@@ -223,7 +421,7 @@ describe('manager application lifecycle APIs', () => {
       AND: expect.arrayContaining([
         { cancelledAt: null },
         { archivedAt: { not: null } },
-        { finalStatus: FinalStatus.passed },
+        { finalStatus: FinalStatus.passed, finalLevel: Level.city },
       ]),
     });
     expect(result.items[0]).toMatchObject({
@@ -282,9 +480,109 @@ describe('manager application lifecycle APIs', () => {
         supersedeReason: 'Cancelled for correction',
       }),
     ]);
-    expect(prismaMock.application.findUnique.mock.calls[0][0].include.finalDecisionHistory).toMatchObject({
+    expect(
+      prismaMock.application.findUnique.mock.calls[0][0].select.finalDecisionHistory,
+    ).toMatchObject({
       orderBy: { supersededAt: 'desc' },
     });
+  });
+
+  it('projects manager result detail to serialized fields and reuses application evidence for task links', async () => {
+    const createdAt = new Date('2026-09-28T00:00:00.000Z');
+    const evidence = {
+      id: 'evidence-1',
+      evidenceName: 'Transcript',
+      criterion: 'academic',
+      sourceType: 'upload',
+      status: 'pending',
+      indexingStatus: 'completed',
+      confidence: 0.9,
+      evidenceFiles: [{
+        evidenceId: 'evidence-1',
+        fileId: 'file-1',
+        file: { id: 'file-1', originalName: 'transcript.pdf', mimeType: 'application/pdf', fileSize: 123, createdAt },
+      }],
+      evidenceCard: {
+        id: 'card-1',
+        aiSummary: 'Transcript summary',
+        confidence: 0.9,
+        ocrText: 'OCR text',
+        extractedFieldsJson: { gpa: 3.5 },
+        warningsJson: null,
+        matchedEventId: null,
+        matchedKnowledgeItemIds: [],
+      },
+      event: { id: 'unused-event' },
+    };
+    prismaMock.application.findUnique.mockResolvedValueOnce(
+      resultDetail({
+        evidences: [evidence],
+        reviewTasks: [{
+          id: 'task-1',
+          criterion: 'academic',
+          status: 'accepted',
+          decision: 'accepted',
+          officerNote: 'Reviewed',
+          officerSuggestedLevel: Level.city,
+          levelAssessmentJson: null,
+          decisionReason: 'Meets criterion',
+          assignedOfficer: { id: 'officer-1', fullName: 'Officer One' },
+          evidences: [{ evidenceId: 'evidence-1' }],
+        }],
+      }) as never,
+    );
+
+    const result = await new ManagerService().getResultDetail(cityManager, 'application-1');
+
+    expect(result.applicationEvidences[0]).toMatchObject({
+      id: 'evidence-1',
+      files: [{ id: 'file-1', originalName: 'transcript.pdf' }],
+      evidenceCard: { ocrText: 'OCR text' },
+    });
+    expect(result.reviewTasks[0]?.evidences).toEqual(result.applicationEvidences);
+
+    const query = prismaMock.application.findUnique.mock.calls[0]?.[0] as {
+      select: Record<string, unknown>;
+    };
+    expect(query.select.student).toMatchObject({ select: { id: true, fullName: true, studentCode: true } });
+    expect(query.select.requirementResponses).toBeUndefined();
+    expect(query.select.evidences).toMatchObject({
+      select: {
+        evidenceFiles: { select: { file: { select: { id: true, originalName: true, mimeType: true, fileSize: true, createdAt: true } } } },
+        evidenceCard: { select: { id: true, aiSummary: true, confidence: true, ocrText: true, extractedFieldsJson: true, warningsJson: true, matchedEventId: true, matchedKnowledgeItemIds: true } },
+      },
+    });
+    expect((query.select.evidences as { select: Record<string, unknown> }).select.event).toBeUndefined();
+    expect(query.select.reviewTasks).toMatchObject({
+      select: { evidences: { select: { evidenceId: true } } },
+    });
+    expect(prismaMock.application.findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the audit timeline and writes the view audit concurrently after scope authorization', async () => {
+    let resolveTimeline!: (value: unknown[]) => void;
+    prismaMock.application.findUnique.mockResolvedValueOnce(resultDetail() as never);
+    prismaMock.auditLog.findMany.mockReturnValueOnce(
+      new Promise((resolve) => { resolveTimeline = resolve; }) as never,
+    );
+    prismaMock.auditLog.create.mockResolvedValueOnce({ id: 'current-view' } as never);
+
+    const pending = new ManagerService().getResultDetail(cityManager, 'application-1');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(prismaMock.auditLog.findMany).toHaveBeenCalledTimes(1);
+    expect(prismaMock.auditLog.create).toHaveBeenCalledTimes(1);
+    expect(prismaMock.auditLog.create.mock.calls[0]?.[0]).toMatchObject({
+      data: { workspaceId: schoolAId },
+    });
+
+    resolveTimeline([
+      { id: 'previous-view', actorId: cityManager.id, actorRole: cityManager.role, action: 'MANAGER_RESULT_DETAIL_VIEWED', targetType: 'application', targetId: 'application-1', note: null, createdAt: new Date('2026-09-27T00:00:00.000Z') },
+      { id: 'current-view', actorId: cityManager.id, actorRole: cityManager.role, action: 'MANAGER_RESULT_DETAIL_VIEWED', targetType: 'application', targetId: 'application-1', note: null, createdAt: new Date('2026-09-28T00:00:00.000Z') },
+    ]);
+    const result = await pending;
+    expect(result.auditTimeline.map((item) => item.id)).toEqual(['previous-view']);
   });
 
   it('keeps cross-school result detail hidden from legacy school managers', async () => {
@@ -300,7 +598,9 @@ describe('manager application lifecycle APIs', () => {
       },
     } as AuthenticatedUser;
 
-    await expect(new ManagerService().getResultDetail(legacyManager, 'application-1')).rejects.toMatchObject({
+    await expect(
+      new ManagerService().getResultDetail(legacyManager, 'application-1'),
+    ).rejects.toMatchObject({
       statusCode: 404,
     });
     expect(prismaMock.auditLog.create).not.toHaveBeenCalled();

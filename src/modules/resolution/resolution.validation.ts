@@ -1,5 +1,5 @@
 // Owns committee resolution cases and final dispute decisions validation.
-import { Criterion } from '@prisma/client';
+import { Criterion, Level } from '@prisma/client';
 import { z } from 'zod';
 
 export const resolutionStatusQuerySchema = z.enum([
@@ -24,6 +24,8 @@ export const resolutionFinalDecisionSchema = z.enum([
 export const listResolutionCasesQuerySchema = z.object({
   status: resolutionStatusQuerySchema.optional(),
   criterion: z.nativeEnum(Criterion).optional(),
+  level: z.nativeEnum(Level).optional(),
+  schoolYear: z.string().regex(/^\d{4}-\d{4}$/).optional(),
   priority: resolutionPrioritySchema.optional(),
   applicationId: z.string().uuid().optional(),
   evidenceId: z.string().uuid().optional(),
